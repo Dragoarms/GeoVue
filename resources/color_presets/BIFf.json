@@ -1,0 +1,47 @@
+{
+  "name": "BIFf",
+  "type": "categorical",
+  "description": "Colour map for BIFf classification from assays",
+  "default_color": [
+    200,
+    200,
+    200
+  ],
+  "null_color": [
+    255,
+    255,
+    255
+  ],
+  "colors": {
+    "BIFhm": [
+      0,
+      0,
+      255
+    ],
+    "High Confidence": [
+      255,
+      255,
+      0
+    ],
+    "Low Confidence": [
+      0,
+      128,
+      255
+    ],
+    "Mineralised": [
+      255,
+      0,
+      255
+    ],
+    "Other": [
+      0,
+      128,
+      128
+    ],
+    "Potential BID/Fs": [
+      0,
+      255,
+      255
+    ]
+  }
+}
