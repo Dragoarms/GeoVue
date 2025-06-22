@@ -234,8 +234,43 @@ class TranslationManager:
         
         result = (best_match, best_score) if best_match else None
         self._fuzzy_match_cache[cache_key] = result
-        
+
         return result
+    # ===================================================
+    def _match_placeholders(self, text: str, language: str) -> Optional[str]:
+        """Attempt to match text against translation keys containing placeholders.
+
+        This allows calls like ``translate("Download for Windows")`` to match a
+        translation key such as ``"Download for {system}"`` and substitute the
+        captured value back into the translated string.
+
+        Args:
+            text: The full text to match, including variable values.
+            language: The target language code.
+
+        Returns:
+            The formatted translation if a placeholder pattern matches, else
+            ``None``.
+        """
+        translations = self.translations.get(language, {})
+        for key, translation in translations.items():
+            placeholders = re.findall(r"{([^}]+)}", key)
+            if not placeholders:
+                continue
+
+            # Build regex pattern from key, converting placeholders to named groups
+            pattern = re.escape(key)
+            for name in placeholders:
+                pattern = pattern.replace(re.escape(f"{{{name}}}"), fr"(?P<{name}>.+)")
+            match = re.fullmatch(pattern, text)
+            if match:
+                try:
+                    return translation.format(**match.groupdict())
+                except Exception as e:
+                    logger.warning(f"Placeholder substitution failed for '{text}': {e}")
+                    return translation
+
+        return None
     # ===================================================
 
     def get_current_language(self):
@@ -403,6 +438,11 @@ class TranslationManager:
                 translated_text = translations[matched_key]
                 fuzzy_matched = True
                 logger.debug(f"Fuzzy matched '{text}' to '{matched_key}' (score: {score:.2f})")
+            else:
+                # Try matching against keys with placeholders
+                placeholder_result = self._match_placeholders(text, self.current_language)
+                if placeholder_result is not None:
+                    translated_text = placeholder_result
         
         # If still no translation found
         if translated_text is None:
