@@ -190,7 +190,11 @@ class CompartmentRegistrationDialog:
         
         # State tracking
         self.temp_point = None
-        
+    
+        # Cache for static visualization
+        self.static_viz_cache = None
+        self.static_viz_params = None  # To track when cache needs updating
+
         # Adjustment mode flags
         self.adjusting_top = False
         self.adjusting_bottom = False
@@ -1667,6 +1671,9 @@ class CompartmentRegistrationDialog:
         # Update mode indicator and buttons
         self._update_mode_indicator()
         
+        # Force full update to recreate static visualization for new mode
+        self._update_visualization(force_full_update=True)
+
         # Update continue button text based on new mode
         continue_text = self._get_continue_button_text()
         self.continue_button.set_text(continue_text)
@@ -2164,7 +2171,7 @@ class CompartmentRegistrationDialog:
                     self.result_boundaries[marker_id] = (x1, new_y1, x2, new_y2)
             
             # Update visualization
-            self._update_visualization()
+            self._update_visualization(force_full_update=True)
             
             # If there's an external callback for applying adjustments, call it
             if callable(self.on_apply_adjustments):
@@ -2385,8 +2392,9 @@ class CompartmentRegistrationDialog:
                         "All missing markers have been annotated. Click 'Continue to Adjustment' to proceed."
                     ))
                     
+                # Force full update when new boundary is added
                 # Update visualization and status
-                self._update_visualization()
+                self._update_visualization(force_full_update=True)
                 self._update_status_message()
                 
             elif self.current_mode == self.MODE_ADJUST_BOUNDARIES:
@@ -2410,41 +2418,60 @@ class CompartmentRegistrationDialog:
                 
             img_height, img_width = self.boundaries_viz.shape[:2]
             if not (0 <= image_x < img_width and 0 <= image_y < img_height):
+                # Hide zoom lens if cursor is outside image
+                if hasattr(self, '_zoom_lens') and self._zoom_lens:
+                    self._zoom_lens.withdraw()
+                if hasattr(self, '_zoom_lens_flipped') and self._zoom_lens_flipped:
+                    self._zoom_lens_flipped.withdraw()
+                self.temp_point = None
                 return
-                
-            # Store temp point for preview
+            
+            # Update temp point
+            old_temp_point = self.temp_point
             self.temp_point = (image_x, image_y)
             
-            # Determine if we need full update or fast update
-            need_full_update = (self.current_mode == self.MODE_MISSING_BOUNDARIES and 
-                            not self.annotation_complete and 
-                            self.temp_point is not None)
+            # Only update visualization if preview would change
+            if (self.current_mode == self.MODE_MISSING_BOUNDARIES and 
+                not self.annotation_complete and 
+                self.temp_point is not None):
+                
+                # Check if we actually need to update
+                if (self.missing_marker_ids and 
+                    self.current_index < len(self.missing_marker_ids)):
+                    current_id = self.missing_marker_ids[self.current_index]
+                    
+                    # For corner markers, we only need to update if Y changed significantly
+                    if current_id in [0, 1, 2, 3]:
+                        if old_temp_point and abs(old_temp_point[1] - self.temp_point[1]) < 5:
+                            # Y didn't change much, skip update
+                            pass
+                        else:
+                            self._update_visualization()
+                    # For compartment markers, check if X changed significantly
+                    elif old_temp_point and abs(old_temp_point[0] - self.temp_point[0]) < 5:
+                        # X didn't change much, skip update
+                        pass
+                    else:
+                        self._update_visualization()
             
-            # Update visualization once with appropriate mode
-            self._update_visualization(fast_mode=not need_full_update)
-            
-            # Show appropriate zoom lens based on mode
+            # Always update zoom lens (it's lightweight)
             if self.current_mode == self.MODE_METADATA:
                 if hasattr(self, '_zoom_lens') and self._zoom_lens:
-                    # Check if right button is pressed for flipped view
                     if event.state & 0x400:  # Right button mask
                         self._render_zoom(self.canvas, event, flipped=True)
                     else:
                         self._render_zoom(self.canvas, event)
             elif self.current_mode == self.MODE_MISSING_BOUNDARIES:
-                # Only show zoom lens for compartment markers, not corner markers
                 if hasattr(self, '_zoom_lens') and self._zoom_lens:
-                    # Check if we're placing a corner marker
                     if (self.missing_marker_ids and 
                         self.current_index < len(self.missing_marker_ids) and 
                         self.missing_marker_ids[self.current_index] not in [0, 1, 2, 3]):
                         self._render_zoom(self.canvas, event)
-            # No hover zoom in adjustment mode - it uses static zooms
-            
+                        
         except Exception as e:
             self.logger.error(f"Error handling canvas movement: {str(e)}")
-            # Don't print full traceback for mouse movements - would spam log
-            
+
+
     def _on_canvas_leave(self, event):
         """Handle mouse leaving the canvas."""
         try:
@@ -2693,632 +2720,237 @@ class CompartmentRegistrationDialog:
         except Exception as e:
             self.logger.error(f"Error in initial visualization update: {str(e)}")
 
-    def _update_visualization(self, fast_mode=False):
+    # OPTIMIZED: Only update dynamic elements, use cached static visualization
+    def _update_visualization(self, fast_mode=False, force_full_update=False):
         """
         Update the image visualization based on current mode and state.
         
         Args:
             fast_mode: If True, use faster updates for mouse motion (skips some elements)
+            force_full_update: If True, force recreation of static elements
         """
         if self.original_boundaries_viz is None:
             return
         
         try:
-            # ALWAYS start with the clean original image
-            viz_image = self.original_boundaries_viz.copy()
+            # Force cache invalidation if requested
+            if force_full_update:
+                self.static_viz_cache = None
             
-            # Get image dimensions
-            img_height, img_width = viz_image.shape[:2]
+            # Get or create static visualization
+            viz_image = self._create_static_visualization()
+            if viz_image is None:
+                return
             
-            # ===================================================
-            # REMOVE: Old marker drawing code
-            # REPLACE WITH: Enhanced marker visualization with scale lines
-            # ===================================================
-            if self.markers:
-                # Get scale data if available
-                scale_data = None
-                scale_px_per_cm = None
-                if hasattr(self, 'scale_data') and self.scale_data:
-                    scale_data = self.scale_data
-                    scale_px_per_cm = scale_data.get('scale_px_per_cm', None)
-                
-                # Draw each marker with scale measurement lines
-                for marker_id, corners in self.markers.items():
-                    # Convert corners to int
-                    corners_int = corners.astype(np.int32)
-                    
-                    # Find this marker in scale measurements if available
-                    marker_measurements = None
-                    if scale_data and 'marker_measurements' in scale_data:
-                        for measurement in scale_data['marker_measurements']:
-                            if measurement['marker_id'] == marker_id:
-                                marker_measurements = measurement
-                                break
-                    
-                    if marker_measurements and scale_px_per_cm:
-                        # We have scale data - draw edges based on individual validity
-                        edge_lengths = marker_measurements.get('edge_lengths', [])
-                        diagonal_lengths = marker_measurements.get('diagonal_lengths', [])
-                        scales = marker_measurements.get('scales', [])
-                        
-                        # Determine which measurements are valid
-                        # The scales array contains: [edge0, edge1, edge2, edge3, diag0, diag1]
-                        # We need to check each one individually
-                        physical_size = marker_measurements.get('physical_size_cm', 2.0)
-                        
-                        # Draw each edge with its validity color
-                        for i in range(4):  # 4 edges
-                            if i < len(edge_lengths) and i < len(scales):
-                                # Calculate expected length in pixels
-                                expected_px = physical_size * scale_px_per_cm
-                                actual_px = edge_lengths[i]
-                                
-                                # Check if this edge is within tolerance (5 pixels)
-                                tolerance_pixels = 5.0
-                                is_valid = abs(actual_px - expected_px) <= tolerance_pixels
-                                
-                                # Choose color based on validity
-                                edge_color = (0, 255, 0) if is_valid else (0, 0, 255)  # Green if valid, red if invalid
-                                
-                                # Draw the edge
-                                start_corner = i
-                                end_corner = (i + 1) % 4
-                                cv2.line(viz_image, tuple(corners_int[start_corner]), tuple(corners_int[end_corner]), edge_color, 2)
-                                
-                                # Show measurement on edge if not in fast mode
-                                if not fast_mode and scale_px_per_cm:
-                                    edge_center_x = (corners_int[start_corner][0] + corners_int[end_corner][0]) // 2
-                                    edge_center_y = (corners_int[start_corner][1] + corners_int[end_corner][1]) // 2
-                                    
-                                    # Offset text based on edge position
-                                    text_offset_x = 0
-                                    text_offset_y = -10 if i == 0 else 10 if i == 2 else 0
-                                    text_offset_x = -40 if i == 3 else 40 if i == 1 else 0
-                                    
-                                    # Format text
-                                    px_text = f"{actual_px:.0f}px"
-                                    cm_text = f"{actual_px/scale_px_per_cm:.1f}cm"
-                                    measurement_text = f"{px_text}"
-                                    
-                                    # Draw with background
-                                    text_size = cv2.getTextSize(measurement_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
-                                    cv2.rectangle(viz_image, 
-                                                (edge_center_x + text_offset_x - text_size[0]//2 - 2, 
-                                                 edge_center_y + text_offset_y - text_size[1] - 2),
-                                                (edge_center_x + text_offset_x + text_size[0]//2 + 2, 
-                                                 edge_center_y + text_offset_y + 2),
-                                                (0, 0, 0), -1)
-                                    cv2.putText(viz_image, measurement_text, 
-                                              (edge_center_x + text_offset_x - text_size[0]//2, 
-                                               edge_center_y + text_offset_y),
-                                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-                        
-                        # Draw diagonals if available
-                        if len(diagonal_lengths) >= 2 and len(scales) >= 6:
-                            # Diagonal 0: corner 0 to corner 2
-                            # Diagonal 1: corner 1 to corner 3
-                            diagonals = [(0, 2), (1, 3)]
-                            
-                            for i, (start, end) in enumerate(diagonals):
-                                if i < len(diagonal_lengths):
-                                    # Calculate expected diagonal length
-                                    expected_diag = physical_size * np.sqrt(2) * scale_px_per_cm
-                                    actual_diag = diagonal_lengths[i]
-                                    
-                                    # Check validity
-                                    tolerance_pixels = 5.0
-                                    is_valid = abs(actual_diag - expected_diag) / expected_diag < tolerance_pixels
-                                    
-                                    # Choose color
-                                    diag_color = (0, 255, 0) if is_valid else (0, 0, 255)
-                                    
-                                    # Draw diagonal with dashed line
-                                    # Create dashed line by drawing multiple small segments
-                                    start_pt = corners_int[start]
-                                    end_pt = corners_int[end]
-                                    
-                                    # Calculate line segments for dashed effect
-                                    num_dashes = 10
-                                    for j in range(0, num_dashes, 2):
-                                        t1 = j / num_dashes
-                                        t2 = min((j + 1) / num_dashes, 1.0)
-                                        pt1 = (int(start_pt[0] + t1 * (end_pt[0] - start_pt[0])),
-                                               int(start_pt[1] + t1 * (end_pt[1] - start_pt[1])))
-                                        pt2 = (int(start_pt[0] + t2 * (end_pt[0] - start_pt[0])),
-                                               int(start_pt[1] + t2 * (end_pt[1] - start_pt[1])))
-                                        cv2.line(viz_image, pt1, pt2, diag_color, 1)
-                        
-                        # Draw corner points
-                        for corner in corners_int:
-                            cv2.circle(viz_image, tuple(corner), 3, (255, 255, 255), -1)
-                            
-                    else:
-                        # No scale data - just draw the marker outline
-                        cv2.polylines(viz_image, [corners_int.reshape(-1, 1, 2)], True, (0, 255, 255), 2)
-                        
-                        # Draw corner points
-                        for corner in corners_int:
-                            cv2.circle(viz_image, tuple(corner), 3, (0, 255, 255), -1)
-            
-            # ===================================================
-            # INSERT: Add scale bar at bottom left
-            # ===================================================
-            if scale_px_per_cm and not fast_mode:
-                # Calculate scale bar dimensions
-                scale_bar_length_cm = 10  # 10cm scale bar
-                scale_bar_length_px = int(scale_bar_length_cm * scale_px_per_cm)
-                scale_bar_height = 20
-                margin = 20
-                
-                # Position at bottom left
-                bar_x = margin
-                bar_y = img_height - margin - scale_bar_height - 30  # Extra space for labels
-                
-                # Draw white background for scale bar area
-                bg_padding = 10
-                cv2.rectangle(viz_image,
-                            (bar_x - bg_padding, bar_y - 20 - bg_padding),
-                            (bar_x + scale_bar_length_px + bg_padding, bar_y + scale_bar_height + 30 + bg_padding),
-                            (255, 255, 255), -1)
-                
-                # Draw checkered scale bar (1cm segments)
-                for i in range(scale_bar_length_cm):
-                    segment_start = bar_x + int(i * scale_px_per_cm)
-                    segment_end = bar_x + int((i + 1) * scale_px_per_cm)
-                    
-                    # Alternate black and white
-                    color = (0, 0, 0) if i % 2 == 0 else (200, 200, 200)
-                    cv2.rectangle(viz_image,
-                                (segment_start, bar_y),
-                                (segment_end, bar_y + scale_bar_height),
-                                color, -1)
-                
-                # Draw border around scale bar
-                cv2.rectangle(viz_image,
-                            (bar_x, bar_y),
-                            (bar_x + scale_bar_length_px, bar_y + scale_bar_height),
-                            (0, 0, 0), 2)
-                
-                # Add labels
-                # "0cm" label
-                cv2.putText(viz_image, "0cm",
-                          (bar_x, bar_y + scale_bar_height + 20),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                
-                # "10cm" label
-                text_size = cv2.getTextSize("10cm", cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                cv2.putText(viz_image, "10cm",
-                          (bar_x + scale_bar_length_px - text_size[0], bar_y + scale_bar_height + 20),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
-                
-                # Scale info in the middle above the bar
-                if scale_data:
-                    confidence = scale_data.get('confidence', 0.0)
-                    scale_text = f"{scale_px_per_cm:.1f} px/cm ({confidence:.0%} confidence)"
-                else:
-                    scale_text = f"{scale_px_per_cm:.1f} px/cm"
-                
-                text_size = cv2.getTextSize(scale_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-                text_x = bar_x + (scale_bar_length_px - text_size[0]) // 2
-                cv2.putText(viz_image, scale_text,
-                          (text_x, bar_y - 5),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
-
-            # Draw top and bottom boundary lines with slope based on side offsets
-            left_top_y = self.top_y + self.left_height_offset
-            right_top_y = self.top_y + self.right_height_offset
-            
-            left_bottom_y = self.bottom_y + self.left_height_offset
-            right_bottom_y = self.bottom_y + self.right_height_offset
-            
-            # Draw top boundary line
-            cv2.line(viz_image, (0, left_top_y), (img_width, right_top_y), 
-                    (0, 255, 0), 2)  # Green line for top boundary
-            
-            # Draw bottom boundary line
-            cv2.line(viz_image, (0, left_bottom_y), (img_width, right_bottom_y), 
-                    (0, 255, 0), 2)  # Green line for bottom boundary
-            
-            # Calculate rotation angle based on the slope of the boundary lines
-            if img_width > 0:
-                dx = img_width
-                dy = right_top_y - left_top_y
-                rotation_angle = -np.arctan2(dy, dx) * 180 / np.pi
-            else:
-                rotation_angle = 0
-            
-            # Calculate slopes for top and bottom boundary (used for compartment positioning)
-            if img_width > 0:
-                top_slope = (right_top_y - left_top_y) / img_width
-                bottom_slope = (right_bottom_y - left_bottom_y) / img_width
-            else:
-                top_slope = 0
-                bottom_slope = 0
-            
-            # ALWAYS draw detected compartment boundaries
-            for i, (x1, _, x2, _) in enumerate(self.detected_boundaries):
-                # Calculate center position of compartment
-                center_x = (x1 + x2) / 2
-                
-                # Calculate y position at center_x using slope of boundary lines
-                center_top_y = int(left_top_y + (top_slope * center_x))
-                center_bottom_y = int(left_bottom_y + (bottom_slope * center_x))
-                
-                # Calculate center of rectangle
-                rect_center_x = center_x
-                rect_center_y = (center_top_y + center_bottom_y) / 2
-                
-                # Calculate rectangle width and height
-                rect_width = x2 - x1
-                rect_height = center_bottom_y - center_top_y
-                
-                # Create rotated rectangle points - using rotation around center
-                # Create a rotation matrix
-                rotation_matrix = cv2.getRotationMatrix2D((rect_center_x, rect_center_y), rotation_angle, 1.0)
-                
-                # Define the four corners of the rectangle (before rotation)
-                rect_corners = np.array([
-                    [x1, center_top_y],               # Top-left
-                    [x2, center_top_y],               # Top-right
-                    [x2, center_bottom_y],            # Bottom-right
-                    [x1, center_bottom_y]             # Bottom-left
-                ], dtype=np.float32)
-                
-                # Apply rotation to each corner
-                ones = np.ones(shape=(len(rect_corners), 1))
-                rect_corners_homog = np.hstack([rect_corners, ones])
-                rotated_corners = np.dot(rotation_matrix, rect_corners_homog.T).T
-                
-                # Convert to integer points for drawing
-                rotated_corners = rotated_corners.astype(np.int32)
-                
-                # Draw the rotated rectangle
-                cv2.polylines(viz_image, [rotated_corners], True, (0, 255, 0), 2)  # green, thicker
-                
-                # Add compartment depth label using marker_to_compartment mapping
-                # Find the corresponding marker if available
-                mid_x = center_x
-                mid_y = rect_center_y
-                
-                # Find the nearest marker below this compartment boundary
-                nearest_marker_id = None
-                nearest_distance = float('inf')
-                
-                
-                for marker_id, corners in self.markers.items():
-                    if marker_id in self.config.get('compartment_marker_ids', range(4, 24)):
-                        marker_center_x = int(np.mean(corners[:, 0]))
-                        marker_center_y = int(np.mean(corners[:, 1]))
-                        
-                        # Check if marker is roughly below this compartment
-                        if abs(marker_center_x - mid_x) < (x2 - x1) // 2:
-                            # Calculate vertical distance
-                            vertical_dist = abs(marker_center_y - center_bottom_y)
-                            if vertical_dist < nearest_distance:
-                                nearest_distance = vertical_dist
-                                nearest_marker_id = marker_id
-            
-                # If found a marker, label the compartment using marker_to_compartment mapping
-                if nearest_marker_id is not None and hasattr(self, 'marker_to_compartment'):
-                    # Get the depth from the mapping
-                    depth_label = self.marker_to_compartment.get(nearest_marker_id, nearest_marker_id - 3)
-                    
-                    # Add background for better visibility
-                    text_size = cv2.getTextSize(f"{depth_label}m", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
-                    cv2.rectangle(viz_image, 
-                                (int(mid_x) - text_size[0]//2 - 5, int(mid_y) - text_size[1]//2 - 5),
-                                (int(mid_x) + text_size[0]//2 + 5, int(mid_y) + text_size[1]//2 + 5),
-                                (0, 0, 0), -1)  # Black background
-                    
-                    # Draw compartment depth
-                    cv2.putText(viz_image, f"{depth_label}m", 
-                            (int(mid_x) - text_size[0]//2, int(mid_y) + text_size[1]//2), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 165, 0), 2)
-            
-            # Draw manually placed boundaries with special color (yellow)
-            for comp_id, boundary in self.result_boundaries.items():
-                # Check if this is a corner marker
-                if comp_id in [0, 1, 2, 3]:
-                    # For corner markers, the boundary is a 4-point array (corners)
-                    if isinstance(boundary, np.ndarray) and boundary.shape[0] == 4:
-                        # Choose color based on corner type
-                        corner_colors = {
-                            0: (255, 0, 0),    # Blue for top-left
-                            1: (0, 255, 0),    # Green for top-right
-                            2: (0, 255, 255),  # Yellow for bottom-right
-                            3: (255, 255, 0)   # Cyan for bottom-left
-                        }
-                        marker_color = corner_colors.get(comp_id, (255, 0, 255))
-                        
-                        # Draw polygon connecting the corners
-                        corners = boundary.astype(np.int32)
-                        cv2.polylines(viz_image, [corners], True, marker_color, 3)  # Thicker outline
-                        
-                        # Mark center with a circle
-                        center_x = int(np.mean(corners[:, 0]))
-                        center_y = int(np.mean(corners[:, 1]))
-                        cv2.circle(viz_image, (center_x, center_y), 8, marker_color, -1)
-                        
-                        # Add marker ID text
-                        corner_names = {0: "0 (TL)", 1: "1 (TR)", 2: "2 (BR)", 3: "3 (BL)"}
-                        cv2.putText(viz_image, corner_names[comp_id], (center_x - 20, center_y - 15), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, marker_color, 2)
-                                
-                # Check if this is a metadata marker (ID 24)
-                elif comp_id == 24:
-                    # For metadata marker, the boundary is a 4-point array (corners)
-                    if isinstance(boundary, np.ndarray) and boundary.shape[0] == 4:
-                        # Draw polygon connecting the corners
-                        corners = boundary.astype(np.int32)
-                        cv2.polylines(viz_image, [corners], True, (255, 0, 255), 2)  # Purple outline
-                        
-                        # Mark center with a circle
-                        center_x = int(np.mean(corners[:, 0]))
-                        center_y = int(np.mean(corners[:, 1]))
-                        cv2.circle(viz_image, (center_x, center_y), 5, (255, 0, 255), -1)
-                        
-                        # Add marker ID text
-                        cv2.putText(viz_image, "24", (center_x, center_y - 10), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
-                        
-                        # Draw the OCR extraction regions
-                        # Horizontal range
-                        region_x1 = max(0, center_x - 130)
-                        region_x2 = min(img_width - 1, center_x + 130)
-                        
-                        # Hole ID region (above marker)
-                        hole_id_region_y1 = max(0, center_y - 130)
-                        hole_id_region_y2 = max(0, center_y - 20)
-                        cv2.rectangle(viz_image, 
-                                    (region_x1, hole_id_region_y1), 
-                                    (region_x2, hole_id_region_y2), 
-                                    (255, 0, 0), 2)  # Blue for hole ID
-                        
-                        # Add "Hole ID Region" label
-                        cv2.putText(viz_image, 
-                                "Hole ID", 
-                                (region_x1 + 10, hole_id_region_y1 + 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-                        
-                        # Depth region (below marker)
-                        depth_region_y1 = min(img_height - 1, center_y + 20)
-                        depth_region_y2 = min(img_height - 1, center_y + 150)
-                        cv2.rectangle(viz_image, 
-                                    (region_x1, depth_region_y1), 
-                                    (region_x2, depth_region_y2), 
-                                    (0, 255, 0), 2)  # Green for depth
-                        
-                        # Add "Depth Region" label
-                        cv2.putText(viz_image, 
-                                "Depth", 
-                                (region_x1 + 10, depth_region_y1 + 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                else:
-                    # For compartment boundaries (rectangular)
-                    if isinstance(boundary, tuple) and len(boundary) == 4:
-                        x1, y1, x2, y2 = boundary
-                        
-                        # Calculate center position of compartment
-                        center_x = (x1 + x2) / 2
-                        center_y = (y1 + y2) / 2
-                        
-                        # Calculate rectangle width and height
-                        rect_width = x2 - x1
-                        rect_height = y2 - y1
-                        
-                        # Create rotated rectangle points - using rotation around center
-                        # Create a rotation matrix
-                        rotation_matrix = cv2.getRotationMatrix2D((center_x, center_y), rotation_angle, 1.0)
-                        
-                        # Define the four corners of the rectangle (before rotation)
-                        rect_corners = np.array([
-                            [x1, y1],  # Top-left
-                            [x2, y1],  # Top-right
-                            [x2, y2],  # Bottom-right
-                            [x1, y2]   # Bottom-left
-                        ], dtype=np.float32)
-                        
-                        # Apply rotation to each corner
-                        ones = np.ones(shape=(len(rect_corners), 1))
-                        rect_corners_homog = np.hstack([rect_corners, ones])
-                        rotated_corners = np.dot(rotation_matrix, rect_corners_homog.T).T
-                        
-                        # Convert to integer points for drawing
-                        rotated_corners = rotated_corners.astype(np.int32)
-                        
-                        # Draw the rotated rectangle
-                        cv2.polylines(viz_image, [rotated_corners], True, (0, 255, 255), 2)  # Yellow outline
-                        
-                        # Add compartment depth using marker_to_compartment mapping
-                        depth_label = self.marker_to_compartment.get(comp_id, comp_id - 3)
-                        mid_x = center_x
-                        mid_y = center_y
-                        
-                        # Add text with background for better visibility
-                        text_size = cv2.getTextSize(f"{depth_label}m", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
-                        cv2.rectangle(viz_image, 
-                                    (int(mid_x) - text_size[0]//2 - 5, int(mid_y) - text_size[1]//2 - 5),
-                                    (int(mid_x) + text_size[0]//2 + 5, int(mid_y) + text_size[1]//2 + 5),
-                                    (0, 0, 0), -1)  # Black background
-                        
-                        cv2.putText(viz_image, f"{depth_label}m", 
-                                    (int(mid_x) - text_size[0]//2, int(mid_y) + text_size[1]//2), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
-            
-            # Draw temporary preview for placement mode
-            if self.current_mode == self.MODE_MISSING_BOUNDARIES and self.temp_point:
+            # Only add dynamic elements (temp_point preview) if needed
+            if self.current_mode == self.MODE_MISSING_BOUNDARIES and self.temp_point and not fast_mode:
                 if self.missing_marker_ids and self.current_index < len(self.missing_marker_ids) and not self.annotation_complete:
-                    x = self.temp_point[0]
-                    current_id = self.missing_marker_ids[self.current_index]
-                    
-                    # Check if current marker is a corner marker
-                    if current_id in [0, 1, 2, 3]:
-                        # Draw a horizontal line across the entire image width
-                        line_y = self.temp_point[1]
-                        
-                        # Choose color based on corner type
-                        if current_id in [0, 1]:  # Top corners
-                            line_color = (0, 255, 0)  # Green for top
-                            constraint_text = "TOP CONSTRAINT"
-                        else:  # Bottom corners (2, 3)
-                            line_color = (0, 0, 255)  # Red for bottom
-                            constraint_text = "BOTTOM CONSTRAINT"
-                        
-                        # Draw the horizontal line across entire width
-                        cv2.line(viz_image, (0, line_y), (img_width - 1, line_y), line_color, 2)
-                        
-                        # Add text label in the center
-                        text_size = cv2.getTextSize(constraint_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
-                        text_x = (img_width - text_size[0]) // 2
-                        
-                        # Add background for text
-                        cv2.rectangle(viz_image, 
-                                    (text_x - 10, line_y - text_size[1] - 5),
-                                    (text_x + text_size[0] + 10, line_y + 5),
-                                    (0, 0, 0), -1)
-                        
-                        # Draw the text
-                        cv2.putText(viz_image, constraint_text, 
-                                (text_x, line_y - 2),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, line_color, 2)
-                                
-                    # Check if current marker is the metadata marker (ID 24)
-                    elif current_id == 24:
-                        # Draw a square marker preview
-                        marker_size = 20  # Size in pixels
-                        half_size = marker_size // 2
-                        
-                        # Calculate center point for the preview
-                        center_x = x
-                        center_y = self.temp_point[1]
-                        
-                        # Draw preview square
-                        cv2.rectangle(viz_image, 
-                                    (center_x - half_size, center_y - half_size),
-                                    (center_x + half_size, center_y + half_size),
-                                    (255, 0, 255), 2)  # Purple outline
-                        
-                        # Draw center point
-                        cv2.circle(viz_image, (center_x, center_y), 5, (255, 0, 255), -1)
-                        
-                        # Add text
-                        cv2.putText(viz_image, "24", (center_x, center_y - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
-                        
-                        # Draw the OCR extraction regions as preview
-                        # Horizontal range
-                        region_x1 = max(0, center_x - 130)
-                        region_x2 = min(img_width - 1, center_x + 130)
-                        
-                        # Hole ID region (above marker)
-                        hole_id_region_y1 = max(0, center_y - 130)
-                        hole_id_region_y2 = max(0, center_y - 20)
-                        cv2.rectangle(viz_image, 
-                                    (region_x1, hole_id_region_y1), 
-                                    (region_x2, hole_id_region_y2), 
-                                    (255, 0, 0), 2)  # Blue for hole ID
-                        
-                        # Add "Hole ID Region" label
-                        cv2.putText(viz_image, 
-                                "Hole ID", 
-                                (region_x1 + 10, hole_id_region_y1 + 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-                        
-                        # Depth region (below marker)
-                        depth_region_y1 = min(img_height - 1, center_y + 20)
-                        depth_region_y2 = min(img_height - 1, center_y + 150)
-                        cv2.rectangle(viz_image, 
-                                    (region_x1, depth_region_y1), 
-                                    (region_x2, depth_region_y2), 
-                                    (0, 255, 0), 2)  # Green for depth
-                        
-                        # Add "Depth Region" label
-                        cv2.putText(viz_image, 
-                                "Depth", 
-                                (region_x1 + 10, depth_region_y1 + 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    else:
-                        # Calculate the compartment boundaries for preview
-                        half_width = self.avg_width // 2
-                        x1 = max(0, x - half_width)
-                        x2 = min(img_width - 1, x + half_width)
-                        would_overlap = self._would_overlap_existing(x)
-                        preview_color = (0, 0, 255) if would_overlap else (255, 0, 255)  # Red if overlap, magenta if OK
-                        
-                        # Calculate y position at center_x using slope of boundary lines
-                        center_x = (x1 + x2) / 2                        
-                        
-                        # Calculate y position at center_x using slope of boundary lines
-                        center_x = (x1 + x2) / 2
-                        
-                        # Calculate y-coordinates based on x-position using boundary lines
-                        center_top_y = int(left_top_y + (top_slope * center_x))
-                        center_bottom_y = int(left_bottom_y + (bottom_slope * center_x))
-                        
-                        # Calculate center of rectangle
-                        rect_center_x = center_x
-                        rect_center_y = (center_top_y + center_bottom_y) / 2
-                        
-                        # Preview color - magenta
-                        preview_color = (255, 0, 255)  # Magenta in BGR
-                        
-                        # Create rotated rectangle points for preview
-                        # Define the four corners of the rectangle (before rotation)
-                        rect_corners = np.array([
-                            [x1, center_top_y],               # Top-left
-                            [x2, center_top_y],               # Top-right
-                            [x2, center_bottom_y],            # Bottom-right
-                            [x1, center_bottom_y]             # Bottom-left
-                        ], dtype=np.float32)
-                        
-                        # Apply same rotation as other compartments
-                        rotation_matrix = cv2.getRotationMatrix2D((rect_center_x, rect_center_y), rotation_angle, 1.0)
-                        ones = np.ones(shape=(len(rect_corners), 1))
-                        rect_corners_homog = np.hstack([rect_corners, ones])
-                        rotated_corners = np.dot(rotation_matrix, rect_corners_homog.T).T
-                        
-                        # Convert to integer points for drawing
-                        rotated_corners = rotated_corners.astype(np.int32)
-                        
-                        # Draw the rotated rectangle preview
-                        cv2.polylines(viz_image, [rotated_corners], True, preview_color, 2)  # Thicker border
-                        
-                        # Add current compartment depth with better visibility
-                        if self.current_index < len(self.missing_marker_ids):
-                            current_id = self.missing_marker_ids[self.current_index]
-                            # Use marker_to_compartment mapping for correct compartment number
-                            depth_label = self.marker_to_compartment.get(current_id, current_id - 3)
-                            
-                            mid_x = rect_center_x
-                            mid_y = rect_center_y
-
-                            if would_overlap:
-                                # Add warning text
-                                warning_text = "OVERLAP!"
-                                warning_size = cv2.getTextSize(warning_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
-                                cv2.rectangle(viz_image, 
-                                            (int(mid_x) - warning_size[0]//2 - 5, int(mid_y) - 30 - warning_size[1]),
-                                            (int(mid_x) + warning_size[0]//2 + 5, int(mid_y) - 20),
-                                            (0, 0, 0), -1)  # Black background
-                                cv2.putText(viz_image, warning_text, 
-                                            (int(mid_x) - warning_size[0]//2, int(mid_y) - 25), 
-                                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)  # Red text                            
-                            
-                            # Add black background for text visibility
-                            text_size = cv2.getTextSize(f"{depth_label}m", cv2.FONT_HERSHEY_SIMPLEX, 1.5, 3)[0]
-                            cv2.rectangle(viz_image, 
-                                        (int(mid_x) - text_size[0]//2 - 5, int(mid_y) - text_size[1]//2 - 5),
-                                        (int(mid_x) + text_size[0]//2 + 5, int(mid_y) + text_size[1]//2 + 5),
-                                        (0, 0, 0), -1)  # Black background
-                            
-                            # Draw larger text with thicker outline
-                            cv2.putText(viz_image, f"{depth_label}m", (int(mid_x) - text_size[0]//2, int(mid_y) + text_size[1]//2), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, preview_color, 3)
+                    # Add the preview overlay on top of static visualization
+                    self._add_preview_overlay(viz_image)
             
             # Update instruction label based on current mode
             if hasattr(self, 'instruction_label'):
                 self.instruction_label.config(text=self._get_instruction_text())
             
+            # Display the visualization
+            self._display_visualization(viz_image)
+                
+        except Exception as e:
+            self.logger.error(f"Error updating visualization: {str(e)}")
+            self.logger.error(traceback.format_exc())
+    
+    def _add_preview_overlay(self, viz_image):
+        """Add the dynamic preview overlay to the visualization."""
+        if not self.temp_point or not self.missing_marker_ids or self.current_index >= len(self.missing_marker_ids):
+            return
+            
+        img_height, img_width = viz_image.shape[:2]
+        x = self.temp_point[0]
+        current_id = self.missing_marker_ids[self.current_index]
+        
+        # Calculate boundary line positions
+        left_top_y = self.top_y + self.left_height_offset
+        right_top_y = self.top_y + self.right_height_offset
+        left_bottom_y = self.bottom_y + self.left_height_offset
+        right_bottom_y = self.bottom_y + self.right_height_offset
+        
+        # Calculate slopes
+        if img_width > 0:
+            top_slope = (right_top_y - left_top_y) / img_width
+            bottom_slope = (right_bottom_y - left_bottom_y) / img_width
+        else:
+            top_slope = 0
+            bottom_slope = 0
+            
+        # Calculate rotation angle
+        if img_width > 0:
+            dx = img_width
+            dy = right_top_y - left_top_y
+            rotation_angle = -np.arctan2(dy, dx) * 180 / np.pi
+        else:
+            rotation_angle = 0
+        
+        # Check if current marker is a corner marker
+        if current_id in [0, 1, 2, 3]:
+            # Draw a horizontal line across the entire image width
+            line_y = self.temp_point[1]
+            
+            # Choose color based on corner type
+            if current_id in [0, 1]:  # Top corners
+                line_color = (0, 255, 0)  # Green for top
+                constraint_text = "TOP CONSTRAINT"
+            else:  # Bottom corners (2, 3)
+                line_color = (0, 0, 255)  # Red for bottom
+                constraint_text = "BOTTOM CONSTRAINT"
+            
+            # Draw the horizontal line across entire width
+            cv2.line(viz_image, (0, line_y), (img_width - 1, line_y), line_color, 2)
+            
+            # Add text label in the center
+            text_size = cv2.getTextSize(constraint_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+            text_x = (img_width - text_size[0]) // 2
+            
+            # Add background for text
+            cv2.rectangle(viz_image, 
+                        (text_x - 10, line_y - text_size[1] - 5),
+                        (text_x + text_size[0] + 10, line_y + 5),
+                        (0, 0, 0), -1)
+            
+            # Draw the text
+            cv2.putText(viz_image, constraint_text, 
+                    (text_x, line_y - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, line_color, 2)
+                    
+        elif current_id == 24:  # Metadata marker
+            # Draw a square marker preview
+            marker_size = 20  # Size in pixels
+            half_size = marker_size // 2
+            
+            # Calculate center point for the preview
+            center_x = x
+            center_y = self.temp_point[1]
+            
+            # Draw preview square
+            cv2.rectangle(viz_image, 
+                        (center_x - half_size, center_y - half_size),
+                        (center_x + half_size, center_y + half_size),
+                        (255, 0, 255), 2)  # Purple outline
+            
+            # Draw center point
+            cv2.circle(viz_image, (center_x, center_y), 5, (255, 0, 255), -1)
+            
+            # Add text
+            cv2.putText(viz_image, "24", (center_x, center_y - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
+            
+            # Draw the OCR extraction regions as preview
+            # Horizontal range
+            region_x1 = max(0, center_x - 130)
+            region_x2 = min(img_width - 1, center_x + 130)
+            
+            # Hole ID region (above marker)
+            hole_id_region_y1 = max(0, center_y - 130)
+            hole_id_region_y2 = max(0, center_y - 20)
+            cv2.rectangle(viz_image, 
+                        (region_x1, hole_id_region_y1), 
+                        (region_x2, hole_id_region_y2), 
+                        (255, 0, 0), 2)  # Blue for hole ID
+            
+            # Add "Hole ID Region" label
+            cv2.putText(viz_image, 
+                    "Hole ID", 
+                    (region_x1 + 10, hole_id_region_y1 + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+            
+            # Depth region (below marker)
+            depth_region_y1 = min(img_height - 1, center_y + 20)
+            depth_region_y2 = min(img_height - 1, center_y + 150)
+            cv2.rectangle(viz_image, 
+                        (region_x1, depth_region_y1), 
+                        (region_x2, depth_region_y2), 
+                        (0, 255, 0), 2)  # Green for depth
+            
+            # Add "Depth Region" label
+            cv2.putText(viz_image, 
+                    "Depth", 
+                    (region_x1 + 10, depth_region_y1 + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        else:  # Compartment marker
+            # Calculate the compartment boundaries for preview
+            half_width = self.avg_width // 2
+            x1 = max(0, x - half_width)
+            x2 = min(img_width - 1, x + half_width)
+            would_overlap = self._would_overlap_existing(x)
+            
+            # Calculate y position at center_x using slope of boundary lines
+            center_x = (x1 + x2) / 2
+            
+            # Calculate y-coordinates based on x-position using boundary lines
+            center_top_y = int(left_top_y + (top_slope * center_x))
+            center_bottom_y = int(left_bottom_y + (bottom_slope * center_x))
+            
+            # Calculate center of rectangle
+            rect_center_x = center_x
+            rect_center_y = (center_top_y + center_bottom_y) / 2
+            
+            # Preview color - magenta
+            preview_color = (255, 0, 255)  # Magenta in BGR
+            
+            # Create rotated rectangle points for preview
+            rect_corners = np.array([
+                [x1, center_top_y],
+                [x2, center_top_y],
+                [x2, center_bottom_y],
+                [x1, center_bottom_y]
+            ], dtype=np.float32)
+            
+            # Apply same rotation as other compartments
+            rotation_matrix = cv2.getRotationMatrix2D((rect_center_x, rect_center_y), rotation_angle, 1.0)
+            ones = np.ones(shape=(len(rect_corners), 1))
+            rect_corners_homog = np.hstack([rect_corners, ones])
+            rotated_corners = np.dot(rotation_matrix, rect_corners_homog.T).T
+            
+            # Convert to integer points for drawing
+            rotated_corners = rotated_corners.astype(np.int32)
+            
+            # Draw the rotated rectangle preview
+            cv2.polylines(viz_image, [rotated_corners], True, preview_color, 2)
+            
+            # Add current compartment depth with better visibility
+            if self.current_index < len(self.missing_marker_ids):
+                current_id = self.missing_marker_ids[self.current_index]
+                depth_label = self.marker_to_compartment.get(current_id, current_id - 3)
+                
+                mid_x = rect_center_x
+                mid_y = rect_center_y
+
+                if would_overlap:
+                    # Add warning text
+                    warning_text = "OVERLAP!"
+                    warning_size = cv2.getTextSize(warning_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+                    cv2.rectangle(viz_image, 
+                                (int(mid_x) - warning_size[0]//2 - 5, int(mid_y) - 30 - warning_size[1]),
+                                (int(mid_x) + warning_size[0]//2 + 5, int(mid_y) - 20),
+                                (0, 0, 0), -1)
+                    cv2.putText(viz_image, warning_text, 
+                                (int(mid_x) - warning_size[0]//2, int(mid_y) - 25), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                
+                # Add black background for text visibility
+                text_size = cv2.getTextSize(f"{depth_label}m", cv2.FONT_HERSHEY_SIMPLEX, 1.5, 3)[0]
+                cv2.rectangle(viz_image, 
+                            (int(mid_x) - text_size[0]//2 - 5, int(mid_y) - text_size[1]//2 - 5),
+                            (int(mid_x) + text_size[0]//2 + 5, int(mid_y) + text_size[1]//2 + 5),
+                            (0, 0, 0), -1)
+                
+                # Draw larger text with thicker outline
+                cv2.putText(viz_image, f"{depth_label}m", 
+                            (int(mid_x) - text_size[0]//2, int(mid_y) + text_size[1]//2), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, preview_color, 3)
+    
+    def _display_visualization(self, viz_image):
+        """Display the visualization image on the canvas without recreating it."""
+        try:
             # Convert to RGB for PIL
             viz_rgb = cv2.cvtColor(viz_image, cv2.COLOR_BGR2RGB)
             
@@ -3331,51 +2963,39 @@ class CompartmentRegistrationDialog:
             
             # If canvas not yet drawn, use reasonable defaults
             if canvas_width <= 1 or canvas_height <= 1:
-                # Use a reasonable default size
                 canvas_width = 800
                 canvas_height = 600
             
-            # Calculate scaling to maintain aspect ratio but fit vertically
+            # Calculate scaling
             img_width, img_height = pil_image.size
-            
-            # Calculate scale based on canvas width, height with padding
             scale_width = (canvas_width - 20) / img_width
             scale_height = (canvas_height - 20) / img_height
-            
-            # Use the smaller scale to ensure the image fits within the canvas
             scale = min(scale_width, scale_height)
             
-            # Ensure the image is displayed at a reasonable size
-            if scale > 2.0:  # Limit maximum scale
+            if scale > 2.0:
                 scale = 2.0
             
-            
-            # Calculate new image dimensions
+            # Calculate new dimensions
             new_width = int(img_width * scale)
             new_height = int(img_height * scale)
             
-            # Resize image while maintaining aspect ratio
+            # Resize image
             resized_image = pil_image.resize((new_width, new_height), Image.LANCZOS)
             
-            # Create PhotoImage from PIL Image
-            # Store a reference to prevent garbage collection
+            # Create PhotoImage
             self.photo_image = ImageTk.PhotoImage(resized_image)
             
             # Update canvas
             self.canvas.delete("all")
-            # Center the image in the canvas
             x_offset = (canvas_width - new_width) // 2
             y_offset = (canvas_height - new_height) // 2
             
-            # Create image on canvas
             self.canvas.create_image(x_offset, y_offset, anchor=tk.NW, image=self.photo_image)
             
-            # Store the scale ratio and offset for coordinate conversions
+            # Store parameters
             self.scale_ratio = scale
             self.canvas_offset_x = x_offset
             self.canvas_offset_y = y_offset
-            
-            # Store visualization for other references
             self.current_viz = viz_image
             self.boundaries_viz = viz_image
             
@@ -3384,8 +3004,422 @@ class CompartmentRegistrationDialog:
                 self._update_static_zoom_views()
                 
         except Exception as e:
-            self.logger.error(f"Error updating visualization: {str(e)}")
-            self.logger.error(traceback.format_exc())
+            self.logger.error(f"Error displaying visualization: {str(e)}")
+
+            
+    # NEW METHOD: Create static visualization that doesn't change during mouse movement - draws markers with their lengths, scale bar, etc.
+    def _create_static_visualization(self):
+        """
+        Create the static visualization with all elements that don't change during interaction.
+        This includes: markers, scale bar, boundaries, labels, etc.
+        Returns the static image that can be cached.
+        """
+        if self.original_boundaries_viz is None:
+            return None
+            
+        # Get current parameters to check if cache is valid
+        current_params = {
+            'top_y': self.top_y,
+            'bottom_y': self.bottom_y,
+            'left_height_offset': self.left_height_offset,
+            'right_height_offset': self.right_height_offset,
+            'markers': str(self.markers),  # Convert to string for comparison
+            'detected_boundaries': str(self.detected_boundaries),
+            'result_boundaries': str(self.result_boundaries),
+            'mode': self.current_mode
+        }
+        
+        # Check if we can use cached version
+        if (self.static_viz_cache is not None and 
+            self.static_viz_params == current_params):
+            return self.static_viz_cache.copy()
+        
+        # Need to recreate static visualization
+        # Start with clean original image
+        static_viz = self.original_boundaries_viz.copy()
+        
+        # Get image dimensions
+        img_height, img_width = static_viz.shape[:2]
+        
+        # Draw all static elements
+        # Draw markers with scale measurements
+        if self.markers:
+            # Get scale data if available
+            scale_data = None
+            scale_px_per_cm = None
+            if hasattr(self, 'scale_data') and self.scale_data:
+                scale_data = self.scale_data
+                scale_px_per_cm = scale_data.get('scale_px_per_cm', None)
+            
+            # Draw each marker with scale measurement lines
+            for marker_id, corners in self.markers.items():
+                # Convert corners to int
+                corners_int = corners.astype(np.int32)
+                
+                # Find this marker in scale measurements if available
+                marker_measurements = None
+                if scale_data and 'marker_measurements' in scale_data:
+                    for measurement in scale_data['marker_measurements']:
+                        if measurement['marker_id'] == marker_id:
+                            marker_measurements = measurement
+                            break
+                
+                if marker_measurements and scale_px_per_cm:
+                    # We have scale data - draw edges based on individual validity
+                    edge_lengths = marker_measurements.get('edge_lengths', [])
+                    diagonal_lengths = marker_measurements.get('diagonal_lengths', [])
+                    scales = marker_measurements.get('scales', [])
+                    
+                    # Determine which measurements are valid
+                    physical_size = marker_measurements.get('physical_size_cm', 2.0)
+                    
+                    # Draw each edge with its validity color
+                    for i in range(4):  # 4 edges
+                        if i < len(edge_lengths) and i < len(scales):
+                            # Calculate expected length in pixels
+                            expected_px = physical_size * scale_px_per_cm
+                            actual_px = edge_lengths[i]
+                            
+                            # Check if this edge is within tolerance (5 pixels)
+                            tolerance_pixels = 5.0
+                            is_valid = abs(actual_px - expected_px) <= tolerance_pixels
+                            
+                            # Choose color based on validity
+                            edge_color = (0, 255, 0) if is_valid else (0, 0, 255)  # Green if valid, red if invalid
+                            
+                            # Draw the edge
+                            start_corner = i
+                            end_corner = (i + 1) % 4
+                            cv2.line(static_viz, tuple(corners_int[start_corner]), tuple(corners_int[end_corner]), edge_color, 2)
+                            
+                            # Show measurement on edge
+                            if scale_px_per_cm:
+                                edge_center_x = (corners_int[start_corner][0] + corners_int[end_corner][0]) // 2
+                                edge_center_y = (corners_int[start_corner][1] + corners_int[end_corner][1]) // 2
+                                
+                                # Offset text based on edge position
+                                text_offset_x = 0
+                                text_offset_y = -10 if i == 0 else 10 if i == 2 else 0
+                                text_offset_x = -40 if i == 3 else 40 if i == 1 else 0
+                                
+                                # Format text
+                                px_text = f"{actual_px:.0f}px"
+                                measurement_text = f"{px_text}"
+                                
+                                # Draw with background
+                                text_size = cv2.getTextSize(measurement_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
+                                cv2.rectangle(static_viz, 
+                                            (edge_center_x + text_offset_x - text_size[0]//2 - 2, 
+                                             edge_center_y + text_offset_y - text_size[1] - 2),
+                                            (edge_center_x + text_offset_x + text_size[0]//2 + 2, 
+                                             edge_center_y + text_offset_y + 2),
+                                            (0, 0, 0), -1)
+                                cv2.putText(static_viz, measurement_text, 
+                                          (edge_center_x + text_offset_x - text_size[0]//2, 
+                                           edge_center_y + text_offset_y),
+                                          cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+                    
+                    # Draw diagonals if available
+                    if len(diagonal_lengths) >= 2 and len(scales) >= 6:
+                        diagonals = [(0, 2), (1, 3)]
+                        
+                        for i, (start, end) in enumerate(diagonals):
+                            if i < len(diagonal_lengths):
+                                # Calculate expected diagonal length
+                                expected_diag = physical_size * np.sqrt(2) * scale_px_per_cm
+                                actual_diag = diagonal_lengths[i]
+                                
+                                # Check validity
+                                tolerance_pixels = 5.0
+                                is_valid = abs(actual_diag - expected_diag) / expected_diag < tolerance_pixels
+                                
+                                # Choose color
+                                diag_color = (0, 255, 0) if is_valid else (0, 0, 255)
+                                
+                                # Draw diagonal with dashed line
+                                start_pt = corners_int[start]
+                                end_pt = corners_int[end]
+                                
+                                # Calculate line segments for dashed effect
+                                num_dashes = 10
+                                for j in range(0, num_dashes, 2):
+                                    t1 = j / num_dashes
+                                    t2 = min((j + 1) / num_dashes, 1.0)
+                                    pt1 = (int(start_pt[0] + t1 * (end_pt[0] - start_pt[0])),
+                                           int(start_pt[1] + t1 * (end_pt[1] - start_pt[1])))
+                                    pt2 = (int(start_pt[0] + t2 * (end_pt[0] - start_pt[0])),
+                                           int(start_pt[1] + t2 * (end_pt[1] - start_pt[1])))
+                                    cv2.line(static_viz, pt1, pt2, diag_color, 1)
+                    
+                    # Draw corner points
+                    for corner in corners_int:
+                        cv2.circle(static_viz, tuple(corner), 3, (255, 255, 255), -1)
+                        
+                else:
+                    # No scale data - just draw the marker outline
+                    cv2.polylines(static_viz, [corners_int.reshape(-1, 1, 2)], True, (0, 255, 255), 2)
+                    
+                    # Draw corner points
+                    for corner in corners_int:
+                        cv2.circle(static_viz, tuple(corner), 3, (0, 255, 255), -1)
+        
+        # Add scale bar at bottom left
+        if scale_px_per_cm:
+            # Calculate scale bar dimensions
+            scale_bar_length_cm = 10  # 10cm scale bar
+            scale_bar_length_px = int(scale_bar_length_cm * scale_px_per_cm)
+            scale_bar_height = 20
+            margin = 20
+            
+            # Position at bottom left
+            bar_x = margin
+            bar_y = img_height - margin - scale_bar_height - 30  # Extra space for labels
+            
+            # Draw white background for scale bar area
+            bg_padding = 10
+            cv2.rectangle(static_viz,
+                        (bar_x - bg_padding, bar_y - 20 - bg_padding),
+                        (bar_x + scale_bar_length_px + bg_padding, bar_y + scale_bar_height + 30 + bg_padding),
+                        (255, 255, 255), -1)
+            
+            # Draw checkered scale bar (1cm segments)
+            for i in range(scale_bar_length_cm):
+                segment_start = bar_x + int(i * scale_px_per_cm)
+                segment_end = bar_x + int((i + 1) * scale_px_per_cm)
+                
+                # Alternate black and white
+                color = (0, 0, 0) if i % 2 == 0 else (200, 200, 200)
+                cv2.rectangle(static_viz,
+                            (segment_start, bar_y),
+                            (segment_end, bar_y + scale_bar_height),
+                            color, -1)
+            
+            # Draw border around scale bar
+            cv2.rectangle(static_viz,
+                        (bar_x, bar_y),
+                        (bar_x + scale_bar_length_px, bar_y + scale_bar_height),
+                        (0, 0, 0), 2)
+            
+            # Add labels
+            cv2.putText(static_viz, "0cm",
+                      (bar_x, bar_y + scale_bar_height + 20),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+            
+            text_size = cv2.getTextSize("10cm", cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+            cv2.putText(static_viz, "10cm",
+                      (bar_x + scale_bar_length_px - text_size[0], bar_y + scale_bar_height + 20),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+            
+            # Scale info in the middle above the bar
+            if scale_data:
+                confidence = scale_data.get('confidence', 0.0)
+                scale_text = f"{scale_px_per_cm:.1f} px/cm ({confidence:.0%} confidence)"
+            else:
+                scale_text = f"{scale_px_per_cm:.1f} px/cm"
+            
+            text_size = cv2.getTextSize(scale_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+            text_x = bar_x + (scale_bar_length_px - text_size[0]) // 2
+            cv2.putText(static_viz, scale_text,
+                      (text_x, bar_y - 5),
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
+
+        # Draw top and bottom boundary lines with slope based on side offsets
+        left_top_y = self.top_y + self.left_height_offset
+        right_top_y = self.top_y + self.right_height_offset
+        
+        left_bottom_y = self.bottom_y + self.left_height_offset
+        right_bottom_y = self.bottom_y + self.right_height_offset
+        
+        # Draw top boundary line
+        cv2.line(static_viz, (0, left_top_y), (img_width, right_top_y), 
+                (0, 255, 0), 2)  # Green line for top boundary
+        
+        # Draw bottom boundary line
+        cv2.line(static_viz, (0, left_bottom_y), (img_width, right_bottom_y), 
+                (0, 255, 0), 2)  # Green line for bottom boundary
+        
+        # Calculate rotation angle based on the slope of the boundary lines
+        if img_width > 0:
+            dx = img_width
+            dy = right_top_y - left_top_y
+            rotation_angle = -np.arctan2(dy, dx) * 180 / np.pi
+        else:
+            rotation_angle = 0
+        
+        # Calculate slopes for top and bottom boundary (used for compartment positioning)
+        if img_width > 0:
+            top_slope = (right_top_y - left_top_y) / img_width
+            bottom_slope = (right_bottom_y - left_bottom_y) / img_width
+        else:
+            top_slope = 0
+            bottom_slope = 0
+        
+        # Draw detected compartment boundaries
+        for i, (x1, _, x2, _) in enumerate(self.detected_boundaries):
+            # Calculate center position of compartment
+            center_x = (x1 + x2) / 2
+            
+            # Calculate y position at center_x using slope of boundary lines
+            center_top_y = int(left_top_y + (top_slope * center_x))
+            center_bottom_y = int(left_bottom_y + (bottom_slope * center_x))
+            
+            # Calculate center of rectangle
+            rect_center_x = center_x
+            rect_center_y = (center_top_y + center_bottom_y) / 2
+            
+            # Create rotated rectangle points
+            rotation_matrix = cv2.getRotationMatrix2D((rect_center_x, rect_center_y), rotation_angle, 1.0)
+            
+            rect_corners = np.array([
+                [x1, center_top_y],
+                [x2, center_top_y],
+                [x2, center_bottom_y],
+                [x1, center_bottom_y]
+            ], dtype=np.float32)
+            
+            ones = np.ones(shape=(len(rect_corners), 1))
+            rect_corners_homog = np.hstack([rect_corners, ones])
+            rotated_corners = np.dot(rotation_matrix, rect_corners_homog.T).T
+            rotated_corners = rotated_corners.astype(np.int32)
+            
+            cv2.polylines(static_viz, [rotated_corners], True, (0, 255, 0), 2)
+            
+            # Add compartment depth label
+            mid_x = center_x
+            mid_y = rect_center_y
+            
+            # Find the nearest marker below this compartment boundary
+            nearest_marker_id = None
+            nearest_distance = float('inf')
+            
+            for marker_id, corners in self.markers.items():
+                if marker_id in self.config.get('compartment_marker_ids', range(4, 24)):
+                    marker_center_x = int(np.mean(corners[:, 0]))
+                    marker_center_y = int(np.mean(corners[:, 1]))
+                    
+                    if abs(marker_center_x - mid_x) < (x2 - x1) // 2:
+                        vertical_dist = abs(marker_center_y - center_bottom_y)
+                        if vertical_dist < nearest_distance:
+                            nearest_distance = vertical_dist
+                            nearest_marker_id = marker_id
+        
+            if nearest_marker_id is not None and hasattr(self, 'marker_to_compartment'):
+                depth_label = self.marker_to_compartment.get(nearest_marker_id, nearest_marker_id - 3)
+                
+                text_size = cv2.getTextSize(f"{depth_label}m", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
+                cv2.rectangle(static_viz, 
+                            (int(mid_x) - text_size[0]//2 - 5, int(mid_y) - text_size[1]//2 - 5),
+                            (int(mid_x) + text_size[0]//2 + 5, int(mid_y) + text_size[1]//2 + 5),
+                            (0, 0, 0), -1)
+                
+                cv2.putText(static_viz, f"{depth_label}m", 
+                        (int(mid_x) - text_size[0]//2, int(mid_y) + text_size[1]//2), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 165, 0), 2)
+        
+        # Draw manually placed boundaries
+        for comp_id, boundary in self.result_boundaries.items():
+            if comp_id in [0, 1, 2, 3]:  # Corner markers
+                if isinstance(boundary, np.ndarray) and boundary.shape[0] == 4:
+                    corner_colors = {
+                        0: (255, 0, 0),    # Blue for top-left
+                        1: (0, 255, 0),    # Green for top-right
+                        2: (0, 255, 255),  # Yellow for bottom-right
+                        3: (255, 255, 0)   # Cyan for bottom-left
+                    }
+                    marker_color = corner_colors.get(comp_id, (255, 0, 255))
+                    
+                    corners = boundary.astype(np.int32)
+                    cv2.polylines(static_viz, [corners], True, marker_color, 3)
+                    
+                    center_x = int(np.mean(corners[:, 0]))
+                    center_y = int(np.mean(corners[:, 1]))
+                    cv2.circle(static_viz, (center_x, center_y), 8, marker_color, -1)
+                    
+                    corner_names = {0: "0 (TL)", 1: "1 (TR)", 2: "2 (BR)", 3: "3 (BL)"}
+                    cv2.putText(static_viz, corner_names[comp_id], (center_x - 20, center_y - 15), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, marker_color, 2)
+                            
+            elif comp_id == 24:  # Metadata marker
+                if isinstance(boundary, np.ndarray) and boundary.shape[0] == 4:
+                    corners = boundary.astype(np.int32)
+                    cv2.polylines(static_viz, [corners], True, (255, 0, 255), 2)
+                    
+                    center_x = int(np.mean(corners[:, 0]))
+                    center_y = int(np.mean(corners[:, 1]))
+                    cv2.circle(static_viz, (center_x, center_y), 5, (255, 0, 255), -1)
+                    
+                    cv2.putText(static_viz, "24", (center_x, center_y - 10), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
+                    
+                    # Draw OCR extraction regions
+                    region_x1 = max(0, center_x - 130)
+                    region_x2 = min(img_width - 1, center_x + 130)
+                    
+                    hole_id_region_y1 = max(0, center_y - 130)
+                    hole_id_region_y2 = max(0, center_y - 20)
+                    cv2.rectangle(static_viz, 
+                                (region_x1, hole_id_region_y1), 
+                                (region_x2, hole_id_region_y2), 
+                                (255, 0, 0), 2)
+                    
+                    cv2.putText(static_viz, 
+                            "Hole ID", 
+                            (region_x1 + 10, hole_id_region_y1 + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+                    
+                    depth_region_y1 = min(img_height - 1, center_y + 20)
+                    depth_region_y2 = min(img_height - 1, center_y + 150)
+                    cv2.rectangle(static_viz, 
+                                (region_x1, depth_region_y1), 
+                                (region_x2, depth_region_y2), 
+                                (0, 255, 0), 2)
+                    
+                    cv2.putText(static_viz, 
+                            "Depth", 
+                            (region_x1 + 10, depth_region_y1 + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            else:  # Compartment boundaries
+                if isinstance(boundary, tuple) and len(boundary) == 4:
+                    x1, y1, x2, y2 = boundary
+                    
+                    center_x = (x1 + x2) / 2
+                    center_y = (y1 + y2) / 2
+                    
+                    rotation_matrix = cv2.getRotationMatrix2D((center_x, center_y), rotation_angle, 1.0)
+                    
+                    rect_corners = np.array([
+                        [x1, y1],
+                        [x2, y1],
+                        [x2, y2],
+                        [x1, y2]
+                    ], dtype=np.float32)
+                    
+                    ones = np.ones(shape=(len(rect_corners), 1))
+                    rect_corners_homog = np.hstack([rect_corners, ones])
+                    rotated_corners = np.dot(rotation_matrix, rect_corners_homog.T).T
+                    rotated_corners = rotated_corners.astype(np.int32)
+                    
+                    cv2.polylines(static_viz, [rotated_corners], True, (0, 255, 255), 2)
+                    
+                    depth_label = self.marker_to_compartment.get(comp_id, comp_id - 3)
+                    mid_x = center_x
+                    mid_y = center_y
+                    
+                    text_size = cv2.getTextSize(f"{depth_label}m", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
+                    cv2.rectangle(static_viz, 
+                                (int(mid_x) - text_size[0]//2 - 5, int(mid_y) - text_size[1]//2 - 5),
+                                (int(mid_x) + text_size[0]//2 + 5, int(mid_y) + text_size[1]//2 + 5),
+                                (0, 0, 0), -1)
+                    
+                    cv2.putText(static_viz, f"{depth_label}m", 
+                                (int(mid_x) - text_size[0]//2, int(mid_y) + text_size[1]//2), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+        
+        # Cache the result
+        self.static_viz_cache = static_viz.copy()
+        self.static_viz_params = current_params
+        
+        return static_viz
 
     def _undo_last(self):
         """Undo the last annotation."""
