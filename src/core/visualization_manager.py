@@ -9,7 +9,7 @@ import logging
 from datetime import datetime
 import json
 import hashlib
-
+from processing.visualization_drawer import VisualizationDrawer
 
 class ImageTransformType(Enum):
     """Types of transformations that can be applied to images."""
