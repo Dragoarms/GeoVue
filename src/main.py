@@ -154,7 +154,10 @@ from gui.widgets import *
 from processing import (
     BlurDetector,
     DrillholeTraceGenerator,
-    ArucoManager
+    ArucoManager,
+    load_image,
+    resize_for_processing,
+    apply_transform,
 )
 
 from utils import (
@@ -710,6 +713,240 @@ class ChipTrayApp:
         self.aruco_manager.viz_steps.clear()
         self.logger.debug("Cleared visualization cache and viz_steps for new image")
 
+    def _load_and_prepare_image(self, image_path: str):
+        """Load image and create a down-sampled copy for processing."""
+        original_image = load_image(image_path)
+        h, w = original_image.shape[:2]
+        small_image = resize_for_processing(original_image, 2_000_000)
+        self.small_image = small_image.copy()
+        previously_processed = self.file_manager.check_original_file_processed(image_path)
+        metadata = getattr(self, 'metadata', {})
+        return original_image, small_image, previously_processed, metadata
+
+    def _detect_and_correct_markers(self, small_image, add_message=None):
+        """Detect ArUco markers and correct image skew."""
+        if add_message:
+            add_message("Detecting ArUco markers...", None)
+
+        markers = self.aruco_manager.improve_marker_detection(small_image)
+        expected = set(self.config['corner_marker_ids'] + self.config['compartment_marker_ids'])
+        if self.config.get('enable_ocr', True) and self.tesseract_manager.is_available:
+            expected.update(self.config['metadata_marker_ids'])
+        missing = list(expected - set(markers.keys()))
+
+        rotation_matrix = None
+        rotation_angle = 0.0
+        if add_message:
+            add_message("Correcting image orientation...", None)
+        try:
+            corrected, rotation_matrix, rotation_angle = self.aruco_manager.correct_image_skew(
+                small_image, markers, return_transform=True
+            )
+            if corrected is not small_image:
+                markers = self.aruco_manager.improve_marker_detection(corrected)
+                small_image = corrected
+        except Exception as exc:
+            self.logger.warning(f"Skew correction failed: {exc}")
+
+        return small_image, markers, rotation_matrix, rotation_angle, missing
+
+    def _extract_boundaries(self, small_image, markers, metadata):
+        """Extract compartment boundaries using detected markers."""
+        analysis = self.aruco_manager.analyze_compartment_boundaries(
+            small_image,
+            markers,
+            compartment_count=self.config.get('compartment_count', 20),
+            smart_cropping=True,
+            metadata=metadata,
+        )
+        if analysis.get('vertical_constraints'):
+            self.top_y, self.bottom_y = analysis['vertical_constraints']
+        return (
+            analysis['boundaries'],
+            analysis['visualization'],
+            analysis['missing_marker_ids'],
+            analysis['marker_to_compartment'],
+        )
+
+    def _extract_or_prompt_metadata(self, small_image, markers, image_path, previously_processed, missing_marker_ids, add_message=None):
+        """Retrieve metadata via OCR or previous filename."""
+        self.tesseract_manager.file_manager = self.file_manager
+        self.tesseract_manager.extractor = self
+        if previously_processed:
+            metadata = previously_processed
+            ocr_metadata = {
+                'hole_id': metadata.get('hole_id'),
+                'depth_from': metadata.get('depth_from'),
+                'depth_to': metadata.get('depth_to'),
+                'confidence': metadata.get('confidence', 100.0),
+                'from_filename': True,
+                'metadata_region': None,
+            }
+        else:
+            if add_message:
+                add_message("Extracting metadata with OCR...", None)
+            if self.config.get('enable_ocr') and self.tesseract_manager.is_available:
+                final_viz = self.aruco_manager.viz_steps.get("final_boundaries", small_image)
+                ocr_metadata = self.tesseract_manager.extract_metadata_with_composite(
+                    final_viz,
+                    markers,
+                    original_filename=image_path,
+                    progress_queue=self.progress_queue,
+                )
+            else:
+                ocr_metadata = {
+                    'hole_id': None,
+                    'depth_from': None,
+                    'depth_to': None,
+                    'confidence': 0.0,
+                    'metadata_region': None,
+                }
+                if image_path:
+                    filename_metadata = self.file_manager.extract_metadata_from_filename(image_path)
+                    if filename_metadata:
+                        ocr_metadata.update(filename_metadata)
+                        ocr_metadata['confidence'] = 100.0
+                        ocr_metadata['from_filename'] = True
+            metadata = ocr_metadata
+        if 24 in missing_marker_ids:
+            missing_marker_ids.remove(24)
+        return ocr_metadata, metadata, missing_marker_ids
+
+    def _open_registration_dialog(
+        self,
+        small_image,
+        boundaries,
+        markers,
+        missing_marker_ids,
+        metadata,
+        marker_to_compartment,
+        rotation_angle,
+        image_path,
+    ):
+        """Show the compartment registration dialog on the main thread."""
+
+        def process_image_callback(params):
+            temp_metadata = dict(metadata) if metadata else {}
+            temp_metadata['boundary_adjustments'] = params
+            new_analysis = self.aruco_manager.analyze_compartment_boundaries(
+                small_image,
+                markers,
+                compartment_count=self.config.get('compartment_count', 20),
+                smart_cropping=True,
+                metadata=temp_metadata,
+            )
+            return {
+                'boundaries': new_analysis['boundaries'],
+                'visualization': new_analysis['visualization'],
+            }
+
+        return self.handle_markers_and_boundaries(
+            small_image.copy(),
+            boundaries,
+            missing_marker_ids=missing_marker_ids,
+            metadata=metadata,
+            vertical_constraints=(self.top_y, self.bottom_y) if hasattr(self, 'top_y') and hasattr(self, 'bottom_y') else None,
+            marker_to_compartment=marker_to_compartment,
+            rotation_angle=rotation_angle,
+            corner_markers=self.corner_markers if hasattr(self, 'corner_markers') else None,
+            markers=markers,
+            initial_mode=0,
+            on_apply_adjustments=process_image_callback,
+            image_path=image_path,
+            scale_data=self.current_scale_data if hasattr(self, 'current_scale_data') else None,
+        )
+
+    def _apply_skew_to_original(self, original_image, rotation_angle):
+        """Apply the skew correction angle to the high-resolution image."""
+        if rotation_angle and rotation_angle != 0.0:
+            h, w = original_image.shape[:2]
+            center = (w // 2, h // 2)
+            matrix = cv2.getRotationMatrix2D(center, rotation_angle, 1.0)
+            return apply_transform(original_image, matrix)
+        return original_image
+
+    def _scale_boundaries(self, boundaries, metadata, small_image, original_image):
+        """Scale boundaries from the processing image back to the original size."""
+        if small_image.shape == original_image.shape:
+            return boundaries
+        scale_x = original_image.shape[1] / small_image.shape[1]
+        scale_y = original_image.shape[0] / small_image.shape[0]
+        self.image_scale_factor = scale_x
+        if hasattr(self, 'current_scale_data') and self.current_scale_data:
+            self.current_scale_data['scale_px_per_cm_small'] = self.current_scale_data['scale_px_per_cm']
+            self.current_scale_data['scale_px_per_cm_original'] = self.current_scale_data['scale_px_per_cm'] * scale_x
+            self.current_scale_data['scale_factor'] = scale_x
+        scaled = []
+        for x1, y1, x2, y2 in boundaries:
+            scaled.append((int(x1 * scale_x), int(y1 * scale_y), int(x2 * scale_x), int(y2 * scale_y)))
+        return scaled
+
+    def _handle_duplicates_and_save(
+        self,
+        image_path,
+        metadata,
+        boundaries,
+        small_image,
+        original_image,
+        processing_messages,
+        add_message,
+    ):
+        """Check duplicates and save compartments using FileManager."""
+        corners_list = []
+        depth_from = metadata.get('depth_from')
+        interval = metadata.get('compartment_interval', 1)
+        for i, (x1, y1, x2, y2) in enumerate(boundaries):
+            corners_list.append(
+                {
+                    'depth_to': depth_from + ((i + 1) * interval),
+                    'corners': [
+                        [x1, y1],
+                        [x2, y1],
+                        [x2, y2],
+                        [x1, y2],
+                    ],
+                }
+            )
+
+        compartments = self.extract_compartments_from_boundaries(original_image, boundaries)
+
+        continue_processing = True
+        while continue_processing:
+            duplicate_result = self.duplicate_handler.check_duplicate(
+                metadata['hole_id'],
+                metadata['depth_from'],
+                metadata['depth_to'],
+                small_image,
+                image_path,
+                extracted_compartments=compartments,
+            )
+
+            if isinstance(duplicate_result, dict) and duplicate_result.get('action') == 'modify_metadata':
+                metadata['hole_id'] = duplicate_result.get('hole_id', metadata['hole_id'])
+                metadata['depth_from'] = duplicate_result.get('depth_from', metadata['depth_from'])
+                metadata['depth_to'] = duplicate_result.get('depth_to', metadata['depth_to'])
+            else:
+                continue_processing = False
+                result = {
+                    'action': duplicate_result.get('action') if isinstance(duplicate_result, dict) else 'continue',
+                    'hole_id': metadata.get('hole_id'),
+                    'depth_from': metadata.get('depth_from'),
+                    'depth_to': metadata.get('depth_to'),
+                    'compartment_interval': interval,
+                    'boundaries': boundaries,
+                    'corners_list': corners_list,
+                }
+                saved_paths = self.handle_image_exit(
+                    image_path=image_path,
+                    result=result,
+                    metadata=metadata,
+                    compartments=compartments,
+                    processing_messages=processing_messages,
+                    add_progress_message=add_message,
+                )
+                return bool(saved_paths)
+        return False
+
     def process_image(self, image_path: str) -> bool:
         """
         Process a single chip tray image directly on the main thread.
@@ -732,214 +969,68 @@ class ChipTrayApp:
             bool: True if processing succeeded, False otherwise
         """
         # ===================================================
-        # STEP 0: INITIALIZATION AND SETUP
+        # REMOVE: old processing pipeline
+        # REPLACE WITH: calls to helper methods
         # ===================================================
-        # Initialize logging for this method
         self.logger = logging.getLogger(__name__)
-
-        self.logger.debug(f" Starting to process image: {image_path}")
-        self.logger.debug(f" Clearing Caches")
-
-        # Clear any cached visualization data from previous image
         self.clear_visualization_cache()
 
-        # Initialize or get progress queue for UI updates
-        if not hasattr(self, 'progress_queue'):
-            self.progress_queue = queue.Queue()
-            self.logger.debug(" Created new progress_queue")
-        else:
-            self.logger.debug(" Using existing progress_queue")
-
-        # Initialize message collection for this image
         processing_messages = []
-        
+
         def add_progress_message(message, progress=None, message_type="info"):
-            """Helper to collect and route status messages with optional type formatting."""
             processing_messages.append((message, progress))
             self.logger.info(message)
-
-            # GUI Status Update
             if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'update_status'):
                 try:
                     self.main_gui.update_status(message, status_type=message_type)
-                except Exception as e:
-                    self.logger.debug(f"Could not update GUI status: {e}")
-
-            # Optional: update progress bar or external queue
+                except Exception:
+                    pass
             if hasattr(self, 'progress_queue') and self.progress_queue:
                 self.progress_queue.put((message, progress))
 
         try:
-            # ===================================================
-            # STEP 1: LOAD AND VALIDATE IMAGE
-            # ===================================================
-            # Try to read the image using PIL first (more format support)
-            try:
-                self.logger.debug(" Attempting to read image with PIL")
-                from PIL import Image as PILImage
-                
-                # Open with PIL
-                pil_img = PILImage.open(image_path)
-                self.logger.debug(f" PIL image mode: {pil_img.mode}, size: {pil_img.size}")
-                
-                # Convert to numpy array for OpenCV processing
-                original_image = np.array(pil_img)
-                self.logger.debug(f" Converted to numpy array, shape: {original_image.shape}")
-                
-                # Convert RGB to BGR for OpenCV compatibility if needed
-                if len(original_image.shape) == 3 and original_image.shape[2] == 3:
-                    self.logger.debug(" Converting RGB to BGR for OpenCV compatibility")
-                    original_image = cv2.cvtColor(original_image, cv2.COLOR_RGB2BGR)
-                    
-                self.logger.info(f"Successfully read image with PIL: {image_path}")
-                
-            except Exception as e:
-                self.logger.warning(f"Failed to read image with PIL, trying OpenCV: {str(e)}")
-                self.logger.debug(f" PIL reading failed with error: {str(e)}")
-                
-                # Fallback to OpenCV if PIL fails
-                self.logger.debug(" Attempting to read image with OpenCV")
-                original_image = cv2.imread(image_path)
-                if original_image is None:
-                    error_msg = f"Failed to read image with both PIL and OpenCV: {image_path}"
-                    self.logger.debug(f" {error_msg}")
-                    self.logger.error(error_msg)
-                    add_progress_message(error_msg, None, message_type="error")
-                    return False
-                else:
-                    self.logger.debug(f" OpenCV successfully read image, shape: {original_image.shape}")
-            
-            # Update progress with image info
-            base_name = os.path.basename(image_path)
-            status_msg = f"Processing Image: {base_name}"
-            self.logger.info(status_msg)
-            add_progress_message(status_msg, None, message_type="info")
-            
-            # ===================================================
-            # STEP 2: CREATE DOWNSAMPLED IMAGE FOR FASTER PROCESSING
-            # ===================================================
-            # For processing speed create a temporary downscaled image
-            h, w = original_image.shape[:2]
-            original_pixels = h * w
-            target_pixels = 2000000  # Target ~2 million pixels (e.g., 1414x1414)
-            self.logger.debug(f" Original image dimensions: {w}x{h}, total pixels: {original_pixels}")
-            
-            if original_pixels > target_pixels:
-                scale = (target_pixels / original_pixels) ** 0.5
-                new_width = int(w * scale)
-                new_height = int(h * scale)
-                self.logger.debug(f" Resizing image with scale factor: {scale:.4f}")
-                
-                # Create downsampled image  
-                small_image = cv2.resize(original_image, (new_width, new_height), interpolation=cv2.INTER_AREA)
-                self.logger.debug(f" Resized image to {new_width}x{new_height}")
-                
-                add_progress_message(f"Resized image from {w}x{h} to {new_width}x{new_height} for processing", None)
-            else:
-                # Image is already small enough
-                small_image = original_image.copy()
-                self.logger.info(f"Image already small ({w}x{h}), using as is for processing")
-                add_progress_message(f"Image already small ({w}x{h}), using as is for processing", None)
-            
-            # Store the small image as an instance variable so it's accessible to the metadata dialog
-            self.small_image = small_image.copy()
-            
-            # ===================================================
-            # STEP 3: CHECK IF FILE WAS PREVIOUSLY PROCESSED
-            # ===================================================
-            # Check if this file has been previously processed (to extract metadata from filename)
-            previously_processed = self.file_manager.check_original_file_processed(image_path)
-            self.logger.debug(f" Previously processed status: {previously_processed}")
-
-            # Use existing metadata (e.g., from filename) or initialize empty
-            metadata = getattr(self, 'metadata', {})
-            self.logger.debug(f" Initial metadata: {metadata}")
-
-            # ===================================================
-            # STEP 4: DETECT ARUCO MARKERS
-            # ===================================================
-            # IMPORTANT: Always detect markers regardless of metadata source
-            add_progress_message("Detecting ArUco markers...", None)
-
-            self.logger.debug(" Starting ArUco marker detection")
-            # Use ArucoManager to detect and improve marker detection
-            markers = self.aruco_manager.improve_marker_detection(small_image)
-            self.logger.debug(f" Detected {len(markers)} ArUco markers: {sorted(markers.keys())}")
-            
-            # Report marker detection status
-            expected_markers = set(self.config['corner_marker_ids'] + 
-                                self.config['compartment_marker_ids'])
-            
-            # Only expect metadata markers if OCR is enabled and available
-            if self.config.get('enable_ocr', True) and self.tesseract_manager.is_available:
-                expected_markers.update(self.config['metadata_marker_ids'])
-                self.logger.debug(" OCR is enabled - including metadata markers in expected set")
-            else:
-                self.logger.debug(" OCR is disabled - excluding metadata markers from expected set")
-            
-            detected_markers = set(markers.keys())
-            missing_markers = expected_markers - detected_markers
-            missing_marker_ids = list(missing_markers)  # Convert to list for later use
-            
-            self.logger.debug(f" Expected markers: {sorted(expected_markers)}")
-            self.logger.debug(f" Missing markers: {sorted(missing_markers)}")
-
-            # Check if we should remove metadata marker from missing list
-            if not self.config.get('enable_ocr', True) or not self.tesseract_manager.is_available:
-                if 24 in missing_marker_ids:
-                    missing_marker_ids.remove(24)
-                    self.logger.debug(" Removed marker 24 from missing list (OCR disabled or unavailable)")
-                    self.logger.info("Removed metadata marker 24 from missing list (OCR disabled or unavailable)")
-            
-             
-            status_msg = f"Detected {len(detected_markers)}/{len(expected_markers)} ArUco markers"
-            self.logger.info(status_msg)
-            if self.progress_queue:
-                add_progress_message(status_msg, None)
-
-                
-                if missing_markers:
-                    add_progress_message(f"Missing markers: {sorted(missing_markers)}", None)
-    
-
-            # ===================================================
-            # STEP 5: CORRECT IMAGE ORIENTATION AND SKEW
-            # ===================================================
-            # Attempt to correct skew using ArucoManager BEFORE OCR processing
-            if self.progress_queue:
-                add_progress_message("Correcting image orientation...", None)
-
-
-            # Initialize rotation variables
-            rotation_matrix = None
-            rotation_angle = 0.0
-
-            try:
-                self.logger.debug(" Attempting to correct image skew on small image")
-                # Use ArucoManager for image correction
-                corrected_small_image, rotation_matrix, rotation_angle = self.aruco_manager.correct_image_skew(
-                    small_image, markers, return_transform=True
-                )
-                
-                self.logger.debug(f" Skew correction applied, rotation angle: {rotation_angle:.2f}°")
-                
-                if corrected_small_image is not small_image:  # If correction was applied
-                    self.logger.debug(" Image was actually modified during skew correction")
-                    # Re-detect markers on corrected image
-                    markers = self.aruco_manager.improve_marker_detection(corrected_small_image)
-                    self.logger.debug(f" Re-detected {len(markers)} markers after correction")
-                    small_image = corrected_small_image  # Update small image for further processing
-                    
-                    self.logger.info(f"Image orientation corrected, angle: {rotation_angle:.2f}°, re-detected {len(markers)} markers")
-                    add_progress_message(f"Corrected image orientation (angle: {rotation_angle:.2f}°), re-detected {len(markers)} markers", None)
-    
-                else:
-                    self.logger.debug(" No skew correction needed (or applied)")
-            except Exception as e:
-                self.logger.warning(f"Skew correction failed: {str(e)}")
-                self.logger.error(traceback.format_exc())
-                self.logger.debug(f" Skew correction failed with error: {str(e)}")
-                # Continue with uncorrected image
+            original_image, small_image, previously_processed, metadata = self._load_and_prepare_image(image_path)
+            small_image, markers, rotation_matrix, rotation_angle, missing_marker_ids = self._detect_and_correct_markers(
+                small_image, add_progress_message
+            )
+            boundaries, viz, boundary_missing, marker_to_compartment = self._extract_boundaries(
+                small_image, markers, metadata
+            )
+            missing_marker_ids = sorted(set(missing_marker_ids + boundary_missing))
+            ocr_metadata, metadata, missing_marker_ids = self._extract_or_prompt_metadata(
+                small_image, markers, image_path, previously_processed, missing_marker_ids, add_progress_message
+            )
+            result = self._open_registration_dialog(
+                small_image, boundaries, markers, missing_marker_ids, ocr_metadata,
+                marker_to_compartment, rotation_angle, image_path
+            )
+            if not result:
+                return False
+            metadata = {
+                'hole_id': result.get('hole_id'),
+                'depth_from': result.get('depth_from'),
+                'depth_to': result.get('depth_to'),
+                'compartment_interval': result.get('compartment_interval', 1),
+            }
+            boundaries = result.get('boundaries', boundaries)
+            original_image = self._apply_skew_to_original(original_image, rotation_angle)
+            boundaries = self._scale_boundaries(boundaries, metadata, small_image, original_image)
+            return self._handle_duplicates_and_save(
+                image_path, metadata, boundaries, small_image, original_image, processing_messages, add_progress_message
+            )
+        except Exception as e:
+            error_msg = f"Error processing {image_path}: {str(e)}"
+            self.logger.error(error_msg)
+            self.logger.error(traceback.format_exc())
+            if hasattr(self, 'progress_queue'):
+                self.progress_queue.put((error_msg, None))
+            self.metadata = {}
+            if hasattr(self, 'visualization_cache'):
+                if 'annotation_status' in self.visualization_cache:
+                    self.visualization_cache['annotation_status'] = {'annotated_markers': []}
+                if 'current_processing' in self.visualization_cache:
+                    self.visualization_cache['current_processing'] = {}
+            return False
 
             # Recalculate missing markers since skew correction may have found more
             detected_markers = set(markers.keys())
@@ -1750,93 +1841,6 @@ class ChipTrayApp:
                                 self.logger.debug(f" Blur detection complete, found {sum(1 for r in blur_results if r.get('is_blurry', False))} blurry compartments")
                             
                             # ===================================================
-                            # STEP 15: CLEANUP AND PREPARE FOR NEXT IMAGE
-                            # ===================================================
-                            # Final summary message
-                            if saved_paths:
-                                success_msg = f"Successfully processed {os.path.basename(image_path)}"
-                                if metadata.get('hole_id'):
-                                    success_msg += f" for {metadata['hole_id']} {metadata['depth_from']}-{metadata['depth_to']}m"
-                                if action == 'selective_replacement':
-                                    success_msg += " (selective replacement)"
-                                elif action == 'keep_with_gaps':
-                                    missing_count = len(result.get('missing_depths', []))
-                                    success_msg += f" (filled {missing_count} gaps)"
-                            else:
-                                success_msg = f"Processed {os.path.basename(image_path)}"
-                                if action == 'skip':
-                                    success_msg += " (skipped - keeping existing)"
-                                elif action == 'reject':
-                                    success_msg += " (rejected)"
-                            
-                            self.logger.debug(f" {success_msg}")
-                            self.logger.info(success_msg)
-                            if self.progress_queue:
-                                add_progress_message(success_msg, None)
-                            
-                            # Clear metadata for next image
-                            self.logger.debug(" Clearing metadata for next image")
-                            self.metadata = {}
-                            
-                            # Reset annotation state in visualization_cache
-                            self.logger.debug(" Resetting annotation state in visualization_cache")
-                            if hasattr(self, 'visualization_cache'):
-                                if 'annotation_status' in self.visualization_cache:
-                                    self.visualization_cache['annotation_status'] = {'annotated_markers': []}
-                                # Also clear current processing data
-                                if 'current_processing' in self.visualization_cache:
-                                    self.visualization_cache['current_processing'] = {}
-                            
-                            self.logger.debug(" process_image completed successfully")
-                            return saved_paths is not None
-                            
-                    else:
-                        # Legacy response format or error
-                        self.logger.warning(f"Unexpected duplicate check result format: {duplicate_result}")
-                        continue_processing = False
-                        return False
-
-            # If we get here without metadata, we can't process
-            else:
-                self.logger.error("Cannot process image - missing required metadata")
-                if add_progress_message:
-                    add_progress_message("Cannot process image - missing metadata", None)
-                return False
-                    
-        except Exception as e:
-            # ===================================================
-            # ERROR HANDLING
-            # ===================================================
-            error_msg = f"Error processing {image_path}: {str(e)}"
-            self.logger.debug(f" CRITICAL ERROR: {error_msg}")
-            self.logger.debug(f" {traceback.format_exc()}")
-            self.logger.error(error_msg)
-            self.logger.error(traceback.format_exc())
-            
-            # Post error message directly to main GUI
-            if self.progress_queue:
-                self.progress_queue.put((error_msg, None))
-                if hasattr(self, 'main_gui') and hasattr(self.main_gui, 'check_progress'):
-                    try:
-                        self.main_gui.check_progress(schedule_next=False)
-                    except Exception as gui_e:
-                        self.logger.debug(f"Could not flush error to GUI: {gui_e}")
-            
-            # Reset metadata for next image
-            self.metadata = {}
-            
-            # Reset annotation state in visualization_cache
-            self.logger.debug(" Resetting annotation state in visualization_cache after exception")
-            if hasattr(self, 'visualization_cache'):
-                if 'annotation_status' in self.visualization_cache:
-                    self.visualization_cache['annotation_status'] = {'annotated_markers': []}
-                if 'current_processing' in self.visualization_cache:
-                    self.visualization_cache['current_processing'] = {}
-
-            self.logger.debug(" process_image failed")
-            return False
-
-        
     def process_folder(self, folder_path: str) -> Tuple[int, int]:
         """
         Process all images in a folder, one at a time on the main thread.
