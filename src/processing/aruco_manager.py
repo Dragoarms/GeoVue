@@ -240,7 +240,7 @@ class ArucoManager:
             # Store the markers in visualization_cache if app is available
             if hasattr(self, 'app') and hasattr(self.app, 'visualization_cache'):
                 self.app.visualization_cache.setdefault('current_processing', {})['all_markers'] = final_markers
-                print(f"DEBUG: Stored {len(final_markers)} markers in visualization_cache")
+                self.logger.debug(f"DEBUG: Stored {len(final_markers)} markers in visualization_cache")
             
             # Use combined markers if better than any single method
             if len(combined_markers) > best_count:
@@ -300,8 +300,8 @@ class ArucoManager:
     
    # Compartment Detection and Extraction Processes with ArUco markers
     def analyze_compartment_boundaries(self, image: np.ndarray, markers: Dict[int, np.ndarray], 
-                                     compartment_count: int = 20, smart_cropping: bool = True,
-                                     metadata: Dict[str, Any] = None) -> Dict[str, Any]:
+                                    compartment_count: int = 20, smart_cropping: bool = True,
+                                    metadata: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Analyze and extract compartment boundary data without any UI interaction.
         
@@ -313,7 +313,7 @@ class ArucoManager:
             markers: Detected ArUco markers dictionary
             compartment_count: Number of expected compartments
             smart_cropping: Whether to use smart cropping for gaps
-            metadata: Optional metadata dictionary containing hole_id, depth_from, depth_to
+            metadata: Optional metadata dictionary containing hole_id, depth_from, depth_to,
             
         Returns:
             Dictionary containing:
@@ -321,37 +321,76 @@ class ArucoManager:
                 - missing_marker_ids: List of missing marker IDs
                 - vertical_constraints: Tuple of (top_y, bottom_y) for compartment placement
                 - marker_to_compartment: Mapping of marker IDs to compartment numbers
-                - visualization: Initial visualization image
                 - corner_markers: Dictionary of corner marker positions
-                - avg_compartment_width: Average width of compartments
-                - viz_steps: Dictionary of visualization steps
+                - viz_steps: Dictionary of visualization steps which will be used during the dialog to display data dynamically
         """
-        print(f"DEBUG: Starting analyze_compartment_boundaries with {len(markers) if markers else 0} markers")
+        self.logger.debug(f"DEBUG: Starting analyze_compartment_boundaries with {len(markers) if markers else 0} markers")
         
-        result = {
-            'boundaries': [],
-            'missing_marker_ids': [],
-            'vertical_constraints': None,
-            'marker_to_compartment': {},
-            'visualization': None,
-            'corner_markers': {},
-            'avg_compartment_width': 80,  # Default
-            'viz_steps': {},
-            'boundary_to_marker': {}
-        }
-        
+        # ===================================================
+        # INSERT: Early validation check
         if image is None or not markers:
-            print("DEBUG: Cannot analyze boundaries - no image or markers")
+            self.logger.debug("DEBUG: Cannot analyze boundaries - no image or markers")
             self.logger.warning("Cannot analyze boundaries - no image or markers")
-            result['visualization'] = image.copy() if image is not None else None
-            return result
+            # Return minimal result structure
+            return {
+                'boundaries': [],
+                'missing_marker_ids': [],
+                'vertical_constraints': (0, 0),
+                'marker_to_compartment': {},
+                'corner_markers': {},
+                'boundary_to_marker': {},
+                'marker_data': [],
+                'detected_compartment_markers': {},
+                'expected_marker_ids': [],
+                'scale_px_per_cm': None,
+                'compartment_width_cm': None,
+                'compartment_height_cm': None,
+                'compartment_width_px': None,
+                'compartment_height_px': None,
+                'wall_detection_performed': smart_cropping,
+                'wall_detection_results': {},
+                'compartment_interval': 1
+            }
+        # ===================================================
 
-        # Create visualization image
-        viz = image.copy()
-        print("DEBUG: Created visualization image copy")
+        # Initialize variables that will be populated later
+        compartment_boundaries = []
+        missing_marker_ids = []
+        top_y = 0
+        bottom_y = 0
+        marker_to_compartment = {}
+        corner_markers = {}
+        boundary_to_marker = {}
+        marker_data = []
+        comp_markers = {}
+        expected_marker_ids = []
+        compartment_interval = 1
         
-        # Store all visualization steps
-        self.viz_steps = {}
+        # ===================================================
+        # GET SCALE DATA EARLY
+        # ===================================================
+        scale_px_per_cm = None
+        compartment_width_cm = self.config.get('compartment_width_cm', 2.0)
+        compartment_height_cm = self.config.get('compartment_height_cm', 4.2)
+        compartment_width_px = None
+        compartment_height_px = None
+        
+        # Try to get scale from metadata first
+        if metadata and 'scale_px_per_cm' in metadata:
+            scale_px_per_cm = metadata['scale_px_per_cm']
+            self.logger.debug(f"Got scale from metadata: {scale_px_per_cm:.2f} px/cm")
+        # Then try from viz_manager
+        elif hasattr(self.app, 'viz_manager') and self.app.viz_manager.processing_metadata.get('scale_px_per_cm'):
+            scale_px_per_cm = self.app.viz_manager.processing_metadata['scale_px_per_cm']
+            self.logger.debug(f"Got scale from viz_manager: {scale_px_per_cm:.2f} px/cm")
+        
+        # Calculate pixel dimensions if we have scale
+        if scale_px_per_cm and scale_px_per_cm > 0:
+            compartment_width_px = int(compartment_width_cm * scale_px_per_cm)
+            compartment_height_px = int(compartment_height_cm * scale_px_per_cm)
+            self.logger.info(f"Compartment dimensions: {compartment_width_cm}cm x {compartment_height_cm}cm = {compartment_width_px}px x {compartment_height_px}px")
+        else:
+            self.logger.warning("No scale data available - compartment dimensions will be based on marker sizes")
         
         # STEP 1: Get marker ID ranges from config
         corner_ids = self.config.get('corner_marker_ids', [0, 1, 2, 3])
@@ -361,19 +400,26 @@ class ArucoManager:
         # Get compartment interval from config or metadata
         compartment_interval = metadata.get('compartment_interval', 
                                         self.config.get('compartment_interval', 1.0))
-        compartment_interval = float(compartment_interval)
+        compartment_interval = int(compartment_interval)
         
         # Get the configured compartment count or use default
         expected_compartment_count = compartment_count or self.config.get('compartment_count', 20)
 
         # STEP 2: Define ROI using corner markers for vertical boundaries
         corner_markers = {mid: corners for mid, corners in markers.items() if mid in corner_ids}
-        result['corner_markers'] = corner_markers
         
         if not corner_markers:
-            print("DEBUG: No corner markers detected, using image boundaries")
-            self.logger.warning("No corner markers detected, using image boundaries")
-            top_y, bottom_y = 0, image.shape[0]
+            self.logger.warning("No corner markers detected")
+            # If we have scale, use it to set a reasonable height
+            if compartment_height_px:
+                # Center the compartment area in the image
+                center_y = image.shape[0] // 2
+                top_y = max(0, center_y - compartment_height_px // 2)
+                bottom_y = min(image.shape[0], center_y + compartment_height_px // 2)
+                self.logger.info(f"No corner markers - using centered {compartment_height_px}px height")
+            else:
+                # Fallback to image boundaries
+                top_y, bottom_y = 0, image.shape[0]
         else:
             # Top corners are typically IDs 0 and 1, bottom corners are 2 and 3
             top_corner_ids = [0, 1]
@@ -390,7 +436,7 @@ class ArucoManager:
                 elif mid in bottom_corner_ids:
                     bottom_y_values.append(np.max(corners[:, 1]))
             
-            # Set boundaries based on detected corners
+            # Set initial boundaries based on detected corners
             if top_y_values:
                 top_y = int(np.min(top_y_values))
             else:
@@ -403,31 +449,65 @@ class ArucoManager:
                 all_corner_points = np.vstack([corners for corners in corner_markers.values()])
                 bottom_y = int(np.max(all_corner_points[:, 1]))
             
-            # No margin - i want to show exactly what will be extracted.
-            # TODO - Add in a method here or fix this def to respect a new config entry - compartment_height this is SET to 4.5cm or ~830pixels.
-            margin = 0
-            top_y = max(0, top_y - margin)
-            bottom_y = min(image.shape[0], bottom_y + margin)
+            # ===================================================
+            # ENFORCE 4CM HEIGHT IF SCALE IS AVAILABLE
+            # ===================================================
+            if compartment_height_px and compartment_height_px > 0:
+                current_height = bottom_y - top_y
+                
+                if abs(current_height - compartment_height_px) > 5:  # Allow 5px tolerance
+                    # Calculate how much to adjust
+                    height_diff = compartment_height_px - current_height
+                    
+                    # Center the markers within the new height
+                    center_y = (top_y + bottom_y) // 2
+                    new_top_y = int(center_y - compartment_height_px // 2)
+                    new_bottom_y = int(center_y + compartment_height_px // 2)
+                    
+                    # Ensure we stay within image bounds
+                    if new_top_y < 0:
+                        new_top_y = 0
+                        new_bottom_y = min(compartment_height_px, image.shape[0])
+                    elif new_bottom_y > image.shape[0]:
+                        new_bottom_y = image.shape[0]
+                        new_top_y = max(0, image.shape[0] - compartment_height_px)
+                    
+                    self.logger.info(f"Adjusted vertical constraints from {current_height}px to {compartment_height_px}px (4cm)")
+                    self.logger.debug(f"Old bounds: {top_y}-{bottom_y}, New bounds: {new_top_y}-{new_bottom_y}")
+                    
+                    top_y = new_top_y
+                    bottom_y = new_bottom_y
             
-            # Draw horizontal lines on visualization
-            cv2.line(viz, (0, top_y), (image.shape[1], top_y), (0, 255, 255), 2)
-            cv2.line(viz, (0, bottom_y), (image.shape[1], bottom_y), (0, 255, 255), 2)
-        
-        result['vertical_constraints'] = (top_y, bottom_y)
-        
         # STEP 3: Extract and sort compartment markers
         comp_markers = {}
         for mid in markers:
             if mid in compartment_ids and mid not in corner_ids and mid not in metadata_ids:
                 comp_markers[mid] = markers[mid]
         
-        print(f"DEBUG: Found {len(comp_markers)} compartment markers: {sorted(comp_markers.keys())}")
+        self.logger.debug(f"DEBUG: Found {len(comp_markers)} compartment markers: {sorted(comp_markers.keys())}")
         
         if not comp_markers:
-            print("DEBUG: No compartment markers detected")
+            self.logger.debug("DEBUG: No compartment markers detected")
             self.logger.warning("No compartment markers detected")
-            result['visualization'] = viz
-            return result
+            return {
+                'boundaries': [],
+                'missing_marker_ids': missing_marker_ids,
+                'vertical_constraints': (top_y, bottom_y),
+                'marker_to_compartment': marker_to_compartment,
+                'corner_markers': corner_markers,
+                'boundary_to_marker': {},
+                'marker_data': [],
+                'detected_compartment_markers': {},
+                'expected_marker_ids': expected_marker_ids,
+                'scale_px_per_cm': scale_px_per_cm,
+                'compartment_width_cm': compartment_width_cm,
+                'compartment_height_cm': compartment_height_cm,
+                'compartment_width_px': compartment_width_px,
+                'compartment_height_px': compartment_height_px,
+                'wall_detection_performed': smart_cropping,
+                'wall_detection_results': {},
+                'compartment_interval': compartment_interval
+            }
 
         # STEP 4: Calculate marker centers and dimensions
         marker_data = []
@@ -451,29 +531,15 @@ class ArucoManager:
         # STEP 5: Sort markers by center_x
         marker_data.sort(key=lambda m: m['center_x'])
         
-        # Draw markers on visualization
-        for marker in marker_data:
-            cv2.circle(viz, (marker['center_x'], marker['center_y']), 8, (255, 0, 0), -1)
-            cv2.putText(viz, str(marker['id']), 
-                    (marker['center_x'] - 10, marker['center_y'] - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
-        
         # Create mapping between marker IDs and compartment numbers
         marker_to_compartment = {
             4+i: int((i+1) * compartment_interval) for i in range(expected_compartment_count)
         }
-        result['marker_to_compartment'] = marker_to_compartment
 
         # STEP 6: Identify missing markers
         expected_marker_ids = list(range(4, 4 + expected_compartment_count))
         detected_marker_ids = [marker['id'] for marker in marker_data]
         missing_marker_ids = [marker_id for marker_id in expected_marker_ids if marker_id not in detected_marker_ids]
-        
-        # Check if metadata marker (ID 24) is missing
-        if 24 not in markers and self.config.get('enable_ocr', True):
-            missing_marker_ids.append(24)
-        
-        result['missing_marker_ids'] = missing_marker_ids
         
         if missing_marker_ids:
             self.logger.info(f"Missing {len(missing_marker_ids)} markers: {missing_marker_ids}")
@@ -484,10 +550,19 @@ class ArucoManager:
         for marker in marker_data:
             if marker['id'] not in expected_marker_ids:
                 continue
-                
-            # Use marker width as compartment width
-            marker_width = marker['width']
-            compartment_width = int(marker_width * 1)
+            
+            # ===================================================
+            # USE SCALE-BASED WIDTH IF AVAILABLE
+            # ===================================================
+            if compartment_width_px and compartment_width_px > 0:
+                # Use the calculated pixel width based on 2.1cm
+                compartment_width = compartment_width_px
+                self.logger.debug(f"Using scale-based width: {compartment_width}px (2.1cm)")
+            else:
+                # Fallback to marker width
+                compartment_width = int(marker['width'] * 1.0)
+                self.logger.debug(f"Using marker-based width: {compartment_width}px")
+            
             half_width = compartment_width // 2
             
             left_boundary = marker['center_x'] - half_width
@@ -505,7 +580,7 @@ class ArucoManager:
         # STEP 7.5: Apply boundary adjustments if provided in metadata
         if metadata and 'boundary_adjustments' in metadata:
             adjustments = metadata['boundary_adjustments']
-            print(f"DEBUG: Applying boundary adjustments: {adjustments}")
+            self.logger.debug(f"DEBUG: Applying boundary adjustments: {adjustments}")
             
             # Update top and bottom boundaries
             if 'top_boundary' in adjustments:
@@ -547,40 +622,14 @@ class ArucoManager:
             # Update compartment boundaries
             compartment_boundaries = adjusted_boundaries
             
-            # Update vertical constraints
-            result['vertical_constraints'] = (top_y, bottom_y)
-        
-        # Calculate average compartment width
-        if compartment_boundaries:
-            widths = [x2 - x1 for x1, _, x2, _ in compartment_boundaries]
-            result['avg_compartment_width'] = int(sum(widths) / len(widths))
-        
-        # STEP 8: Apply wall detection refinement if enabled
+        # Apply wall detection refinement if enabled
         if smart_cropping and compartment_boundaries:
-            print("DEBUG: Starting wall detection refinement")
-            refined_boundaries = self._refine_balanced_boundaries(
-                image, compartment_boundaries, 20)
+            self.logger.debug("DEBUG: Starting wall detection refinement")
+            # Pass scale data to refinement if available
+            refined_boundaries, viz_elements = self._refine_balanced_boundaries(
+                image, compartment_boundaries, 5, scale_px_per_cm)
             compartment_boundaries = refined_boundaries
         
-        result['boundaries'] = compartment_boundaries
-        
-        if hasattr(self, 'app') and hasattr(self.app, 'viz_manager'):
-            # Create visualization using viz_manager
-            initial_viz = self.app.viz_manager.create_visualization(
-                base_version="working",
-                viz_name="initial_boundaries",
-                draw_function=self.app._draw_boundaries_on_image,
-                boundaries=compartment_boundaries,
-                markers=markers,
-                save_as_version=False  # Just cache it
-            )
-            result['visualization'] = initial_viz
-        else:
-            # Fallback - just return the image with boundaries drawn manually
-            result['visualization'] = self._create_boundary_visualization(
-                image, compartment_boundaries, marker_to_compartment, markers
-            )
-
         # Create boundary to marker mapping
         boundary_to_marker = {}
         for i, boundary in enumerate(compartment_boundaries):
@@ -599,9 +648,347 @@ class ArucoManager:
             if closest_marker_id is not None:
                 boundary_to_marker[i] = closest_marker_id
         
-        result['boundary_to_marker'] = boundary_to_marker
+        # Build complete result dictionary
+        result = {
+            'boundaries': compartment_boundaries,
+            'missing_marker_ids': missing_marker_ids,
+            'vertical_constraints': (top_y, bottom_y),
+            'marker_to_compartment': marker_to_compartment,
+            'corner_markers': corner_markers,
+            'boundary_to_marker': boundary_to_marker,
+            
+            # Add marker analysis data
+            'marker_data': marker_data,
+            'detected_compartment_markers': comp_markers,
+            'expected_marker_ids': expected_marker_ids,
+            
+            # Add scale-based calculations
+            'scale_px_per_cm': scale_px_per_cm,
+            'compartment_width_cm': compartment_width_cm,
+            'compartment_height_cm': compartment_height_cm,
+            'compartment_width_px': compartment_width_px,
+            'compartment_height_px': compartment_height_px,
+            
+            # Wall detection results if performed
+            'wall_detection_performed': smart_cropping,
+            'wall_detection_results': {},
+            
+            # Processing metadata
+            'compartment_interval': compartment_interval
+        }
         
         return result
+
+    def _refine_balanced_boundaries(self, 
+                                image: np.ndarray, 
+                                boundaries: List[Tuple[int, int, int, int]],
+                                margin: int = 5,
+                                scale_px_per_cm: float = None) -> List[Tuple[int, int, int, int]]:
+        """
+        Refine compartment boundaries by finding walls on both sides and adjusting position.
+        Maintains compartment widths while ensuring walls aren't included.
+        
+        Args:
+            image: Input image
+            boundaries: Initial compartment boundaries from ArUco markers
+            margin: Margin around expected walls to search for actual walls (in pixels)
+            scale_px_per_cm: Scale factor for converting cm to pixels
+            
+        Returns:
+            Refined compartment boundaries with preserved widths
+            Viz elements for dialog display
+        """
+        if not boundaries or image is None:
+            return boundaries
+        
+        # Calculate scale-based gaps
+        gap_px = int(0.2 * scale_px_per_cm) if scale_px_per_cm else 2  # 2mm gap
+        special_gap_px = int(0.5 * scale_px_per_cm) if scale_px_per_cm else 5  # 5mm gap between compartments 10-11
+        
+        # Use scale-based margin if available (search within 5mm of expected position)
+        if scale_px_per_cm:
+            margin = int(0.8 * scale_px_per_cm)  # 8mm search margin
+            self.logger.debug(f"Using scale-based margin: {margin}px (5mm)")
+        
+        # Store visualization elements instead of creating an image
+        viz_elements = {
+            'search_regions': [],  # Store (x1, y1, x2, y2, color, thickness)
+            'detected_edges': [],  # Store (x1, y1, x2, y2, color, thickness)
+            'final_boundaries': []  # Store (x1, y1, x2, y2, color, thickness)
+        }
+        
+        # Convert to grayscale if needed
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+        
+        # First pass: collect all wall positions
+        compartment_data = []
+        for i, (x1, y1, x2, y2) in enumerate(boundaries):
+            # Get compartment width
+            compartment_width = x2 - x1
+            
+            # Define ROIs to search for edges - narrower search area
+            left_roi = (max(0, x1 - margin), y1, min(image.shape[1], x1 + margin), y2)
+            right_roi = (max(0, x2 - margin), y1, min(image.shape[1], x2 + margin), y2)
+            
+            # Store search regions for visualization
+            viz_elements['search_regions'].append((left_roi[0], left_roi[1], left_roi[2], left_roi[3], (0, 255, 255), 1))
+            viz_elements['search_regions'].append((right_roi[0], right_roi[1], right_roi[2], right_roi[3], (0, 255, 255), 1))
+            
+            # Detect vertical edges on both sides
+            left_edges = self._detect_vertical_edges_in_roi(gray, left_roi)
+            right_edges = self._detect_vertical_edges_in_roi(gray, right_roi)
+            
+            # Filter edges to remove those in the middle of compartments
+            # Prioritize edges that are close to expected boundary positions
+            best_left_edge = None
+            best_right_edge = None
+            
+            if left_edges:
+                # For left edge, prefer edges that are to the left of current position
+                valid_left_edges = [e for e in left_edges if e <= x1 + gap_px]
+                if valid_left_edges:
+                    # Get the rightmost valid edge (closest to compartment)
+                    best_left_edge = max(valid_left_edges)
+                else:
+                    # If no valid edges, get the closest one
+                    left_edges.sort(key=lambda x: abs(x - x1))
+                    best_left_edge = left_edges[0]
+            
+            if right_edges:
+                # For right edge, prefer edges that are to the right of current position
+                valid_right_edges = [e for e in right_edges if e >= x2 - gap_px]
+                if valid_right_edges:
+                    # Get the leftmost valid edge (closest to compartment)
+                    best_right_edge = min(valid_right_edges)
+                else:
+                    # If no valid edges, get the closest one
+                    right_edges.sort(key=lambda x: abs(x - x2))
+                    best_right_edge = right_edges[0]
+                
+            # Store compartment data with detected edges
+            compartment_data.append({
+                'original': (x1, y1, x2, y2),
+                'width': compartment_width,
+                'left_edge': best_left_edge,
+                'right_edge': best_right_edge,
+                'compartment_index': i,
+                'compartment_number': i + 1  # 1-based compartment number
+            })
+        
+            # Store detected wall positions for visualization
+            is_even = (i % 2 == 0)
+            left_edge_color = (255, 0, 0) if is_even else (0, 0, 255)  # Blue vs Red
+            right_edge_color = (0, 255, 0) if is_even else (255, 0, 255)  # Green vs Magenta
+            
+            if best_left_edge is not None:
+                viz_elements['detected_edges'].append((best_left_edge, y1, best_left_edge, y2, left_edge_color, 2))
+            if best_right_edge is not None:
+                viz_elements['detected_edges'].append((best_right_edge, y1, best_right_edge, y2, right_edge_color, 2))
+        
+        # Start wall detection debug summary
+        self.logger.debug("\n=== Wall Detection Summary ===")
+        self.logger.debug(f"Gap: {gap_px}px (3mm), Special gap (compartments 10-11 - aruco marker IDs 13-14): {special_gap_px}px (8mm)")
+        
+        # Initialize refined bounds with original boundaries
+        refined_bounds = [comp['original'] for comp in compartment_data]
+        
+        # Calculate maximum allowed adjustment based on scale
+        if scale_px_per_cm:
+            # Allow adjustment up to 1mm
+            max_adjustment_px = int(0.1 * scale_px_per_cm)
+        else:
+            # Fallback: 2% of compartment width
+            max_adjustment_px = None  # Will calculate per compartment
+        
+        # Process compartments in both directions
+        for direction in ["left_to_right", "right_to_left"]:
+            self.logger.debug(f"\n--- {direction.replace('_', ' ').title()} Pass ---")
+            
+            # Determine processing order
+            indices = range(len(compartment_data)) if direction == "left_to_right" else range(len(compartment_data)-1, -1, -1)
+            
+            for idx in indices:
+                comp_data = compartment_data[idx]
+                original_x1, y1, original_x2, y2 = comp_data['original']
+                width = comp_data['width']
+                left_edge = comp_data['left_edge']
+                right_edge = comp_data['right_edge']
+                comp_num = comp_data['compartment_number']
+                
+                # Get current boundary
+                current_x1, current_y1, current_x2, current_y2 = refined_bounds[idx]
+                
+                # Calculate max adjustment for this compartment
+                if max_adjustment_px is None:
+                    max_adjustment = width * 0.02  # 2% of width
+                else:
+                    max_adjustment = max_adjustment_px
+                
+                # Determine appropriate gap for this compartment
+                if comp_num == 10 and idx < len(compartment_data) - 1:
+                    # Special gap after compartment 10
+                    required_gap = special_gap_px
+                else:
+                    required_gap = gap_px
+                
+                summary = f"Compartment {comp_num} ({direction}): "
+                
+                # Proposed new positions
+                new_x1, new_x2 = current_x1, current_x2
+                
+                # Case 1: Both edges detected - center between walls with gap
+                if left_edge is not None and right_edge is not None:
+                    available_space = right_edge - left_edge - (2 * required_gap)
+                    
+                    if available_space >= width:
+                        # Enough space - center the compartment
+                        midpoint = (left_edge + required_gap + right_edge - required_gap) / 2
+                        proposed_x1 = midpoint - (width / 2)
+                        proposed_x2 = midpoint + (width / 2)
+                        
+                        # Apply adjustment limit
+                        left_adjustment = abs(proposed_x1 - original_x1)
+                        right_adjustment = abs(proposed_x2 - original_x2)
+                        
+                        if left_adjustment <= max_adjustment and right_adjustment <= max_adjustment:
+                            new_x1, new_x2 = proposed_x1, proposed_x2
+                            summary += f"Centered between walls with {required_gap}px gap. "
+                        else:
+                            summary += f"Adjustment exceeds limit ({max_adjustment:.1f}px). "
+                    else:
+                        summary += f"Insufficient space between walls ({available_space:.1f}px < {width}px). "
+                
+                # Case 2: Only left edge detected
+                elif left_edge is not None:
+                    min_safe_x1 = left_edge + required_gap
+                    
+                    if current_x1 < min_safe_x1:
+                        shift_amount = min(max_adjustment, min_safe_x1 - current_x1)
+                        new_x1 = current_x1 + shift_amount
+                        new_x2 = new_x1 + width
+                        summary += f"Left wall: shifted right {shift_amount:.1f}px. "
+                    else:
+                        summary += "Left wall: already clear. "
+                
+                # Case 3: Only right edge detected
+                elif right_edge is not None:
+                    max_safe_x2 = right_edge - required_gap
+                    
+                    if current_x2 > max_safe_x2:
+                        shift_amount = min(max_adjustment, current_x2 - max_safe_x2)
+                        new_x2 = current_x2 - shift_amount
+                        new_x1 = new_x2 - width
+                        summary += f"Right wall: shifted left {shift_amount:.1f}px. "
+                    else:
+                        summary += "Right wall: already clear. "
+                
+                # Case 4: No walls detected
+                else:
+                    # Check if compartment is undersized and can be expanded
+                    if scale_px_per_cm and width < int(2.1 * scale_px_per_cm * 0.95):  # Less than 95% of 2cm
+                        target_width = int(2.1 * scale_px_per_cm)
+                        expansion = target_width - width
+                        
+                        # Try to expand equally on both sides
+                        expand_left = expansion // 2
+                        expand_right = expansion - expand_left
+                        
+                        # Check boundaries don't overlap with neighbors
+                        can_expand = True
+                        if idx > 0:
+                            prev_x2 = refined_bounds[idx-1][2]
+                            if current_x1 - expand_left < prev_x2 + required_gap:
+                                can_expand = False
+                        if idx < len(refined_bounds) - 1:
+                            next_x1 = refined_bounds[idx+1][0]
+                            if current_x2 + expand_right > next_x1 - required_gap:
+                                can_expand = False
+                        
+                        if can_expand:
+                            new_x1 = current_x1 - expand_left
+                            new_x2 = current_x2 + expand_right
+                            width = new_x2 - new_x1  # Update width
+                            summary += f"Expanded to 2.1cm ({target_width}px). "
+                        else:
+                            summary += "No walls, undersized but can't expand. "
+                    else:
+                        summary += "No walls detected. "
+                
+                # Handle special gap between compartments 10 and 11
+                if comp_num == 10 and idx < len(refined_bounds) - 1 and direction == "left_to_right":
+                    next_x1 = refined_bounds[idx + 1][0]
+                    current_gap = next_x1 - new_x2
+                    
+                    if current_gap < special_gap_px:
+                        # Need to create larger gap
+                        adjustment_needed = special_gap_px - current_gap
+                        # Try to shift compartment 10 left
+                        if left_edge is None or new_x1 - adjustment_needed > left_edge + gap_px:
+                            new_x1 -= adjustment_needed
+                            new_x2 -= adjustment_needed
+                            summary += f"Adjusted for 5mm gap to comp 11. "
+                        else:
+                            summary += f"Need 5mm gap but constrained by wall. "
+                
+                # Check for overlaps with adjacent compartments
+                if idx > 0 and direction == "left_to_right":
+                    prev_x2 = refined_bounds[idx-1][2]
+                    min_x1 = prev_x2 + (special_gap_px if idx == 10 else gap_px)
+                    
+                    if new_x1 < min_x1:
+                        new_x1 = min_x1
+                        new_x2 = new_x1 + width
+                        summary += f"Fixed left overlap. "
+                
+                if idx < len(refined_bounds)-1 and direction == "right_to_left":
+                    next_x1 = refined_bounds[idx+1][0]
+                    max_x2 = next_x1 - (special_gap_px if comp_num == 10 else gap_px)
+                    
+                    if new_x2 > max_x2:
+                        new_x2 = max_x2
+                        new_x1 = new_x2 - width
+                        summary += f"Fixed right overlap. "
+                
+                # Update refined boundary if changes were made
+                if new_x1 != current_x1 or new_x2 != current_x2:
+                    refined_bounds[idx] = (int(new_x1), y1, int(new_x2), y2)
+                    summary += f"Moved: ({current_x1:.0f},{current_x2:.0f}) → ({new_x1:.0f},{new_x2:.0f})"
+                    self.logger.debug(summary)
+                else:
+                    summary += "No change needed."
+                    self.logger.debug(summary)
+        
+        # Final validation pass
+        self.logger.debug("\n--- Final Validation ---")
+        
+        for i in range(len(refined_bounds)-1):
+            x1, y1, x2, y2 = refined_bounds[i]
+            next_x1, _, _, _ = refined_bounds[i+1]
+            
+            actual_gap = next_x1 - x2
+            expected_gap = special_gap_px if i == 9 else gap_px  # i=9 is compartment 10
+            
+            if actual_gap < 0:
+                self.logger.warning(f"Overlap between compartments {i+1} and {i+2}: {-actual_gap:.1f}px")
+            elif actual_gap < expected_gap * 0.01:  # Allow 01% tolerance
+                self.logger.warning(f"Gap between compartments {i+1} and {i+2} too small: {actual_gap:.1f}px (expected {expected_gap}px)")
+        
+        # Store final boundaries for visualization
+        for i, (x1, y1, x2, y2) in enumerate(refined_bounds):
+            is_even = (i % 2 == 0)
+            boundary_color = (0, 255, 255) if is_even else (255, 255, 0)
+            viz_elements['final_boundaries'].append((x1, y1, x2, y2, boundary_color, 1))
+        
+        self.logger.debug("=== End Wall Detection Summary ===\n")
+        
+        # Store visualization elements
+        if hasattr(self, 'viz_steps'):
+            self.viz_steps['wall_detection_elements'] = viz_elements
+        
+        return refined_bounds, viz_elements
 
     def _detect_vertical_edges_in_roi(self, image: np.ndarray, roi: Tuple[int, int, int, int],
                                     min_line_length: int = 50, max_line_gap: int = 5) -> List[int]:
@@ -627,7 +1014,7 @@ class ArucoManager:
             self.logger.warning(f"Invalid ROI dimensions: {roi}, image shape: {image.shape}")
             return []
         
-        # Extract ROI from the image
+        # Extract ROI from the image - the ROI is too broad - it should be narrower and try to focus on detecting vertical lines BETWEEN compartment boundaries as priority - currently compartments can be cut in half from false positives within the actual compartment itself.
         roi_img = image[y1:y2, x1:x2].copy()
         
         # Validate extracted ROI is not empty
@@ -687,260 +1074,5 @@ class ArucoManager:
                 center_x = (x1_line + x2_line) // 2
                 vertical_edges.append(center_x)
         
-        # Convert local ROI coordinates back to global image coordinates
+        # Convert local ROI coordinates back to global image coordinates TODO - save these to the viz_steps?
         return [x1 + x for x in vertical_edges]
-
-    def _refine_balanced_boundaries(self, 
-                                image: np.ndarray, 
-                                boundaries: List[Tuple[int, int, int, int]],
-                                margin: int = 20) -> List[Tuple[int, int, int, int]]:
-        """
-        Refine compartment boundaries by finding walls on both sides and adjusting position.
-        Maintains original compartment widths while ensuring walls aren't included.
-        
-        Args:
-            image: Input image
-            boundaries: Initial compartment boundaries from ArUco markers
-            margin: Margin around expected walls to search for actual walls
-            
-        Returns:
-            Refined compartment boundaries with preserved widths
-        """
-        if not boundaries or image is None:
-            return boundaries
-        
-        # Store visualization elements instead of creating an image
-        viz_elements = {
-            'search_regions': [],  # Store (x1, y1, x2, y2, color, thickness)
-            'detected_edges': [],  # Store (x1, y1, x2, y2, color, thickness)
-            'final_boundaries': []  # Store (x1, y1, x2, y2, color, thickness)
-        }
-        
-        # Convert to grayscale if needed
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image
-        
-        # First pass: collect all wall positions
-        compartment_data = []
-        for i, (x1, y1, x2, y2) in enumerate(boundaries):
-            # Fixed compartment width from markers
-            compartment_width = x2 - x1
-            
-            # Define ROIs to search for edges
-            left_roi = (max(0, x1 - margin), y1, min(image.shape[1], x1 + margin), y2)
-            right_roi = (max(0, x2 - margin), y1, min(image.shape[1], x2 + margin), y2)
-            
-            # Store search regions for visualization
-            viz_elements['search_regions'].append((left_roi[0], left_roi[1], left_roi[2], left_roi[3], (0, 255, 255), 1))
-            viz_elements['search_regions'].append((right_roi[0], right_roi[1], right_roi[2], right_roi[3], (0, 255, 255), 1))
-            
-            # Detect vertical edges on both sides
-            left_edges = self._detect_vertical_edges_in_roi(gray, left_roi)
-            right_edges = self._detect_vertical_edges_in_roi(gray, right_roi)
-            
-            # Find best wall positions
-            best_left_edge = None
-            best_right_edge = None
-            
-            # Find the closest left edge to the expected position
-            if left_edges:
-                # Sort edges by distance to expected position
-                left_edges.sort(key=lambda x: abs(x - x1))
-                best_left_edge = left_edges[0]
-            
-            # Find the closest right edge to the expected position
-            if right_edges:
-                # Sort edges by distance to expected position
-                right_edges.sort(key=lambda x: abs(x - x2))
-                best_right_edge = right_edges[0]
-                
-            # Store compartment data with detected edges
-            compartment_data.append({
-                'original': (x1, y1, x2, y2),
-                'width': compartment_width,
-                'left_edge': best_left_edge,
-                'right_edge': best_right_edge,
-                'compartment_index': i  # Store the compartment index
-            })
-        
-            # Store detected wall positions for visualization (with colors based on even/odd)
-            is_even = (i % 2 == 0)
-            left_edge_color = (255, 0, 0) if is_even else (0, 0, 255)  # Blue vs Red in BGR
-            right_edge_color = (0, 255, 0) if is_even else (255, 0, 255)  # Green vs Magenta in BGR
-            
-            if best_left_edge is not None:
-                viz_elements['detected_edges'].append((best_left_edge, y1, best_left_edge, y2, left_edge_color, 2))
-            if best_right_edge is not None:
-                viz_elements['detected_edges'].append((best_right_edge, y1, best_right_edge, y2, right_edge_color, 2))
-        
-        # Start wall detection debug summary
-        self.logger.debug("\n=== Wall Detection Summary ===")
-        
-        # Initialize refined bounds with original boundaries as starting point
-        refined_bounds = [comp['original'] for comp in compartment_data]
-        buffer = 2  # Buffer pixels to avoid including the wall
-        
-        # Process compartments in both directions
-        for direction in ["left_to_right", "right_to_left"]:
-            self.logger.debug(f"\n--- {direction.replace('_', ' ').title()} Pass ---")
-            
-            # Determine processing order
-            indices = range(len(compartment_data)) if direction == "left_to_right" else range(len(compartment_data)-1, -1, -1)
-            
-            for idx in indices:
-                comp_data = compartment_data[idx]
-                original_x1, y1, original_x2, y2 = comp_data['original']
-                width = comp_data['width']
-                left_edge = comp_data['left_edge']
-                right_edge = comp_data['right_edge']
-                compartment_index = comp_data['compartment_index']
-                
-                # Get current boundary (potentially already adjusted in previous pass)
-                current_x1, current_y1, current_x2, current_y2 = refined_bounds[idx]
-                
-                # Calculate max allowed adjustment (10% of width)
-                max_adjustment = width * 0.1
-                
-                # Start building summary for this compartment
-                summary = f"Compartment {idx+1} ({direction}): "
-                
-                # Proposed new positions (default to current)
-                new_x1, new_x2 = current_x1, current_x2
-                
-                # Case 1: Both edges detected - center the compartment while maintaining width
-                if left_edge is not None and right_edge is not None:
-                    # Calculate midpoint between walls with buffer
-                    midpoint = (left_edge + buffer + right_edge - buffer) / 2
-                    # Calculate proposed positions centered at midpoint
-                    proposed_x1 = midpoint - (width / 2)
-                    proposed_x2 = midpoint + (width / 2)
-                    
-                    # Check if adjustment is within allowed range
-                    left_adjustment = abs(proposed_x1 - original_x1)
-                    right_adjustment = abs(proposed_x2 - original_x2)
-                    
-                    if left_adjustment <= max_adjustment and right_adjustment <= max_adjustment:
-                        new_x1, new_x2 = proposed_x1, proposed_x2
-                        summary += f"Both walls detected. Centered within limits. "
-                    else:
-                        # Limit the adjustment
-                        if left_adjustment > max_adjustment:
-                            # Limit left adjustment
-                            if proposed_x1 < original_x1:
-                                new_x1 = original_x1 - max_adjustment
-                            else:
-                                new_x1 = original_x1 + max_adjustment
-                            new_x2 = new_x1 + width
-                            summary += f"Both walls detected. Left adjustment limited to {max_adjustment:.1f}px. "
-                        else:
-                            # Limit right adjustment
-                            if proposed_x2 < original_x2:
-                                new_x2 = original_x2 - max_adjustment
-                            else:
-                                new_x2 = original_x2 + max_adjustment
-                            new_x1 = new_x2 - width
-                            summary += f"Both walls detected. Right adjustment limited to {max_adjustment:.1f}px. "
-                
-                # Case 2: Only left edge detected
-                elif left_edge is not None:
-                    min_safe_x1 = left_edge + buffer  # Minimum safe position
-                    
-                    if current_x1 < min_safe_x1:
-                        # Need to shift right to avoid the wall
-                        shift_amount = min(max_adjustment, min_safe_x1 - current_x1)
-                        new_x1 = current_x1 + shift_amount
-                        new_x2 = new_x1 + width
-                        summary += f"Left wall detected. Shifted right by {shift_amount:.1f}px (limited). "
-                    else:
-                        summary += "Left wall detected but already clear. "
-                
-                # Case 3: Only right edge detected
-                elif right_edge is not None:
-                    max_safe_x2 = right_edge - buffer  # Maximum safe position
-                    
-                    if current_x2 > max_safe_x2:
-                        # Need to shift left to avoid the wall
-                        shift_amount = min(max_adjustment, current_x2 - max_safe_x2)
-                        new_x2 = current_x2 - shift_amount
-                        new_x1 = new_x2 - width
-                        summary += f"Right wall detected. Shifted left by {shift_amount:.1f}px (limited). "
-                    else:
-                        summary += "Right wall detected but already clear. "
-                
-                # Case 4: No walls detected
-                else:
-                    summary += "No walls detected. "
-                
-                # Check if adjusted position would overlap with adjacent compartments
-                # and adjust if necessary
-                overlap_fixed = False
-                
-                # Check left overlap (with previous compartment)
-                if idx > 0 and direction == "left_to_right":
-                    prev_x1, _, prev_x2, _ = refined_bounds[idx-1]
-                    if new_x1 < prev_x2:  # Overlap detected
-                        shift_needed = prev_x2 - new_x1
-                        # Only shift if it doesn't push into a right wall
-                        if right_edge is None or new_x2 + shift_needed < right_edge - buffer:
-                            new_x1 = prev_x2
-                            new_x2 = new_x1 + width
-                            summary += f"Fixed left overlap ({shift_needed:.1f}px). "
-                            overlap_fixed = True
-                
-                # Check right overlap (with next compartment)
-                if idx < len(refined_bounds)-1 and direction == "right_to_left":
-                    next_x1, _, next_x2, _ = refined_bounds[idx+1]
-                    if new_x2 > next_x1:  # Overlap detected
-                        shift_needed = new_x2 - next_x1
-                        # Only shift if it doesn't push into a left wall
-                        if left_edge is None or new_x1 - shift_needed > left_edge + buffer:
-                            new_x2 = next_x1
-                            new_x1 = new_x2 - width
-                            summary += f"Fixed right overlap ({shift_needed:.1f}px). "
-                            overlap_fixed = True
-                
-                # Update refined boundary if changes were made
-                if new_x1 != current_x1 or new_x2 != current_x2:
-                    refined_bounds[idx] = (int(new_x1), y1, int(new_x2), y2)
-                    final_width = new_x2 - new_x1
-                    shift_desc = f"Moved from ({current_x1:.1f}, {current_x2:.1f}) to ({new_x1:.1f}, {new_x2:.1f}). "
-                    summary += shift_desc + f"Final width: {final_width:.1f}px."
-                    self.logger.debug(summary)
-                else:
-                    summary += "No change needed."
-                    self.logger.debug(summary)
-        
-        # Final validation pass - check for any remaining overlaps
-        self.logger.debug("\n--- Final Validation ---")
-        has_overlaps = False
-        
-        for i in range(len(refined_bounds)-1):
-            _, _, current_right, _ = refined_bounds[i]
-            next_left, _, _, _ = refined_bounds[i+1]
-            
-            if current_right > next_left:
-                has_overlaps = True
-                self.logger.warning(
-                    f"Remaining overlap between compartments {i+1} and {i+2}: "
-                    f"{current_right-next_left:.1f}px overlap"
-                )
-        
-        if not has_overlaps:
-            self.logger.debug("Final validation completed - no overlaps detected.")
-        
-        # Store final boundaries for visualization with colors based on compartment index
-        for i, (x1, y1, x2, y2) in enumerate(refined_bounds):
-            is_even = (i % 2 == 0)
-            boundary_color = (0, 255, 255) if is_even else (255, 255, 0)
-            viz_elements['final_boundaries'].append((x1, y1, x2, y2, boundary_color, 1))
-        
-        self.logger.debug("=== End Wall Detection Summary ===\n")
-        
-        # Store visualization elements in viz_steps
-        if hasattr(self, 'viz_steps'):
-            self.viz_steps['wall_detection_elements'] = viz_elements
-        
-        return refined_bounds
-    
