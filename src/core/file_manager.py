@@ -105,7 +105,9 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List, Union
 import traceback
 import piexif
-
+from pillow_heif import register_heif_opener
+register_heif_opener()
+from PIL import Image as PILImage
 
 
 class FileManager:
@@ -585,6 +587,70 @@ class FileManager:
             self.logger.error(f"Error checking for previously processed file: {str(e)}")
             return None
     
+
+    def convert_heif_to_jpeg(self, heif_path: str, delete_original: bool = True) -> Optional[str]:
+        """
+        Convert HEIF/HEIC file to JPEG format.
+        
+        Args:
+            heif_path: Path to HEIF/HEIC file
+            delete_original: Whether to delete original after successful conversion
+            
+        Returns:
+            Path to converted JPEG file or None if conversion failed
+        """
+        try:
+            # Check if file is HEIF/HEIC
+            if not heif_path.lower().endswith(('.heic', '.heif')):
+                self.logger.warning(f"File is not HEIF/HEIC: {heif_path}")
+                return None
+            
+            # Load with PIL (pillow-heif registered)
+            img = PILImage.open(heif_path)
+            
+            # Create output path with .jpg extension
+            base_path = os.path.splitext(heif_path)[0]
+            jpeg_path = f"{base_path}.jpg"
+            
+            # Handle existing files
+            counter = 1
+            while os.path.exists(jpeg_path):
+                jpeg_path = f"{base_path}_{counter}.jpg"
+                counter += 1
+            
+            # Convert to RGB if necessary
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Save as JPEG with high quality
+            img.save(jpeg_path, 'JPEG', quality=95, optimize=True)
+            
+            # Verify conversion
+            if os.path.exists(jpeg_path) and os.path.getsize(jpeg_path) > 0:
+                self.logger.info(f"Converted HEIF to JPEG: {heif_path} -> {jpeg_path}")
+                
+                # Copy metadata
+                try:
+                    self.copy_with_metadata(heif_path, jpeg_path)
+                except Exception as e:
+                    self.logger.warning(f"Could not copy all metadata: {e}")
+                
+                # Delete original if requested
+                if delete_original:
+                    try:
+                        os.remove(heif_path)
+                        self.logger.info(f"Deleted original HEIF file: {heif_path}")
+                    except Exception as e:
+                        self.logger.error(f"Could not delete original HEIF: {e}")
+                
+                return jpeg_path
+            else:
+                self.logger.error("JPEG file not created or empty")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Error converting HEIF to JPEG: {e}")
+            return None
 
     def save_compartment(self, 
                         image: np.ndarray, 
