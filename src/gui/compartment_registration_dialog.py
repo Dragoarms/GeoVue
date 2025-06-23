@@ -47,9 +47,9 @@ class CompartmentRegistrationDialog:
     def __init__(self, parent, image, detected_boundaries, missing_marker_ids=None,
                 theme_colors=None, gui_manager=None, boundaries_viz=None, original_image=None,
                 output_format="png", file_manager=None, metadata=None, vertical_constraints=None,
-                marker_to_compartment=None, is_metadata_marker=False, rotation_angle=0.0,
+                marker_to_compartment=None, rotation_angle=0.0,
                 corner_markers=None, markers=None, config=None, on_apply_adjustments=None,
-                show_adjustment_controls=True, image_path=None, scale_data=None):
+                show_adjustment_controls=True, image_path=None, scale_data=None, boundary_analysis=None):
         """
         Initialize the unified compartment registration dialog.
         
@@ -67,7 +67,6 @@ class CompartmentRegistrationDialog:
             metadata: Optional metadata dictionary containing hole_id, depth_from, depth_to
             vertical_constraints: Optional tuple of (min_y, max_y) for compartment placement
             marker_to_compartment: Dictionary mapping marker IDs to compartment numbers
-            is_metadata_marker: Whether we're annotating a metadata marker (ID 24)
             rotation_angle: Current rotation angle of the image (degrees)
             corner_markers: Dictionary of corner marker positions {0: (x,y), 1: (x,y)...}
             markers: Dictionary of all detected ArUco markers {id: corners}
@@ -94,14 +93,56 @@ class CompartmentRegistrationDialog:
         self.logger = logging.getLogger(__name__)
         
         # Store original image and visualization data
-        self.original_boundaries_viz = image.copy() if image is not None else None
-        self.boundaries_viz = self.original_boundaries_viz.copy() if self.original_boundaries_viz is not None else (
-            boundaries_viz.copy() if boundaries_viz is not None else None)
+        self.source_image = image.copy() if image is not None else None
+        self.source_image = self.source_image.copy() if self.source_image is not None else (
+            boundaries_viz.copy() if self.boundaries_viz is not None else None)
         self.image = image.copy() if image is not None else None
-        self.detected_boundaries = detected_boundaries.copy() if detected_boundaries else []
-        self.missing_marker_ids = sorted(missing_marker_ids) if missing_marker_ids else []
         self.original_image = original_image if original_image is not None else None
+        # ===================================================
+        # REMOVE: Confusing multiple image references above
+        # REPLACE WITH: Clear image management
+        # Image management with clear naming
+        # 1. source_image: The original clean image without any annotations (never modified)
+        # 2. display_image: The current working image for visualization (gets updated)
+        # 3. high_res_image: Optional high-resolution image for extraction purposes
 
+        # Handle input parameters to determine our source image
+        if image is not None:
+            self.source_image = image.copy()
+        elif boundaries_viz is not None:
+            self.source_image = boundaries_viz.copy()
+        else:
+            self.source_image = None
+            self.logger.error("No image provided to CompartmentRegistrationDialog")
+
+        # Initialize display image as a copy of source
+        self.display_image = self.source_image.copy() if self.source_image is not None else None
+
+        # Store high-res image if provided (for extraction)
+        self.high_res_image = original_image.copy() if original_image is not None else None
+
+        # Store detected boundaries
+        self.detected_boundaries = detected_boundaries.copy() if detected_boundaries else []
+
+        # Initialize missing_marker_ids before checking corner markers
+        self.missing_marker_ids = missing_marker_ids if missing_marker_ids is not None else []
+
+        # Store corner markers and markers
+        self.corner_markers = corner_markers or {}
+        self.markers = markers or {}
+        # ===================================================
+
+        # Store boundary analysis data
+        self.boundary_analysis = boundary_analysis
+        if boundary_analysis:
+            # Use the average compartment width from analysis
+            if 'avg_compartment_width' in boundary_analysis:
+                self.avg_width = boundary_analysis['avg_compartment_width']
+            
+            # Use boundary to marker mapping if available
+            if 'boundary_to_marker' in boundary_analysis:
+                self.boundary_to_marker = boundary_analysis['boundary_to_marker']
+        
         # Store scale data
         self.scale_data = scale_data
         
@@ -109,7 +150,6 @@ class CompartmentRegistrationDialog:
         self.output_format = output_format
         self.file_manager = file_manager
         self.metadata = metadata or {}
-        self.is_metadata_marker = is_metadata_marker
         self.rotation_angle = rotation_angle
         self.corner_markers = corner_markers or {}
         self.markers = markers or {}
@@ -127,6 +167,9 @@ class CompartmentRegistrationDialog:
         self.current_index = 0
         self.result_boundaries = {}
         self.annotation_complete = False
+
+        # Initialize missing_marker_ids before checking corner markers
+        self.missing_marker_ids = missing_marker_ids if missing_marker_ids is not None else []
 
         # Check if we need to add corner markers to missing list
         self._check_missing_corner_markers()
@@ -221,6 +264,12 @@ class CompartmentRegistrationDialog:
         
         # Update mode display
         self._update_mode_indicator()
+
+    def _get_image_dimensions(self):
+        """Get image dimensions consistently."""
+        if self.source_image is not None:
+            return self.source_image.shape[:2]
+        return (800, 1000)  # Default dimensions if no image
 
 
     def _check_missing_corner_markers(self):
@@ -361,10 +410,10 @@ class CompartmentRegistrationDialog:
             self.logger.info(f"Calculated constraints from corner markers: top_y={self.top_y}, bottom_y={self.bottom_y}")
             return
         
-        # Fall back to using detected boundaries
+        # Fall back to using detected boundaries TODO - FALLBACK LOGIC WILL BREAK THIS SOONER OR LATER
         if not self.detected_boundaries:
             # Default values if no boundaries are detected
-            h = self.boundaries_viz.shape[0] if self.boundaries_viz is not None else 800
+            h = self.source_image.shape[0] if self.source_image is not None else 800
             self.top_y = int(h * 0.1)
             self.bottom_y = int(h * 0.9)
             self.logger.warning(f"Using default constraints: top_y={self.top_y}, bottom_y={self.bottom_y}")
@@ -378,13 +427,13 @@ class CompartmentRegistrationDialog:
         if top_coords:
             self.top_y = int(sum(top_coords) / len(top_coords))
         else:
-            h = self.boundaries_viz.shape[0] if self.boundaries_viz is not None else 800
+            h = self.source_image.shape[0] if self.source_image is not None else 800
             self.top_y = int(h * 0.1)
             
         if bottom_coords:
             self.bottom_y = int(sum(bottom_coords) / len(bottom_coords))
         else:
-            h = self.boundaries_viz.shape[0] if self.boundaries_viz is not None else 800
+            h = self.source_image.shape[0] if self.source_image is not None else 800
             self.bottom_y = int(h * 0.9)
             
         self.logger.info(f"Calculated constraints from boundaries: top_y={self.top_y}, bottom_y={self.bottom_y}")
@@ -395,8 +444,8 @@ class CompartmentRegistrationDialog:
         if not self.detected_boundaries:
             # Default value if no boundaries are detected
             w = 0
-            if self.boundaries_viz is not None:
-                w = self.boundaries_viz.shape[1]
+            if self.source_image is not None:
+                w = self.source_image.shape[1]
             else:
                 w = 1000  # Fallback default width
             self.avg_width = int(w * 0.04)  # 4% of image width as default
@@ -408,7 +457,7 @@ class CompartmentRegistrationDialog:
         if widths:
             self.avg_width = int(sum(widths) / len(widths))
         else:
-            w = self.boundaries_viz.shape[1] if self.boundaries_viz is not None else 1000
+            w = self.source_image.shape[1] if self.source_image is not None else 1000
             self.avg_width = int(w * 0.04)  # 4% of image width as default
 
     def _would_overlap_existing(self, x_pos):
@@ -426,7 +475,7 @@ class CompartmentRegistrationDialog:
             # Calculate the boundaries for the potential new compartment
             half_width = self.avg_width // 2
             new_x1 = max(0, x_pos - half_width)
-            new_x2 = min(self.boundaries_viz.shape[1] - 1, x_pos + half_width)
+            new_x2 = min(self.source_image.shape[1] - 1, x_pos + half_width)
             
             # Check against all manually annotated compartments (excluding metadata marker)
             for comp_id, boundary in self.result_boundaries.items():
@@ -1326,11 +1375,11 @@ class CompartmentRegistrationDialog:
                 if not hasattr(self, 'left_zoom_window') or not hasattr(self, 'right_zoom_window'):
                     self._create_zoom_windows()
                     
-                if self.boundaries_viz is None:
+                if self.source_image is None:
                     return
                     
                 # Get image dimensions
-                h, w = self.boundaries_viz.shape[:2]
+                h, w = self.source_image.shape[:2]
                 
 
                 # Define zoom regions based on corner markers or compartment boundaries
@@ -1398,13 +1447,13 @@ class CompartmentRegistrationDialog:
                 
                 try:
                     # Extract left region
-                    left_region = self.boundaries_viz[
+                    left_region = self.source_image[
                         max(0, center_y - zoom_size):min(h, center_y + zoom_size),
                         max(0, left_x - zoom_size):min(w, left_x + zoom_size)
                     ].copy()
                     
                     # Extract right region
-                    right_region = self.boundaries_viz[
+                    right_region = self.source_image[
                         max(0, center_y - zoom_size):min(h, center_y + zoom_size),
                         max(0, right_x - zoom_size):min(w, right_x + zoom_size)
                     ].copy()
@@ -1979,10 +2028,10 @@ class CompartmentRegistrationDialog:
             delta: Change in position (positive = down, negative = up)
         """
         # Calculate the height of the image
-        if self.boundaries_viz is None:
+        if self.source_image is None:
             return
             
-        img_height = self.boundaries_viz.shape[0]
+        img_height = self.source_image.shape[0]
         
         # Debug: Log original boundaries 
         self.logger.debug(f"Before adjustment - top_y: {self.top_y}, bottom_y: {self.bottom_y}")
@@ -2064,7 +2113,7 @@ class CompartmentRegistrationDialog:
         if not self.result_boundaries:
             return
             
-        img_width = self.original_boundaries_viz.shape[1] if self.original_boundaries_viz is not None else 0
+        img_width = self.source_image.shape[1] if self.source_image is not None else 0
         
         # Loop through manually placed compartments
         for marker_id, boundary in list(self.result_boundaries.items()):
@@ -2108,7 +2157,7 @@ class CompartmentRegistrationDialog:
             original_boundaries = self.detected_boundaries.copy() if self.detected_boundaries else []
             
             # Recreate boundaries using current parameters
-            img_width = self.original_boundaries_viz.shape[1] if self.original_boundaries_viz is not None else 0
+            img_width = self.source_image.shape[1] if self.source_image is not None else 0
             adjusted_boundaries = []
             
             # Update auto-detected boundaries
@@ -2206,10 +2255,10 @@ class CompartmentRegistrationDialog:
             image_y = int((event.y - self.canvas_offset_y) / self.scale_ratio)
             
             # Ensure the click is within the image bounds
-            if self.boundaries_viz is None:
+            if self.source_image is None:
                 return
                 
-            img_height, img_width = self.boundaries_viz.shape[:2]
+            img_height, img_width = self.source_image.shape[:2]
             if not (0 <= image_x < img_width and 0 <= image_y < img_height):
                 return
                 
@@ -2358,7 +2407,7 @@ class CompartmentRegistrationDialog:
                     x1 = max(0, image_x - half_width)
                     
                     # Calculate y-coordinates based on x-position using the slope of boundary lines
-                    img_width = self.boundaries_viz.shape[1]
+                    img_width = self.source_image.shape[1]
                     
                     # Calculate top and bottom boundary y values at this x position
                     left_top_y = self.top_y + self.left_height_offset
@@ -2413,10 +2462,10 @@ class CompartmentRegistrationDialog:
             image_y = int((event.y - self.canvas_offset_y) / self.scale_ratio)
             
             # Ensure the point is within the image bounds
-            if self.boundaries_viz is None:
+            if self.source_image is None:
                 return
                 
-            img_height, img_width = self.boundaries_viz.shape[:2]
+            img_height, img_width = self.source_image.shape[:2]
             if not (0 <= image_x < img_width and 0 <= image_y < img_height):
                 # Hide zoom lens if cursor is outside image
                 if hasattr(self, '_zoom_lens') and self._zoom_lens:
@@ -2504,7 +2553,7 @@ class CompartmentRegistrationDialog:
             event: Mouse event
             flipped: Whether to display flipped view
         """
-        if self.boundaries_viz is None:
+        if self.source_image is None:
             return
             
         # Define zoom lens dimensions
@@ -2516,7 +2565,7 @@ class CompartmentRegistrationDialog:
         y = int((event.y - self.canvas_offset_y) / self.scale_ratio)
         
         # Get image dimensions
-        h, w = self.boundaries_viz.shape[:2]
+        h, w = self.source_image.shape[:2]
         
         # ===================================================
         # MODIFIED: Different crop logic for missing boundaries mode
@@ -2540,15 +2589,8 @@ class CompartmentRegistrationDialog:
             top = max(0, center_y - vertical_height // 2 - 20)
             bottom = min(h, top + vertical_height + 40)
             
-            # ===================================================
-            # FIXED: Use original clean image, not the annotated one
-            # ===================================================
-            # Start with clean original image
-            if hasattr(self, 'original_boundaries_viz') and self.original_boundaries_viz is not None:
-                img = self.original_boundaries_viz.copy()
-            else:
-                img = self.image.copy() if self.image is not None else self.boundaries_viz.copy()
-            
+            # Start with clean source image
+            img = self.source_image.copy()
             # Extract the region first from the clean image
             region = img[top:bottom, left:right].copy()
             
@@ -2615,7 +2657,7 @@ class CompartmentRegistrationDialog:
                 return  # Skip if invalid crop area
             
             # Extract region from current visualization (with all annotations)
-            region = self.boundaries_viz[upper:lower, left:right]
+            region = self.display_image[upper:lower, left:right]
             
         try:
             # Convert to RGB
@@ -2729,7 +2771,7 @@ class CompartmentRegistrationDialog:
             fast_mode: If True, use faster updates for mouse motion (skips some elements)
             force_full_update: If True, force recreation of static elements
         """
-        if self.original_boundaries_viz is None:
+        if self.source_image is None:
             return
         
         try:
@@ -2997,7 +3039,7 @@ class CompartmentRegistrationDialog:
             self.canvas_offset_x = x_offset
             self.canvas_offset_y = y_offset
             self.current_viz = viz_image
-            self.boundaries_viz = viz_image
+            self.display_image = viz_image
             
             # Update static zoom views if in adjustment mode
             if self.current_mode == self.MODE_ADJUST_BOUNDARIES:
@@ -3014,7 +3056,7 @@ class CompartmentRegistrationDialog:
         This includes: markers, scale bar, boundaries, labels, etc.
         Returns the static image that can be cached.
         """
-        if self.original_boundaries_viz is None:
+        if self.source_image is None:
             return None
             
         # Get current parameters to check if cache is valid
@@ -3036,7 +3078,7 @@ class CompartmentRegistrationDialog:
         
         # Need to recreate static visualization
         # Start with clean original image
-        static_viz = self.original_boundaries_viz.copy()
+        static_viz = self.source_image.copy()
         
         # Get image dimensions
         img_height, img_width = static_viz.shape[:2]
