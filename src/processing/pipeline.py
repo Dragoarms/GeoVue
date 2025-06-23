@@ -13,10 +13,11 @@ try:
 except Exception:  # pragma: no cover - PIL optional
     PILImage = None
 
+
 logger = logging.getLogger(__name__)
 
 
-def load_image(image_path: str) -> np.ndarray:
+def load_image_to_np_array(image_path: str) -> np.ndarray:
     """Load an image from disk using PIL with OpenCV fallback.
 
     Args:
@@ -39,26 +40,6 @@ def load_image(image_path: str) -> np.ndarray:
         raise IOError(f"Unable to load image: {image_path}")
     return img
 
-
-def resize_for_processing(image: np.ndarray, target_pixels: int = 2_000_000) -> np.ndarray:
-    """Return a down-sampled copy for analysis.
-
-    The image is scaled so that the total pixel count is roughly ``target_pixels``.
-
-    Args:
-        image: Source image array.
-        target_pixels: Desired pixel count for the result.
-
-    Returns:
-        Resized image array suitable for processing.
-    """
-    h, w = image.shape[:2]
-    original_pixels = h * w
-    if original_pixels <= target_pixels:
-        return image.copy()
-    scale = (target_pixels / original_pixels) ** 0.5
-    new_size = (int(w * scale), int(h * scale))
-    return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
 
 
 def apply_transform(image: np.ndarray, matrix: np.ndarray) -> np.ndarray:
