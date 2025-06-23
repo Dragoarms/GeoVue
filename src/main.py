@@ -52,18 +52,14 @@ from tkinter import messagebox
 import platform
 import argparse
 import queue
-from typing import Tuple
-import traceback
 import cv2
 import numpy as np
 import threading
 import traceback
-from typing import List, Dict
+from typing import List, Dict, Tuple, Any
 import re
-import shutil
 import pandas as pd
 from datetime import datetime
-import time
 from pillow_heif import register_heif_opener # TODO - Add in HEIC support and conversion to JPG
 from gui.first_run_dialog import FirstRunDialog
 from resources import get_logo_path
@@ -132,11 +128,34 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 # ===========================================
 
 # Import package modules
-from core import *
-from gui import *
+from core import (
+    FileManager, 
+    TranslationManager, 
+    RepoUpdater, 
+    ConfigManager,
+    VisualizationManager,
+)
+
+from gui import (
+    DialogHelper,
+    GUIManager,
+    DuplicateHandler,
+    CompartmentRegistrationDialog, 
+    MainGUI,
+    QAQCManager
+)
+
 from gui.widgets import *
-from processing import *
-from utils import *
+
+from processing import (
+    BlurDetector,
+    DrillholeTraceGenerator,
+    ArucoManager
+)
+
+from utils import (
+    JSONRegisterManager
+)
 
 # ===========================================
 # Main Application Class
@@ -617,10 +636,10 @@ class GeoVue:
     def _initialize_processing_components(self):
         """Initialize image processing components."""
         # OCR component
-        self.tesseract_manager = TesseractManager()
-        self.tesseract_manager.config = self.config
-        self.tesseract_manager.file_manager = self.file_manager
-        self.tesseract_manager.extractor = self  # Give it access to visualization_cache
+        # self.tesseract_manager = TesseractManager()
+        # self.tesseract_manager.config = self.config
+        # self.tesseract_manager.file_manager = self.file_manager
+        # self.tesseract_manager.extractor = self  # Give it access to visualization_cache
         
         # Blur detection component
         self.blur_detector = BlurDetector(
@@ -667,7 +686,7 @@ class GeoVue:
         )
 
         # Main application GUI - pass the existing root window
-        self.main_gui = MainGUI(self)
+        self.main_gui = MainGUI(self, trace_generator=self.trace_generator)
 
 
 
@@ -917,7 +936,7 @@ class GeoVue:
                 corrected_version_key = correction_result['version_key']
                 needs_redetection = correction_result['needs_redetection']
                 
-                self.logger.debug(f" Skew correction applied, rotation angle: {rotation_angle:.2f}°")
+                self.logger.debug(f" Skew correction applied to small image, rotation angle: {rotation_angle:.2f}°")
                 
                 # ===================================================
                 # INSERT: Extract pure rotation matrix for later use
@@ -931,7 +950,7 @@ class GeoVue:
                         [cos_theta, -sin_theta],
                         [sin_theta, cos_theta]
                     ], dtype=np.float32)
-                    self.logger.debug(f" Stored pure rotation matrix for angle {rotation_angle:.2f}°")
+                    self.logger.debug(f" Stored pure rotation matrix from small image for angle {rotation_angle:.2f}°")
                 
                 if needs_redetection:
                     self.logger.debug(" Image was modified during skew correction, need to re-detect markers")
@@ -940,6 +959,17 @@ class GeoVue:
                     markers = self.aruco_manager.improve_marker_detection(corrected_small_image)
                     self.logger.debug(f" Re-detected {len(markers)} markers after correction")
                     
+                    expected_marker_ids = set()
+                    expected_marker_ids.update(self.config.get('corner_marker_ids', [0, 1, 2, 3]))
+                    expected_marker_ids.update(self.config.get('compartment_marker_ids', list(range(4, 24))))
+                    # Filter markers to only include expected ones
+                    filtered_markers = {mid: corners for mid, corners in markers.items() 
+                                    if mid in expected_marker_ids}
+                    
+                    if len(filtered_markers) < len(markers):
+                        unexpected_ids = set(markers.keys()) - expected_marker_ids
+                        self.logger.debug(f"Ignoring unexpected marker IDs for correction: {sorted(unexpected_ids)}")
+                   
                     # Update the working image reference
                     small_image = corrected_small_image
                     self.small_image = small_image
@@ -979,16 +1009,25 @@ class GeoVue:
             # ===================================================
             # STEP 5.5: ESTIMATE IMAGE SCALE FROM MARKERS AND CORRECT SKEWED MARKERS TO SQUARES
             # ===================================================
-
             # Correct invalid marker shapes before scale estimation - Reconstructs markers to squares using two valid edges - sometimes the detection is slightly off and you get deformed squares.
-            # We should use the line from step
             if markers and len(markers) > 0:
                 add_progress_message("Correcting skewed markers...", None)
                 try:
+
+                    expected_marker_ids = set()
+                    expected_marker_ids.update(self.config.get('corner_marker_ids', [0, 1, 2, 3]))
+                    expected_marker_ids.update(self.config.get('compartment_marker_ids', list(range(4, 24))))
+                    # Filter markers to only include expected ones
+                    filtered_markers = {mid: corners for mid, corners in markers.items() 
+                                    if mid in expected_marker_ids}
+                    
+                    if len(filtered_markers) < len(markers):
+                        unexpected_ids = set(markers.keys()) - expected_marker_ids
+                        self.logger.debug(f"Ignoring unexpected marker IDs for correction: {sorted(unexpected_ids)}")
+                   
                     corrected_markers = self.viz_manager.correct_marker_geometry(
                         markers,
                         tolerance_pixels=5.0  # 5 pixel tolerance
-                        # REMOVED: max_correction_angle parameter
                     )
                     
                     # Count how many markers were corrected
@@ -1009,6 +1048,8 @@ class GeoVue:
                             
                 except Exception as e:
                     self.logger.error(f"Error correcting skewed markers: {str(e)}")
+            
+            
             # Store scale data in VisualizationManager
             scale_data = {}
             self.current_scale_data = None  # Initialize
@@ -1032,8 +1073,6 @@ class GeoVue:
                         markers, 
                         marker_config
                     )
-
-
                     if scale_data.get('scale_px_per_cm'):
                         # Store as instance variable for later use
                         self.current_scale_data = scale_data
@@ -1046,17 +1085,26 @@ class GeoVue:
                         if hasattr(self.viz_manager, 'scale_relationships'):
                             working_to_original_scale = self.viz_manager._get_scale_factor('working', 'original')
                             scale_data['working_to_original_scale'] = working_to_original_scale
-                            # Calculate scale for original image
+                            # ===================================================
+                            # If working image is smaller (e.g., 0.2x the size), scale factor is 5.0
+                            # So original has 5x more pixels per cm than working image
+                            
                             scale_data['scale_px_per_cm_original'] = scale_data['scale_px_per_cm'] * working_to_original_scale
+                            self.logger.debug(f"Scale calculation debug:")
+                            self.logger.debug(f"  Working image scale: {scale_data['scale_px_per_cm']:.2f} px/cm")
+                            self.logger.debug(f"  Working to original scale factor: {working_to_original_scale:.4f}")
+                            self.logger.debug(f"  Original image scale: {scale_data['scale_px_per_cm_original']:.2f} px/cm")
 
+                            # ===================================================
+                        
                         scale_msg = f"Image scale: {scale_data['scale_px_per_cm']:.1f} px/cm"
                         if scale_data.get('image_width_cm'):
                             scale_msg += f" (image width: {scale_data['image_width_cm']:.1f} cm)"
                         scale_msg += f" - Confidence: {scale_data.get('confidence', 0):.0%}"
-
+                        
                         self.logger.info(scale_msg)
                         add_progress_message(scale_msg, None)
-
+                        
                         # Store in visualization cache for dialog access (backward compatibility)
                         if hasattr(self, 'visualization_cache'):
                             self.visualization_cache.setdefault('current_processing', {})['scale_data'] = scale_data
@@ -1065,7 +1113,6 @@ class GeoVue:
 
                 except Exception as e:
                     self.logger.error(f"Error estimating image scale: {str(e)}")
-
 
             # ===================================================
             # STEP 6: ANALYZE COMPARTMENT BOUNDARIES (WITHOUT UI)
@@ -1085,10 +1132,12 @@ class GeoVue:
                     small_image, markers, 
                     compartment_count=self.config.get('compartment_count', 20),
                     smart_cropping=True,
-                    metadata=metadata
+                    metadata={
+                        'scale_px_per_cm': scale_data.get('scale_px_per_cm'),
+                    }
                 )
                 
-                # Extract analysis results
+                # Extract analysis results - TODO - add in all of the analysis results
                 boundaries = boundary_analysis['boundaries']
                 # boundaries_viz = boundary_analysis['visualization']
                 boundary_missing_markers = boundary_analysis['missing_marker_ids']  # Use different name
@@ -1105,11 +1154,15 @@ class GeoVue:
                 # Store top/bottom boundaries for later use
                 if vertical_constraints:
                     self.top_y, self.bottom_y = vertical_constraints
+
+                # Store the analysis results in instance variables for the dialog
+                self.boundary_analysis = boundary_analysis
+                self.detected_boundaries = boundaries
+                self.missing_marker_ids = sorted(missing_marker_ids)
+                self.vertical_constraints = vertical_constraints
+                self.marker_to_compartment = marker_to_compartment
                     
-                self.logger.debug(f" Extracted {len(boundaries)} compartment boundaries")
-                if boundaries:
-                    self.logger.debug(f" First boundary coordinates: {boundaries[0]}")
-                    self.logger.debug(f" Last boundary coordinates: {boundaries[-1]}")
+                self.logger.debug(f" Extracted {len(boundaries)} compartment boundaries before registration dialog")
 
                 # Simply check if boundaries were found
                 if not boundaries:
@@ -1153,9 +1206,7 @@ class GeoVue:
                     'hole_id': metadata.get('hole_id'),
                     'depth_from': metadata.get('depth_from'),
                     'depth_to': metadata.get('depth_to'),
-                    'confidence': metadata.get('confidence', 100.0),
-                    'from_filename': True,
-                    'metadata_region': None
+                    'from_filename': True
                 }
             else:
                 # No existing metadata from filename
@@ -1168,9 +1219,7 @@ class GeoVue:
                 extracted_metadata = {
                     'hole_id': None,
                     'depth_from': None,
-                    'depth_to': None,
-                    'confidence': 0.0,
-                    'metadata_region': None
+                    'depth_to': None
                 }
                 
                 # Try to extract metadata from filename if available
@@ -1178,15 +1227,12 @@ class GeoVue:
                     filename_metadata = self.file_manager.extract_metadata_from_filename(image_path)
                     if filename_metadata:
                         extracted_metadata.update(filename_metadata)
-                        extracted_metadata['confidence'] = 100.0  # High confidence for filename metadata
                         extracted_metadata['from_filename'] = True
                         
-                        self.logger.debug(f" Extracted metadata from filename: {filename_metadata}")
                         self.logger.info(f"Extracted metadata from filename: {filename_metadata}")
                         if self.progress_queue:
                             add_progress_message(f"Found metadata in filename: Hole ID={filename_metadata.get('hole_id')}, Depth={filename_metadata.get('depth_from')}-{filename_metadata.get('depth_to')}m", None)
                     else:
-                        self.logger.debug(" No metadata found in filename")
                         self.logger.info("No metadata found in filename - will prompt user")
                         if self.progress_queue:
                             add_progress_message("No metadata found - will prompt user for input", None)
@@ -1198,179 +1244,21 @@ class GeoVue:
                     self.logger.info("Removed metadata marker 24 from missing list")
 
             # ===================================================
-            # STEP 8: APPLY SKEW CORRECTION TO HIGH-RES IMAGE
-            # ===================================================
-            # Apply skew correction to the original high-resolution image if needed
-            if hasattr(self, 'pure_rotation_matrix') and self.pure_rotation_matrix is not None:
-                self.logger.debug(f" Applying orientation correction to high-res image")
-                if self.progress_queue:
-                    add_progress_message(f"Applying orientation correction to high-resolution image...", None)
-                
-                # ===================================================
-                # INSERT: Build rotation matrix for high-res image using stored pure rotation
-                # ===================================================
-                # Get dimensions of high-res image
-                h, w = original_image.shape[:2]
-                cx, cy = w / 2.0, h / 2.0
-                
-                # Build the full affine transformation matrix for rotation around image center
-                # t = c - R*c (translation to rotate around center)
-                tx = cx - (self.pure_rotation_matrix[0, 0] * cx + self.pure_rotation_matrix[0, 1] * cy)
-                ty = cy - (self.pure_rotation_matrix[1, 0] * cx + self.pure_rotation_matrix[1, 1] * cy)
-                
-                # Construct the full 2x3 affine matrix
-                high_res_rotation_matrix = np.hstack([
-                    self.pure_rotation_matrix,
-                    np.array([[tx], [ty]], dtype=np.float32)
-                ])
-                
-                # Apply the rotation
-                corrected_original_image = cv2.warpAffine(
-                    original_image,
-                    high_res_rotation_matrix,
-                    (w, h),
-                    flags=cv2.INTER_LANCZOS4,
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=(255, 255, 255)
-                )
-                
-                # Use the corrected image for further processing
-                original_image = corrected_original_image
-                self.logger.debug(f" High-resolution image orientation corrected using same rotation")
-                self.logger.info(f"Applied orientation correction to high-resolution image")
-            else:
-                self.logger.debug(" No orientation correction needed for high-resolution image")
-
-                
-            # ===================================================
-            # STEP 9: SCALE BOUNDARIES TO ORIGINAL IMAGE SIZE
-            # ===================================================
-            
-            # Report number of compartments found
-            status_msg = f"Found {len(boundaries)}/{self.config['compartment_count']} compartments"
-            self.logger.debug(f" {status_msg}")
-            self.logger.info(status_msg)
-            if self.progress_queue:
-                add_progress_message(status_msg, None)
-
-            
-            # Scale up the coordinates from small image to original image if necessary
-            if small_image.shape != original_image.shape:
-                self.logger.debug(" Need to scale boundaries to original image size")
-                if self.progress_queue:
-                    add_progress_message("Scaling boundaries to original image size...", None)
-                    
-                # Calculate scale factors
-                scale_x = original_image.shape[1] / small_image.shape[1]
-                scale_y = original_image.shape[0] / small_image.shape[0]
-                self.logger.debug(f" Scale factors: x={scale_x:.4f}, y={scale_y:.4f}")
-
-                # Store the scale factor so we can adjust px/cm measurements later
-                self.image_scale_factor = scale_x  # Assuming x and y scale are similar
-                
-                # Also adjust the scale data if it exists
-                if hasattr(self, 'current_scale_data') and self.current_scale_data:
-                    # Store both the original and adjusted scales
-                    self.current_scale_data['scale_px_per_cm_small'] = self.current_scale_data['scale_px_per_cm']
-                    self.current_scale_data['scale_px_per_cm_original'] = self.current_scale_data['scale_px_per_cm'] * scale_x
-                    self.current_scale_data['scale_factor'] = scale_x
-                    self.logger.debug(f" Stored scale factor {scale_x:.4f} in current_scale_data")
-                    self.logger.debug(f" Small image scale: {self.current_scale_data['scale_px_per_cm_small']:.2f} px/cm")
-                    self.logger.debug(f" Original image scale: {self.current_scale_data['scale_px_per_cm_original']:.2f} px/cm")
-
-                # Check if we need to scale (working image != original)
-                if 'working' in self.viz_manager.versions and 'original' in self.viz_manager.versions:
-                    working_shape = self.viz_manager.versions['working'].shape
-                    original_shape = self.viz_manager.versions['original'].shape
-                    
-                    if working_shape != original_shape:
-                        self.logger.debug(" Need to scale boundaries to original image size")
-                        if self.progress_queue:
-                            add_progress_message("Scaling boundaries to original image size...", None)
-                        
-                        # Use VisualizationManager to scale boundaries
-                        compartment_boundaries = self.viz_manager.scale_coordinates(
-                            boundaries,
-                            'working',
-                            'original'
-                        )
-                        
-                        # Also scale result_boundaries if they exist
-                        if hasattr(self, 'result_boundaries') and self.result_boundaries:
-                            scaled_result_boundaries = {}
-                            for marker_id, boundary in self.result_boundaries.items():
-                                if marker_id == 24 or marker_id in [0, 1, 2, 3]:  # Special markers
-                                    if isinstance(boundary, np.ndarray):
-                                        scaled_corners = self.viz_manager.scale_coordinates(
-                                            boundary,
-                                            'working',
-                                            'original'
-                                        )
-                                        scaled_result_boundaries[marker_id] = scaled_corners
-                                        self.logger.debug(f" Scaled special marker {marker_id}")
-                                elif isinstance(boundary, tuple) and len(boundary) == 4:
-                                    # Scale compartment boundary
-                                    scaled_boundary = self.viz_manager.scale_coordinates(
-                                        boundary,
-                                        'working',
-                                        'original'
-                                    )
-                                    scaled_result_boundaries[marker_id] = scaled_boundary
-                                    self.logger.debug(f" Scaled compartment boundary for marker {marker_id}")
-                            
-                            self.result_boundaries = scaled_result_boundaries
-                        
-                        # Update vertical constraints
-                        if hasattr(self, 'top_y') and hasattr(self, 'bottom_y'):
-                            # Scale the y-coordinates
-                            scaled_top_y = self.viz_manager.scale_coordinates(
-                                (0, self.top_y),
-                                'working',
-                                'original'
-                            )[1]
-                            scaled_bottom_y = self.viz_manager.scale_coordinates(
-                                (0, self.bottom_y),
-                                'working',
-                                'original'
-                            )[1]
-                            
-                            self.top_y = int(scaled_top_y)
-                            self.bottom_y = int(scaled_bottom_y)
-                            self.logger.debug(f" Updated vertical constraints: top_y={self.top_y}, bottom_y={self.bottom_y}")
-                        
-                        self.logger.debug(f" Scaled {len(compartment_boundaries)} boundaries to original image size")
-                        if compartment_boundaries:
-                            self.logger.debug(f" First scaled boundary: {compartment_boundaries[0]}")
-                            self.logger.debug(f" Last scaled boundary: {compartment_boundaries[-1]}")
-                            
-                        self.logger.info(f"Scaled {len(compartment_boundaries)} compartment boundaries to original image")
-                    else:
-                        # No scaling needed
-                        self.logger.debug(" No scaling needed - working image and original have same dimensions")
-                        compartment_boundaries = boundaries
-                else:
-                    # Fallback to original behavior if versions not available
-                    compartment_boundaries = boundaries
-            
-            # ===================================================
             # STEP 10: ALWAYS SHOW COMPARTMENT REGISTRATION DIALOG
             # ===================================================
             # ALWAYS show the compartment registration dialog
             if self.progress_queue:
                 add_progress_message("Opening compartment registration dialog...", None)
 
-
             self.logger.debug(" Preparing to show compartment registration dialog")
 
-            # # Get visualization for dialog - use boundaries_viz if available
-            compartment_viz = small_image.copy() #TODO - FIX THIS??
-            
             try:
                 # Create unified registration dialog
                 self.logger.debug(" Creating combined registration dialog")
 
                 # Define the callback function for re-processing with adjustments
                 def process_image_callback(params):
+                    self.logger.debug(f"process_image_callback called with params: {params}")
                     # Re-analyze boundaries with adjustment parameters
                     temp_metadata = dict(extracted_metadata) if extracted_metadata else {}
                     temp_metadata['boundary_adjustments'] = params
@@ -1382,19 +1270,34 @@ class GeoVue:
                         metadata=temp_metadata
                     )
                     
+                    self.logger.debug(f"process_image_callback returning {len(new_analysis['boundaries'])} boundaries")
                     return {
                         'boundaries': new_analysis['boundaries'],
-                        'visualization': new_analysis['visualization']
+                        'visualization': None  # Don't return visualization - dialog handles it
                     }
                 
                 # Debug missing markers before dialog
                 self.logger.debug(f" Missing marker IDs before dialog: {missing_marker_ids}")
                 self.logger.debug(f" Type of missing_marker_ids: {type(missing_marker_ids)}")
                 
+                # ===================================================
+                # INSERT: Debug what we're passing to the dialog
+                # ===================================================
+                self.logger.debug(f" Passing to dialog:")
+                self.logger.debug(f"  - image shape: {small_image.shape}")
+                self.logger.debug(f"  - boundaries count: {len(boundaries)}")
+                self.logger.debug(f"  - original_image available: {original_image is not None}")
+                if original_image is not None:
+                    self.logger.debug(f"  - original_image shape: {original_image.shape}")
+                # Log first few boundaries
+                for i, boundary in enumerate(boundaries[:3]):
+                    self.logger.debug(f"  - boundary[{i}]: {boundary}")
+                # ===================================================
+                
                 # Call handle_markers_and_boundaries with appropriate parameters
                 result = self.handle_markers_and_boundaries(
-                    compartment_viz,
-                    boundaries,
+                    small_image,  # This is the working/small image for visualization
+                    boundaries,   # The detected boundaries from analysis
                     missing_marker_ids=missing_marker_ids,
                     metadata=extracted_metadata,
                     vertical_constraints=(self.top_y, self.bottom_y) if hasattr(self, 'top_y') and hasattr(self, 'bottom_y') else None,
@@ -1405,13 +1308,22 @@ class GeoVue:
                     initial_mode=0,  # Start in MODE_METADATA
                     on_apply_adjustments=process_image_callback,
                     image_path=image_path,
-                    scale_data=self.current_scale_data if hasattr(self, 'current_scale_data') else None
+                    scale_data=self.current_scale_data if hasattr(self, 'current_scale_data') else None,
+                    boundary_analysis=self.boundary_analysis if hasattr(self, 'boundary_analysis') else None,
+                    # ===================================================
+                    # INSERT: Pass the original high-res image
+                    # ===================================================
+                    original_image=original_image  # Pass the high-res image for extraction
+                    # ===================================================
                 )
 
                 self.logger.debug(" Registration dialog completed")
+                self.logger.debug(f" Dialog result type: {type(result)}")
+                self.logger.debug(f" Dialog result keys: {result.keys() if result else 'None'}")
 
                 # Process the result based on complete metadata and boundaries
                 if result:
+
                     if result.get('quit', False):
                         # User chose to quit processing
                         self.logger.debug(" User quit processing")
@@ -1448,13 +1360,18 @@ class GeoVue:
                             'compartment_interval': result.get('compartment_interval', 1)
                         }
                         
+                        self.logger.debug(f" Metadata from dialog: {metadata}")
+                        
                         # Update boundaries based on result
                         if 'top_boundary' in result and 'bottom_boundary' in result:
+                            self.logger.debug(f" Updating boundaries - old: top_y={self.top_y}, bottom_y={self.bottom_y}")
                             self.top_y = result['top_boundary']
                             self.bottom_y = result['bottom_boundary']
+                            self.logger.debug(f" Updated boundaries - new: top_y={self.top_y}, bottom_y={self.bottom_y}")
                             
                         # Store result boundaries for later use
                         self.result_boundaries = result.get('result_boundaries', {})
+                        self.logger.debug(f" Result boundaries count: {len(self.result_boundaries)}")
                         
                         # IMPORTANT: Re-apply boundary adjustments to get final boundaries
                         if any(key in result for key in ['top_boundary', 'bottom_boundary', 'left_height_offset', 'right_height_offset']):
@@ -1467,6 +1384,12 @@ class GeoVue:
                                 'left_height_offset': result.get('left_height_offset', 0),
                                 'right_height_offset': result.get('right_height_offset', 0)
                             }
+                            
+                            self.logger.debug(f" Adjustment params: {adjustment_params}")
+                            
+                            # Store height offsets as instance variables
+                            self.left_height_offset = adjustment_params['left_height_offset']
+                            self.right_height_offset = adjustment_params['right_height_offset']
                             
                             # Update metadata with boundary adjustments
                             metadata['boundary_adjustments'] = adjustment_params
@@ -1483,7 +1406,49 @@ class GeoVue:
                             # Update boundaries with adjusted values
                             boundaries = adjusted_analysis['boundaries']
                             self.logger.debug(f" Updated boundaries after adjustments: {len(boundaries)} compartments")
-                            
+                            # Log first few adjusted boundaries
+                            for i, boundary in enumerate(boundaries[:3]):
+                                self.logger.debug(f"  Adjusted boundary[{i}]: {boundary}")
+   
+                            # ===================================================
+                            # INSERT: Convert sloped boundaries to horizontal rectangles aligned with rotated image
+                            # ===================================================
+                            # Since we're applying the rotation to the high-res image, we need to:
+                            # 1. Convert boundaries to horizontal (remove slope)
+                            # 2. Adjust for the vertical translation that was applied
+                            if hasattr(self, 'left_height_offset') and (self.left_height_offset != 0 or self.right_height_offset != 0):
+                                self.logger.debug(f" Converting sloped boundaries to horizontal (offsets: left={self.left_height_offset}, right={self.right_height_offset})")
+                                horizontal_boundaries = []
+                                
+                                # Get the original vertical constraints before adjustment
+                                if hasattr(self, 'boundary_analysis') and 'vertical_constraints' in self.boundary_analysis:
+                                    original_top_y, original_bottom_y = self.boundary_analysis['vertical_constraints']
+                                    self.logger.debug(f" Using stored vertical constraints: top={original_top_y}, bottom={original_bottom_y}")
+                                else:
+                                    # Fallback - calculate from current positions and offsets
+                                    original_top_y = self.top_y - ((self.left_height_offset + self.right_height_offset) / 2)
+                                    original_bottom_y = self.bottom_y - ((self.left_height_offset + self.right_height_offset) / 2)
+                                    self.logger.debug(f" Calculated vertical constraints: top={original_top_y}, bottom={original_bottom_y}")
+                                
+                                # The boundaries should now be at their original vertical positions
+                                # since we'll handle the translation when extracting compartments
+                                for idx, (x1, y1, x2, y2) in enumerate(boundaries):
+                                    # Create horizontal boundary at original position
+                                    horizontal_boundaries.append((x1, original_top_y, x2, original_bottom_y))
+                                    if idx < 3:  # Log first few
+                                        self.logger.debug(f"  Horizontal boundary[{idx}]: ({x1}, {original_top_y}, {x2}, {original_bottom_y})")
+                                
+                                boundaries = horizontal_boundaries
+                                self.logger.debug(f" Converted {len(boundaries)} boundaries to horizontal at original positions")
+                                
+                                # Store that we need to account for vertical offset when extracting
+                                self.boundaries_vertical_offset = self.top_y - original_top_y
+                                self.logger.debug(f" Boundaries vertical offset: {self.boundaries_vertical_offset}")
+                            else:
+                                self.boundaries_vertical_offset = 0
+                                self.logger.debug(" No height offsets - boundaries remain unchanged")
+                            # ===================================================
+
                             # Merge manually placed compartments if any exist
                             # Check if we have manually placed compartments to merge
                             if 'result_boundaries' in result and result['result_boundaries']:
@@ -1508,12 +1473,17 @@ class GeoVue:
                                     
                                     if not compartment_exists and isinstance(boundary, tuple) and len(boundary) == 4:
                                         boundaries.append(boundary)
-                                        self.logger.debug(f" Added manually placed compartment for marker {marker_id}")
+                                        self.logger.debug(f" Added manually placed compartment for marker {marker_id}: {boundary}")
                                 
                                 # Sort boundaries by x-coordinate
                                 boundaries.sort(key=lambda b: b[0])
                                 self.logger.debug(f" Total boundaries after merging: {len(boundaries)}")
                          
+                        # IMPORTANT: At this point, boundaries are still in WORKING image coordinates
+                        # Store them before scaling
+                        final_boundaries_working = boundaries.copy()
+                        self.logger.debug(f" Final boundaries in working coordinates: {len(final_boundaries_working)} compartments")
+
                         self.logger.debug(f" User completed registration with metadata: {metadata}")
                         self.logger.info(f"User completed registration with metadata: {metadata}")
 
@@ -1526,48 +1496,242 @@ class GeoVue:
         
                     return False  # Return early to skip processing
             except Exception as e:
-                self.logger.error(f"Metadata dialog error: {str(e)}")
+                self.logger.error(f"Registration dialog error: {str(e)}")
                 self.logger.error(traceback.format_exc())
-                self.logger.debug(f" Metadata dialog error: {str(e)}")
+                self.logger.debug(f" Registration dialog error: {str(e)}")
                 self.logger.debug(f" {traceback.format_exc()}")
                 if self.progress_queue:
-                    add_progress_message(f"Metadata dialog error: {str(e)}", None)
+                    add_progress_message(f"Registration dialog error: {str(e)}", None)
                 return False
 
 
             # ===================================================
-            # STEP 11: CONVERT BOUNDARIES TO CORNERS AND EXTRACT COMPARTMENTS AS NP ARRAYS FOR DUPLICATE CHECK DIALOG
+            # STEP 11: APPLY ROTATION TO HIGH-RES IMAGE
             # ===================================================
-            self.logger.debug(" Converting boundaries to corners format")
+            # First, store the original boundary positions before any adjustments
+            if hasattr(self, 'boundary_analysis') and 'vertical_constraints' in self.boundary_analysis:
+                original_top_y, original_bottom_y = self.boundary_analysis['vertical_constraints']
+                self.logger.debug(f" Original vertical constraints from analysis: top={original_top_y}, bottom={original_bottom_y}")
+            else:
+                original_top_y = self.top_y
+                original_bottom_y = self.bottom_y
+                self.logger.debug(f" Using current vertical constraints: top={original_top_y}, bottom={original_bottom_y}")
+
+            if hasattr(self, 'pure_rotation_matrix') and self.pure_rotation_matrix is not None:
+                self.logger.debug(f"Applying orientation correction to high-res image")
+                self.logger.debug(f"Original rotation angle: {rotation_angle}°")
+                if self.progress_queue:
+                    add_progress_message(f"Applying orientation correction to high-resolution image...", None)
+                
+                # Get dimensions of high-res image
+                h, w = original_image.shape[:2]
+                cx, cy = w / 2.0, h / 2.0
+                self.logger.debug(f"High-res image dimensions: {w}x{h}, center: ({cx}, {cy})")
+                
+                # ===================================================
+                # REMOVE: Old rotation code
+                # REPLACE WITH: Combined rotation including boundary adjustments
+                # ===================================================
+                
+                # Calculate the additional rotation from boundary adjustments
+                additional_rotation_angle = 0.0
+                if hasattr(self, 'left_height_offset') and hasattr(self, 'right_height_offset'):
+                    # Calculate angle from height offsets
+                    height_diff = self.right_height_offset - self.left_height_offset
+                    self.logger.debug(f"Height difference (working coords): {height_diff}")
+                    
+                    # Scale the height difference to original image size
+                    if 'working' in self.viz_manager.versions and 'original' in self.viz_manager.versions:
+                        scale_factor = self.viz_manager._get_scale_factor('working', 'original')
+                        height_diff_scaled = height_diff * scale_factor
+                        self.logger.debug(f"Scale factor: {scale_factor}, scaled height diff: {height_diff_scaled}")
+                    else:
+                        height_diff_scaled = height_diff
+                        self.logger.debug("No scale factor available, using unscaled height diff")
+                        
+                    # Calculate angle: tan(theta) = opposite/adjacent = height_diff/width
+                    additional_rotation_angle = np.degrees(np.arctan2(height_diff_scaled, w))
+                    self.logger.debug(f"Additional rotation from boundary adjustments: {additional_rotation_angle:.2f}°")
+                
+                # Combine the rotations
+                total_rotation_angle = rotation_angle + additional_rotation_angle
+                self.logger.debug(f"Total rotation angle: {total_rotation_angle:.2f}°")
+                
+                # Build the combined rotation matrix
+                theta_rad = np.radians(total_rotation_angle)
+                cos_theta = np.cos(theta_rad)
+                sin_theta = np.sin(theta_rad)
+                
+                # Create the full affine transformation matrix
+                rotation_matrix = np.array([
+                    [cos_theta, -sin_theta, cx - cos_theta * cx + sin_theta * cy],
+                    [sin_theta, cos_theta, cy - sin_theta * cx - cos_theta * cy]
+                ], dtype=np.float32)
+                
+                self.logger.debug(f"Rotation matrix:\n{rotation_matrix}")
+                
+                # Apply the combined rotation
+                corrected_original_image = cv2.warpAffine(
+                    original_image,
+                    rotation_matrix,
+                    (w, h),
+                    flags=cv2.INTER_LANCZOS4,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=(255, 255, 255)
+                )
+                
+                # Use the corrected image for all subsequent operations
+                original_image = corrected_original_image
+                self.logger.info(f"Applied combined orientation correction to high-resolution image (total: {total_rotation_angle:.2f}°)")
+                
+                # ===================================================
+                # INSERT: Calculate how much the boundaries moved vertically
+                # ===================================================
+                # The vertical movement is the difference between the adjusted boundaries and original
+                vertical_movement = self.top_y - original_top_y
+                self.logger.debug(f"Vertical movement in working coords: {vertical_movement}px")
+                
+                # Scale to original image size
+                if 'working' in self.viz_manager.versions and 'original' in self.viz_manager.versions:
+                    scale_factor = self.viz_manager._get_scale_factor('working', 'original')
+                    self.vertical_movement_scaled = vertical_movement * scale_factor
+                    self.logger.debug(f"Scale factor for vertical movement: {scale_factor}")
+                else:
+                    self.vertical_movement_scaled = vertical_movement
+                    self.logger.debug("No scale factor for vertical movement")
+                
+                self.logger.debug(f"Vertical movement: {vertical_movement}px (scaled: {self.vertical_movement_scaled}px)")
+                # ===================================================
+                
+                self.boundary_rotation_applied_to_highres = True
+            else:
+                self.logger.debug("No rotation matrix available - skipping rotation")
+            
+            # ===================================================
+            # STEP 12: SCALE BOUNDARIES TO ORIGINAL IMAGE SIZE
+            # ===================================================
+            status_msg = f"Found {len(final_boundaries_working)}/{self.config['compartment_count']} compartments"
+            self.logger.info(status_msg)
+            if self.progress_queue:
+                add_progress_message(status_msg, None)
+
+            # Now scale boundaries from working to original
+            if 'working' in self.viz_manager.versions and 'original' in self.viz_manager.versions:
+                working_shape = self.viz_manager.versions['working'].shape
+                original_shape = self.viz_manager.versions['original'].shape
+                
+                self.logger.debug(f"Working shape: {working_shape}, Original shape: {original_shape}")
+                
+                if working_shape != original_shape:
+                    self.logger.debug("Scaling boundaries to original image size")
+                    self.logger.debug(f"Boundaries before scaling - first 3: {final_boundaries_working[:3]}")
+                    if self.progress_queue:
+                        add_progress_message("Scaling boundaries to original image size...", None)
+                    
+                    # Scale ALL boundaries (including merged manual ones) at once
+                    compartment_boundaries = self.viz_manager.scale_coordinates(
+                        final_boundaries_working,
+                        'working',
+                        'original'
+                    )
+                    
+                    self.logger.debug(f"Boundaries after scaling - first 3: {compartment_boundaries[:3]}")
+                    
+                    # Scale vertical constraints
+                    if hasattr(self, 'top_y') and hasattr(self, 'bottom_y'):
+                        self.logger.debug(f"Scaling vertical constraints - before: top_y={self.top_y}, bottom_y={self.bottom_y}")
+                        scaled_top_y = self.viz_manager.scale_coordinates(
+                            (0, self.top_y),
+                            'working',
+                            'original'
+                        )[1]
+                        scaled_bottom_y = self.viz_manager.scale_coordinates(
+                            (0, self.bottom_y),
+                            'working',
+                            'original'
+                        )[1]
+                        
+                        self.top_y = int(scaled_top_y)
+                        self.bottom_y = int(scaled_bottom_y)
+                        self.logger.debug(f"Scaled vertical constraints - after: top_y={self.top_y}, bottom_y={self.bottom_y}")
+                    
+                    self.logger.info(f"Scaled {len(compartment_boundaries)} compartment boundaries to original image")
+                else:
+                    # This should not happen
+                    self.logger.error("Working image and original have same dimensions - this is an error!")
+                    compartment_boundaries = final_boundaries_working
+            else:
+                self.logger.error("Version information not available for scaling!")
+                self.logger.error(f"Available versions: {list(self.viz_manager.versions.keys()) if hasattr(self.viz_manager, 'versions') else 'None'}")
+                compartment_boundaries = final_boundaries_working
+                
+            # ===================================================
+            # STEP 13: CONVERT BOUNDARIES AND PREPARE FOR DUPLICATE CHECK
+            # ===================================================
+            self.logger.debug("Converting boundaries to corners format")
             corners_list = []
 
             depth_from = metadata.get('depth_from')
             if depth_from is None:
-                raise ValueError("Missing required metadata: 'depth_from' is not set before compartment boundary conversion.")
+                raise ValueError("Missing required metadata: 'depth_from'")
 
             compartment_interval = metadata.get('compartment_interval', 1)
+            self.logger.debug(f"Depth from: {depth_from}, interval: {compartment_interval}")
 
+            # ===================================================
+            # INSERT: Get vertical offset for corners adjustment
+            # ===================================================
+            vertical_offset = 0
+            if hasattr(self, 'boundaries_vertical_offset'):
+                self.logger.debug(f"boundaries_vertical_offset: {self.boundaries_vertical_offset}")
+                # Scale the offset to match the original image coordinates
+                if hasattr(self, 'vertical_movement_scaled'):
+                    vertical_offset = int(self.vertical_movement_scaled)
+                    self.logger.debug(f"Using vertical_movement_scaled: {vertical_offset}")
+                else:
+                    # Fallback - scale the offset if needed
+                    if 'working' in self.viz_manager.versions and 'original' in self.viz_manager.versions:
+                        scale_factor = self.viz_manager._get_scale_factor('working', 'original')
+                        vertical_offset = int(self.boundaries_vertical_offset * scale_factor)
+                        self.logger.debug(f"Scaled boundaries_vertical_offset by {scale_factor}: {vertical_offset}")
+                    else:
+                        vertical_offset = int(self.boundaries_vertical_offset)
+                        self.logger.debug(f"Using unscaled boundaries_vertical_offset: {vertical_offset}")
+                
+                self.logger.debug(f"Applying vertical offset of {vertical_offset}px to corners")
+            else:
+                self.logger.debug("No boundaries_vertical_offset found")
+            # ===================================================
 
             for i, (x1, y1, x2, y2) in enumerate(compartment_boundaries):
-                # Convert boundary to 4 corners (top_left, top_right, bottom_right, bottom_left)
+                # ===================================================
+                # REMOVE: Direct corner coordinates
+                # REPLACE WITH: Vertically adjusted corner coordinates
+                # ===================================================
                 corners = {
                     'depth_to': depth_from + ((i + 1) * compartment_interval),
                     'corners': [
-                        [x1, y1],  # top_left
-                        [x2, y1],  # top_right
-                        [x2, y2],  # bottom_right
-                        [x1, y2]   # bottom_left
+                        [x1, y1 + vertical_offset],  # top_left
+                        [x2, y1 + vertical_offset],  # top_right
+                        [x2, y2 + vertical_offset],  # bottom_right
+                        [x1, y2 + vertical_offset]   # bottom_left
                     ]
                 }
+                if i < 3:  # Log first few corners
+                    self.logger.debug(f"  Corner[{i}]: depth={corners['depth_to']}, corners={corners['corners']}")
+                # ===================================================
                 corners_list.append(corners)
-            self.logger.debug(f" Created corners for {len(corners_list)} compartments")
-            
-            self.logger.debug(" Extracting compartments for duplicate check display")
-            compartments = self.extract_compartments_from_boundaries(original_image, compartment_boundaries) # TODO - CHECK WHICH ORIGINAL IMAGE THIS IS! IT NEEDS TO BE THE CORRECTED ONE!
-            self.logger.debug(f" Extracted {len(compartments)} compartments from boundaries")
 
-
-
+            self.logger.debug(f"Created corners list with {len(corners_list)} compartments (vertical offset: {vertical_offset}px)")
+            # ===================================================
+            # STEP 14: EXTRACT COMPARTMENTS FROM CORRECTED HIGH-RES IMAGE
+            # ===================================================
+            self.logger.debug("Extracting compartments from corrected high-res image")
+            compartments = self.extract_compartments_from_boundaries(
+                original_image,  # This is now the CORRECTED high-res image
+                compartment_boundaries  # These are now in ORIGINAL scale
+            )
+            self.logger.debug(f"Extracted {len(compartments)} compartments")
 
             # ===================================================
             # STEP 12: CHECK FOR DUPLICATES AND HANDLE ALL EXITS
@@ -1781,8 +1945,6 @@ class GeoVue:
 
             self.logger.debug(" process_image failed")
             return False
-
-
 
 
     def process_folder(self, folder_path: str) -> Tuple[int, int]:
@@ -2065,17 +2227,17 @@ class GeoVue:
                 # INSERT: Debug statements for variable availability
                 # ===================================================
                 self.logger.debug(f" Checking available data:")
-                print(f"  - result type: {type(result)}")
-                print(f"  - result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
-                print(f"  - 'corners_list' in result: {'corners_list' in result if isinstance(result, dict) else False}")
-                print(f"  - final_metadata: {final_metadata}")
-                print(f"  - saved_compartment_indices: {saved_compartment_indices}")
-                print(f"  - hasattr(self, 'current_scale_data'): {hasattr(self, 'current_scale_data')}")
+                self.logger.debug(f"  - result type: {type(result)}")
+                self.logger.debug(f"  - result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
+                self.logger.debug(f"  - 'corners_list' in result: {'corners_list' in result if isinstance(result, dict) else False}")
+                self.logger.debug(f"  - final_metadata: {final_metadata}")
+                self.logger.debug(f"  - saved_compartment_indices: {saved_compartment_indices}")
+                self.logger.debug(f"  - hasattr(self, 'current_scale_data'): {hasattr(self, 'current_scale_data')}")
                 
                 if hasattr(self, 'current_scale_data'):
-                    print(f"  - self.current_scale_data: {self.current_scale_data}")
+                    self.logger.debug(f"  - self.current_scale_data: {self.current_scale_data}")
                 else:
-                    print(f"  - self.current_scale_data: NOT SET")
+                    self.logger.debug(f"  - self.current_scale_data: NOT SET")
                 
                 start_depth = int(final_metadata['depth_from'])
                 compartment_interval = int(final_metadata['compartment_interval'])
@@ -2093,8 +2255,8 @@ class GeoVue:
                         # INSERT: Debug individual corner data
                         # ===================================================
                         self.logger.debug(f" Processing corner {i+1}:")
-                        print(f"  - corner_data type: {type(corner_data)}")
-                        print(f"  - corner_data keys: {corner_data.keys() if isinstance(corner_data, dict) else 'Not a dict'}")
+                        self.logger.debug(f"  - corner_data type: {type(corner_data)}")
+                        self.logger.debug(f"  - corner_data keys: {corner_data.keys() if isinstance(corner_data, dict) else 'Not a dict'}")
                         
                         # Extract corners in compact format for original image register
                         if 'corners' in corner_data:
@@ -2102,10 +2264,10 @@ class GeoVue:
                             # ===================================================
                             # INSERT: Debug corners format
                             # ===================================================
-                            print(f"  - corners type: {type(corners)}")
-                            print(f"  - corners length: {len(corners) if isinstance(corners, list) else 'Not a list'}")
+                            self.logger.debug(f"  - corners type: {type(corners)}")
+                            self.logger.debug(f"  - corners length: {len(corners) if isinstance(corners, list) else 'Not a list'}")
                             if isinstance(corners, list) and len(corners) > 0:
-                                print(f"  - first corner: {corners[0]}")
+                                self.logger.debug(f"  - first corner: {corners[0]}")
                             
                             # Corners should be a list of 4 points: [TL, TR, BR, BL]
                             if isinstance(corners, list) and len(corners) == 4:
@@ -2121,7 +2283,7 @@ class GeoVue:
                                 # ===================================================
                                 # INSERT: More detail on invalid format
                                 # ===================================================
-                                print(f"WARNING: Invalid corners format - expected list of 4 points, got: {corners}")
+                                self.logger.warning(f"WARNING: Invalid corners format - expected list of 4 points, got: {corners}")
                 else:
                     # ===================================================
                     # INSERT: Debug when no corners_list
@@ -2143,7 +2305,7 @@ class GeoVue:
                     # INSERT: Debug compartment metadata
                     # ===================================================
                     self.logger.debug(f" Compartment {compartment_idx+1} (saved_idx={saved_idx}):")
-                    print(f"  - depth range: {comp_depth_from} - {comp_depth_to}")
+                    self.logger.debug(f"  - depth range: {comp_depth_from} - {comp_depth_to}")
                     
                     update = {
                         'hole_id': final_metadata['hole_id'],
@@ -2160,7 +2322,7 @@ class GeoVue:
                         # ===================================================
                         # INSERT: Debug scale calculation
                         # ===================================================
-                        print(f"  - scale_px_per_cm (from small image): {scale_px_per_cm}")
+                        self.logger.debug(f"  - scale_px_per_cm (from small image): {scale_px_per_cm}")
                         
                         if scale_px_per_cm and scale_px_per_cm > 0:
                             # Get the corners for this specific compartment
@@ -2182,37 +2344,37 @@ class GeoVue:
                                     if 'scale_px_per_cm_original' in self.current_scale_data:
                                         # Use the pre-calculated original image scale
                                         adjusted_scale_px_per_cm = self.current_scale_data['scale_px_per_cm_original']
-                                        print(f"  - Using pre-calculated original scale: {adjusted_scale_px_per_cm:.2f}")
+                                        self.logger.debug(f"  - Using pre-calculated original scale: {adjusted_scale_px_per_cm:.2f}")
                                     elif 'scale_factor' in self.current_scale_data:
                                         # Use the stored scale factor
                                         adjusted_scale_px_per_cm = scale_px_per_cm * self.current_scale_data['scale_factor']
-                                        print(f"  - Adjusting with stored scale factor: {self.current_scale_data['scale_factor']:.4f}")
-                                        print(f"  - adjusted scale_px_per_cm: {adjusted_scale_px_per_cm:.2f}")
+                                        self.logger.debug(f"  - Adjusting with stored scale factor: {self.current_scale_data['scale_factor']:.4f}")
+                                        self.logger.debug(f"  - adjusted scale_px_per_cm: {adjusted_scale_px_per_cm:.2f}")
                                     elif hasattr(self, 'image_scale_factor'):
                                         # Fall back to instance variable if available
                                         adjusted_scale_px_per_cm = scale_px_per_cm * self.image_scale_factor
-                                        print(f"  - Adjusting with instance scale factor: {self.image_scale_factor:.4f}")
-                                        print(f"  - adjusted scale_px_per_cm: {adjusted_scale_px_per_cm:.2f}")
+                                        self.logger.debug(f"  - Adjusting with instance scale factor: {self.image_scale_factor:.4f}")
+                                        self.logger.debug(f"  - adjusted scale_px_per_cm: {adjusted_scale_px_per_cm:.2f}")
                                     else:
                                         # No adjustment available - scale might be wrong
                                         adjusted_scale_px_per_cm = scale_px_per_cm
-                                        print(f"  - WARNING: No scale adjustment available - width calculation may be incorrect!")
+                                        self.logger.debug(f"  - WARNING: No scale adjustment available - width calculation may be incorrect!")
                                     
                                     compartment_width_cm = round(width_px / adjusted_scale_px_per_cm, 2)
                                     update['image_width_cm'] = compartment_width_cm
                                     # ===================================================
                                     # INSERT: Debug width calculation
                                     # ===================================================
-                                    print(f"  - compartment width: {width_px}px = {compartment_width_cm}cm")
+                                    self.logger.debug(f"  - compartment width: {width_px}px = {compartment_width_cm}cm")
                     else:
                         # ===================================================
                         # INSERT: Debug why scale not calculated
                         # ===================================================
-                        print(f"  - Width calculation skipped:")
-                        print(f"    - has current_scale_data: {hasattr(self, 'current_scale_data')}")
-                        print(f"    - current_scale_data not None: {self.current_scale_data is not None if hasattr(self, 'current_scale_data') else 'N/A'}")
-                        print(f"    - corners_list in result: {'corners_list' in result}")
-                        print(f"    - compartment_idx < len(corners_list): {compartment_idx < len(result['corners_list']) if 'corners_list' in result else 'N/A'}")
+                        self.logger.debug(f"  - Width calculation skipped:")
+                        self.logger.debug(f"    - has current_scale_data: {hasattr(self, 'current_scale_data')}")
+                        self.logger.debug(f"    - current_scale_data not None: {self.current_scale_data is not None if hasattr(self, 'current_scale_data') else 'N/A'}")
+                        self.logger.debug(f"    - corners_list in result: {'corners_list' in result}")
+                        self.logger.debug(f"    - compartment_idx < len(corners_list): {compartment_idx < len(result['corners_list']) if 'corners_list' in result else 'N/A'}")
                     
                     compartment_updates.append(update)
             
@@ -2341,6 +2503,435 @@ class GeoVue:
                 self.logger.error(f"Error checking original file: {str(check_error)}")
             
             return []  # Return empty list on error
+
+    def extract_compartments_from_boundaries(self, image, boundaries):
+        """Extract compartment images from the full image using boundaries."""
+        compartments = []
+        
+        # ===================================================
+        # INSERT: Account for vertical offset if boundaries were adjusted
+        # ===================================================
+        vertical_offset = 0
+        if hasattr(self, 'boundaries_vertical_offset'):
+            # Scale the offset to match the image we're extracting from
+            if hasattr(self, 'vertical_movement_scaled'):
+                vertical_offset = int(self.vertical_movement_scaled)
+            else:
+                vertical_offset = int(self.boundaries_vertical_offset)
+            
+            self.logger.debug(f"Applying vertical offset of {vertical_offset}px to compartment extraction")
+        # ===================================================
+        
+        for x1, y1, x2, y2 in boundaries:
+            # Apply vertical offset
+            y1_adjusted = int(y1 + vertical_offset)
+            y2_adjusted = int(y2 + vertical_offset)
+            
+            # Ensure boundaries are within image
+            y1_adjusted = max(0, min(y1_adjusted, image.shape[0] - 1))
+            y2_adjusted = max(0, min(y2_adjusted, image.shape[0] - 1))
+            x1 = max(0, min(int(x1), image.shape[1] - 1))
+            x2 = max(0, min(int(x2), image.shape[1] - 1))
+            
+            # Extract compartment
+            compartment = image[y1_adjusted:y2_adjusted, x1:x2]
+            compartments.append(compartment)
+        
+        return compartments
+
+    def get_processing_data(self, key: str = None):
+        """Get data from current processing cache."""
+        if not hasattr(self, 'visualization_cache') or 'current_processing' not in self.visualization_cache:
+            return None
+        
+        if key:
+            return self.visualization_cache['current_processing'].get(key)
+        return self.visualization_cache['current_processing']
+
+    def update_processing_data(self, updates: Dict[str, Any]):
+        """Update the current processing cache."""
+        if not hasattr(self, 'visualization_cache'):
+            self.visualization_cache = {}
+        if 'current_processing' not in self.visualization_cache:
+            self.visualization_cache['current_processing'] = {}
+        
+        self.visualization_cache['current_processing'].update(updates)
+        self.logger.debug(f"Updated processing cache with keys: {list(updates.keys())}")
+
+    def update_boundaries_from_dialog(self, new_boundaries: List[Tuple[int, int, int, int]], 
+                                    scale: str = 'working'):
+        """Update boundaries in the cache, maintaining scale information."""
+        self.logger.debug(f"update_boundaries_from_dialog called with scale='{scale}'")
+        self.logger.debug(f"Received {len(new_boundaries)} boundaries")
+        
+        # Log first few boundaries for inspection
+        for i, boundary in enumerate(new_boundaries[:3]):
+            self.logger.debug(f"  Boundary {i}: {boundary}")
+        if len(new_boundaries) > 3:
+            self.logger.debug(f"  ... and {len(new_boundaries) - 3} more boundaries")
+        
+        if scale == 'working':
+            self.logger.debug("Updating processing data with working scale boundaries")
+            
+            # Get current processing data to check what's there
+            current_data = self.get_processing_data()
+            if current_data:
+                self.logger.debug(f"Current boundaries_scale: {current_data.get('boundaries_scale', 'not set')}")
+                if 'compartment_boundaries' in current_data:
+                    self.logger.debug(f"Current boundaries count: {len(current_data['compartment_boundaries'])}")
+            
+            self.update_processing_data({
+                'compartment_boundaries': new_boundaries,
+                'boundaries_scale': 'working'
+            })
+            
+            # Verify the update
+            updated_data = self.get_processing_data()
+            self.logger.debug(f"After update - boundaries_scale: {updated_data.get('boundaries_scale', 'not set')}")
+            self.logger.debug(f"After update - boundaries count: {len(updated_data.get('compartment_boundaries', []))}")
+        else:
+            self.logger.debug(f"WARNING: Called with scale='{scale}' which is not handled!")
+        
+        # Re-calculate corners
+        self.logger.debug("Calling _update_corners_from_boundaries")
+        self._update_corners_from_boundaries(new_boundaries)
+        self.logger.debug("update_boundaries_from_dialog completed")
+    
+    def handle_markers_and_boundaries(self, image, detected_boundaries, missing_marker_ids=None, 
+                            metadata=None, vertical_constraints=None, 
+                            rotation_angle=0.0, corner_markers=None, marker_to_compartment=None, 
+                            initial_mode=2, markers=None, show_adjustment_controls=True,
+                            on_apply_adjustments=None, image_path=None, scale_data=None,
+                            boundary_analysis=None, original_image=None):
+        """
+        Unified handler for boundary adjustments and marker placement.
+
+        Args:
+            image: The input image (working/small version for visualization)
+            detected_boundaries: List of already detected boundaries
+            missing_marker_ids: Optional list of marker IDs that need manual annotation
+            metadata: Optional metadata dictionary 
+            vertical_constraints: Optional tuple of (min_y, max_y) for compartment placement
+            rotation_angle: Current rotation angle of the image (degrees)
+            corner_markers: Dictionary of corner marker positions {0: (x,y), 1: (x,y)...}
+            marker_to_compartment: Dictionary mapping marker IDs to compartment numbers
+            initial_mode: Initial dialog mode (0=metadata, 1=missing boundaries, 2=adjustment)
+            markers: Dictionary of all detected ArUco markers {id: corners}
+            show_adjustment_controls: Whether to show adjustment controls by default
+            on_apply_adjustments: Callback function for boundary adjustments
+            image_path: Path to the original image file
+            scale_data: Scale data from marker analysis
+            boundary_analysis: Boundary analysis results
+            original_image: Original high-resolution image for extraction
+                
+        Returns:
+            Dictionary containing dialog results (boundaries, markers, visualization)
+        """
+        self.logger.debug(f"HANDLE_MARKERS START - initial_mode: {initial_mode}")
+        self.logger.debug(f"HANDLE_MARKERS START - missing_marker_ids: {missing_marker_ids}")
+
+        # Map mode number to descriptive name for logging
+        mode_names = {
+            0: "metadata registration", 
+            1: "marker placement",
+            2: "boundary adjustment"
+        }
+        operation_name = mode_names.get(initial_mode, "unknown operation")
+        
+        self.logger.info(f"Handling {operation_name} dialog on main thread")
+        
+        # ===================================================
+        # REMOVE: All the obsolete image fallback logic
+        # REPLACE WITH: Clear validation
+        if image is None:
+            raise ValueError("Image parameter cannot be None - must provide working/visualization image")
+        
+        if not hasattr(image, 'shape'):
+            raise ValueError("Image parameter must be a numpy array with shape attribute")
+        
+        self.logger.debug(f"Input image shape: {image.shape}")
+        self.logger.debug(f"Image dimensions: {image.shape[1]}x{image.shape[0]} (WxH)")
+        
+        # Validate image is reasonable size (not the tiny 15x35 compartments)
+        if image.shape[0] < 100 or image.shape[1] < 100:
+            raise ValueError(f"Image too small ({image.shape[1]}x{image.shape[0]}) - likely a compartment image, not the full tray image")
+        # ===================================================
+        
+        self.logger.debug(f"Current thread: {threading.current_thread().name}")
+        self.logger.debug(f"Is main thread: {threading.current_thread() is threading.main_thread()}")
+        self.logger.debug(f"detected_boundaries count: {len(detected_boundaries)}")
+        self.logger.debug(f"vertical_constraints: {vertical_constraints}")
+        self.logger.debug(f"rotation_angle: {rotation_angle}")
+        
+        # Check if we're focused on marker placement (vs. just boundary adjustments)
+        is_placing_markers = missing_marker_ids and len(missing_marker_ids) > 0
+        
+        # Check if we've already annotated these missing markers
+        if is_placing_markers and hasattr(self, 'visualization_cache') and 'annotation_status' in self.visualization_cache:
+            already_annotated = self.visualization_cache['annotation_status'].get('annotated_markers', [])
+            if already_annotated:
+                self.logger.debug(f"Some markers were already annotated: {already_annotated}")
+                
+                # Check if all requested markers were already annotated
+                if set(missing_marker_ids).issubset(set(already_annotated)):
+                    self.logger.debug(f"All requested markers {missing_marker_ids} were already annotated")
+                    
+                    if initial_mode == 1:  # MODE_MISSING_BOUNDARIES
+                        self.logger.debug("In missing boundaries mode - skipping dialog for already annotated markers")
+                        return {}  # Return empty dict to signal "already done"
+                    
+                    self.logger.debug("In adjustment mode - still showing dialog despite markers being annotated")
+                
+                # Filter out already annotated markers from the list to process
+                if isinstance(missing_marker_ids, list):
+                    missing_marker_ids = [m for m in missing_marker_ids if m not in already_annotated]
+                elif isinstance(missing_marker_ids, set):
+                    missing_marker_ids = {m for m in missing_marker_ids if m not in already_annotated}
+                
+                self.logger.debug(f"Filtered missing_marker_ids after removing already annotated: {missing_marker_ids}")
+        
+        # Create the callback function for re-extracting boundaries
+        def apply_adjustments_callback(adjustment_params):
+            try:
+                self.logger.debug(f"Received adjustment params: {adjustment_params}")
+                
+                # Create a temporary metadata dict with adjustments
+                temp_metadata = {}
+                if metadata:
+                    temp_metadata.update(metadata)
+                
+                # Add boundary adjustments
+                temp_metadata['boundary_adjustments'] = adjustment_params
+                
+                # Re-extract boundaries
+                if hasattr(self, 'aruco_manager'):
+                    self.logger.debug("Re-extracting compartment boundaries with adjustments")
+                    
+                    # Set a flag to avoid showing manual annotation dialog during re-extraction
+                    temp_metadata['skip_annotation_dialog'] = True
+                    
+                    # Re-extract compartment boundaries
+                    new_boundaries, new_viz = self.aruco_manager.extract_compartment_boundaries(
+                        image, 
+                        markers, 
+                        compartment_count=self.config.get('compartment_count', 20),
+                        smart_cropping=True,
+                        parent_window=self.root,
+                        metadata=temp_metadata
+                    )
+                    
+                    self.logger.debug(f"Re-extracted {len(new_boundaries)} boundaries")
+                    
+                    # Return both boundaries and visualization
+                    return {
+                        'boundaries': new_boundaries,
+                        'visualization': new_viz
+                    }
+                else:
+                    self.logger.error("aruco_manager not available for re-extraction")
+                    return None
+            except Exception as e:
+                self.logger.error(f"Error in apply_adjustments_callback: {str(e)}")
+                import traceback
+                self.logger.error(traceback.format_exc())
+                return None
+        
+        try:
+            # Thread check - hard fail if wrong
+            if threading.current_thread() is not threading.main_thread():
+                raise RuntimeError(f"❌ {operation_name} called from non-main thread!")
+
+            # Get markers from aruco_manager if available
+            if markers is None:
+                markers = {}
+                if hasattr(self, 'aruco_manager'):
+                    markers = getattr(self.aruco_manager, 'cached_markers', {})
+                    self.logger.debug(f"Got {len(markers)} markers from aruco_manager")
+
+            # Check visualization cache for more complete marker data
+            if hasattr(self, 'visualization_cache') and 'current_processing' in self.visualization_cache:
+                cached_markers = self.visualization_cache['current_processing'].get('all_markers')
+                if cached_markers and len(cached_markers) > len(markers):
+                    markers = cached_markers
+                    self.logger.debug(f"Using {len(markers)} markers from visualization_cache instead")
+            
+            # Ensure we have a valid marker_to_compartment mapping
+            if marker_to_compartment is None:
+                compartment_interval = metadata.get('compartment_interval', 
+                                                self.config.get('compartment_interval', 1.0))
+                marker_to_compartment = {
+                    4+i: int((i+1) * compartment_interval) for i in range(20)
+                }
+                self.logger.debug(f"Created marker_to_compartment mapping: {marker_to_compartment}")
+
+            # Set app reference on root for dialog access
+            self.root.app = self
+            
+            # Get scale data from visualization cache if available
+            if scale_data is None and hasattr(self, 'visualization_cache') and 'current_processing' in self.visualization_cache:
+                scale_data = self.visualization_cache['current_processing'].get('scale_data')
+                self.logger.debug(f"Got scale_data from visualization_cache: {scale_data is not None}")
+            
+            self.logger.debug(f"About to create CompartmentRegistrationDialog with initial_mode={initial_mode}")
+            self.logger.debug(f"self.root is None: {self.root is None}")
+            self.logger.debug(f"detected_boundaries length: {len(detected_boundaries)}")
+            
+            # ===================================================
+            # REMOVE: boundaries_viz parameter - let dialog create its own
+            # REPLACE WITH: Pass the working image and original image clearly
+            dialog = CompartmentRegistrationDialog(
+                self.root,
+                image,  # Working/small image for visualization (NOT compartment images!)
+                detected_boundaries,  # Already detected boundaries
+                missing_marker_ids,
+                theme_colors=self.gui_manager.theme_colors,
+                gui_manager=self.gui_manager,
+                boundaries_viz=None,  # REMOVED - obsolete
+                original_image=original_image,  # High-res image for extraction
+                output_format=self.config.get('output_format', 'png'),
+                file_manager=self.file_manager,
+                metadata=metadata,
+                vertical_constraints=vertical_constraints,
+                marker_to_compartment=marker_to_compartment,
+                rotation_angle=rotation_angle,
+                corner_markers=corner_markers,
+                markers=markers,
+                config=self.config,
+                on_apply_adjustments=on_apply_adjustments,
+                image_path=image_path,
+                scale_data=scale_data,
+                boundary_analysis=boundary_analysis
+            )
+            # ===================================================
+            
+            # Set the initial mode after creation
+            dialog.current_mode = initial_mode
+            dialog._update_mode_indicator()  # Update UI to reflect the mode
+            
+            self.logger.debug(f"CompartmentRegistrationDialog object created in mode {initial_mode}")
+
+            # Show dialog and get results
+            self.logger.debug("About to show dialog")
+            result = dialog.show()
+            self.logger.debug(f"Dialog result received: {result is not None}")
+            
+            # Store markers that were actually annotated
+            if result and is_placing_markers:
+                self.logger.debug("Result received, updating visualization cache")
+                if hasattr(self, 'visualization_cache'):
+                    # Get existing annotated markers
+                    existing = self.visualization_cache.get('annotation_status', {}).get('annotated_markers', [])
+                    
+                    # Determine which markers were actually annotated
+                    actually_annotated = []
+                    
+                    # If result contains result_boundaries, use those to determine which markers were annotated
+                    if 'result_boundaries' in result and isinstance(result['result_boundaries'], dict):
+                        actually_annotated = list(result['result_boundaries'].keys())
+                        self.logger.debug(f"Markers actually annotated according to result_boundaries: {actually_annotated}")
+                    else:
+                        # Fall back to missing_marker_ids as a best guess
+                        actually_annotated = missing_marker_ids if missing_marker_ids else []
+                        self.logger.debug(f"No result_boundaries found, using missing_marker_ids: {actually_annotated}")
+                    
+                    # Combine with existing annotated markers
+                    all_annotated = list(set(existing + list(actually_annotated)))
+                    
+                    # Record which markers were annotated
+                    self.visualization_cache.setdefault('annotation_status', {})['annotated_markers'] = all_annotated
+                    self.logger.debug(f"Updated annotated markers in cache: {all_annotated}")
+
+            # Check for boundary adjustments in the result
+            if result and isinstance(result, dict):
+                # Check for boundary adjustment data
+                boundary_fields = ['top_boundary', 'bottom_boundary', 'left_height_offset', 'right_height_offset']
+                has_boundary_adjustments = any(field in result for field in boundary_fields)
+                
+                if has_boundary_adjustments:
+                    self.logger.debug("Found boundary adjustments in dialog result")
+                    # Create boundary adjustments dictionary
+                    boundary_adjustments = {
+                        'top_boundary': result.get('top_boundary'),
+                        'bottom_boundary': result.get('bottom_boundary'),
+                        'left_height_offset': result.get('left_height_offset', 0),
+                        'right_height_offset': result.get('right_height_offset', 0)
+                    }
+                    
+                    # Store the adjustments in metadata if provided
+                    if metadata is not None:
+                        metadata['boundary_adjustments'] = boundary_adjustments
+                        self.logger.debug(f"Stored boundary adjustments in metadata: {boundary_adjustments}")
+
+            self.logger.debug(f"HANDLE_MARKERS END - returning result? {result is not None}")
+            return result or {}
+
+        except Exception as e:
+            self.logger.error(f"Exception in {operation_name}: {e}")
+            self.logger.error(f"Exception type: {type(e).__name__}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            return {}  # Return empty dict on error
+    
+    
+    def detect_blur_in_saved_compartments(self, compartment_paths: List[str], source_filename: str) -> List[Dict]:
+        """
+        Detect blur in saved compartment files.
+        
+        Args:
+            compartment_paths: List of paths to saved compartment images
+            source_filename: Original source filename for logging
+            
+        Returns:
+            List of blur detection results
+        """
+        blur_results = []
+        
+        if not hasattr(self, 'blur_detector'):
+            # Initialize blur detector if not already created
+            blur_threshold = self.config.get('blur_threshold', 100.0)
+            roi_ratio = self.config.get('blur_roi_ratio', 0.8)
+            self.blur_detector = BlurDetector(threshold=blur_threshold, roi_ratio=roi_ratio)
+        
+        # Load and analyze each saved compartment
+        for i, path in enumerate(compartment_paths):
+            try:
+                if os.path.exists(path):
+                    # Load the saved image
+                    comp_img = cv2.imread(path)
+                    if comp_img is not None:
+                        # Analyze for blur
+                        is_blurry, variance = self.blur_detector.is_blurry(comp_img)
+                        
+                        # Extract depth from filename (e.g., "XX1234_CC_001_temp.png" -> 1)
+                        depth_match = re.search(r'_CC_(\d+)', os.path.basename(path))
+                        depth = int(depth_match.group(1)) if depth_match else i + 1
+                        
+                        result = {
+                            'index': i,
+                            'depth': depth,
+                            'is_blurry': is_blurry,
+                            'variance': variance,
+                            'path': path
+                        }
+                        blur_results.append(result)
+                        
+                        if is_blurry:
+                            self.logger.warning(f"Blurry compartment detected at depth {depth}m (variance: {variance:.2f})")
+                    else:
+                        self.logger.error(f"Failed to load compartment image: {path}")
+                else:
+                    self.logger.error(f"Compartment file not found: {path}")
+                    
+            except Exception as e:
+                self.logger.error(f"Error analyzing blur for compartment {i}: {str(e)}")
+        
+        # Log summary
+        blurry_count = sum(1 for r in blur_results if r.get('is_blurry', False))
+        if blurry_count > 0:
+            self.logger.info(f"Blur detection complete for {source_filename}: {blurry_count}/{len(compartment_paths)} compartments are blurry")
+        
+        return blur_results
+
 
     def update_last_metadata(self, hole_id, depth_from, depth_to, compartment_interval=1):
         """
