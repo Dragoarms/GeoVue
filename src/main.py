@@ -111,7 +111,7 @@ logger.info(f"Starting GeoVue v{__version__}")
 # Turn off or down debug logs for noisy modules
 logging.getLogger('processing.aruco_manager').setLevel(logging.WARNING)
 logging.getLogger('processing.blur_detector').setLevel(logging.WARNING)  
-logging.getLogger('core.tesseract_manager').setLevel(logging.WARNING)
+# logging.getLogger('core.tesseract_manager').setLevel(logging.WARNING) TODO - fully remove all tesseract manager support and uses
 logging.getLogger('gui.duplicate_handler').setLevel(logging.WARNING)
 logging.getLogger('gui.qaqc_manager').setLevel(logging.WARNING)
 logging.getLogger('gui.main_gui').setLevel(logging.WARNING)
@@ -136,8 +136,9 @@ from core import (
     FileManager, 
     TranslationManager, 
     RepoUpdater, 
-    TesseractManager, 
-    ConfigManager  
+    ConfigManager,
+    VisualizationManager,
+    VisualizationType
 )
 
 from gui import (
@@ -154,10 +155,12 @@ from gui.widgets import *
 from processing import (
     BlurDetector,
     DrillholeTraceGenerator,
-    ArucoManager,
-    load_image,
-    resize_for_processing,
-    apply_transform,
+    ArucoManager
+)
+
+from processing.pipeline import (
+    load_image_to_np_array,
+    apply_transform
 )
 
 from utils import (
@@ -638,11 +641,11 @@ class ChipTrayApp:
     
     def _initialize_processing_components(self):
         """Initialize image processing components."""
-        # OCR component
-        self.tesseract_manager = TesseractManager()
-        self.tesseract_manager.config = self.config
-        self.tesseract_manager.file_manager = self.file_manager
-        self.tesseract_manager.extractor = self  # Give it access to visualization_cache
+        # # OCR component TODO - FULLY REMOVE TESSERACT MANAGER REFERENCES AND OCR SUPPORT
+        # self.tesseract_manager = TesseractManager()
+        # self.tesseract_manager.config = self.config
+        # self.tesseract_manager.file_manager = self.file_manager
+        # self.tesseract_manager.extractor = self  # Give it access to visualization_cache
         
         # Blur detection component
         self.blur_detector = BlurDetector(
@@ -713,270 +716,36 @@ class ChipTrayApp:
         self.aruco_manager.viz_steps.clear()
         self.logger.debug("Cleared visualization cache and viz_steps for new image")
 
-    def _load_and_prepare_image(self, image_path: str):
-        """Load image and create a down-sampled copy for processing."""
-        original_image = load_image(image_path)
-        h, w = original_image.shape[:2]
-        small_image = resize_for_processing(original_image, 2_000_000)
-        self.small_image = small_image.copy()
-        previously_processed = self.file_manager.check_original_file_processed(image_path)
-        metadata = getattr(self, 'metadata', {})
-        return original_image, small_image, previously_processed, metadata
-
-    def _detect_and_correct_markers(self, small_image, add_message=None):
-        """Detect ArUco markers and correct image skew."""
-        if add_message:
-            add_message("Detecting ArUco markers...", None)
-
-        markers = self.aruco_manager.improve_marker_detection(small_image)
-        expected = set(self.config['corner_marker_ids'] + self.config['compartment_marker_ids'])
-        if self.config.get('enable_ocr', True) and self.tesseract_manager.is_available:
-            expected.update(self.config['metadata_marker_ids'])
-        missing = list(expected - set(markers.keys()))
-
-        rotation_matrix = None
-        rotation_angle = 0.0
-        if add_message:
-            add_message("Correcting image orientation...", None)
-        try:
-            corrected, rotation_matrix, rotation_angle = self.aruco_manager.correct_image_skew(
-                small_image, markers, return_transform=True
-            )
-            if corrected is not small_image:
-                markers = self.aruco_manager.improve_marker_detection(corrected)
-                small_image = corrected
-        except Exception as exc:
-            self.logger.warning(f"Skew correction failed: {exc}")
-
-        return small_image, markers, rotation_matrix, rotation_angle, missing
-
-    def _extract_boundaries(self, small_image, markers, metadata):
-        """Extract compartment boundaries using detected markers."""
-        analysis = self.aruco_manager.analyze_compartment_boundaries(
-            small_image,
-            markers,
-            compartment_count=self.config.get('compartment_count', 20),
-            smart_cropping=True,
-            metadata=metadata,
-        )
-        if analysis.get('vertical_constraints'):
-            self.top_y, self.bottom_y = analysis['vertical_constraints']
-        return (
-            analysis['boundaries'],
-            analysis['visualization'],
-            analysis['missing_marker_ids'],
-            analysis['marker_to_compartment'],
-        )
-
-    def _extract_or_prompt_metadata(self, small_image, markers, image_path, previously_processed, missing_marker_ids, add_message=None):
-        """Retrieve metadata via OCR or previous filename."""
-        self.tesseract_manager.file_manager = self.file_manager
-        self.tesseract_manager.extractor = self
-        if previously_processed:
-            metadata = previously_processed
-            ocr_metadata = {
-                'hole_id': metadata.get('hole_id'),
-                'depth_from': metadata.get('depth_from'),
-                'depth_to': metadata.get('depth_to'),
-                'confidence': metadata.get('confidence', 100.0),
-                'from_filename': True,
-                'metadata_region': None,
-            }
-        else:
-            if add_message:
-                add_message("Extracting metadata with OCR...", None)
-            if self.config.get('enable_ocr') and self.tesseract_manager.is_available:
-                final_viz = self.aruco_manager.viz_steps.get("final_boundaries", small_image)
-                ocr_metadata = self.tesseract_manager.extract_metadata_with_composite(
-                    final_viz,
-                    markers,
-                    original_filename=image_path,
-                    progress_queue=self.progress_queue,
-                )
-            else:
-                ocr_metadata = {
-                    'hole_id': None,
-                    'depth_from': None,
-                    'depth_to': None,
-                    'confidence': 0.0,
-                    'metadata_region': None,
-                }
-                if image_path:
-                    filename_metadata = self.file_manager.extract_metadata_from_filename(image_path)
-                    if filename_metadata:
-                        ocr_metadata.update(filename_metadata)
-                        ocr_metadata['confidence'] = 100.0
-                        ocr_metadata['from_filename'] = True
-            metadata = ocr_metadata
-        if 24 in missing_marker_ids:
-            missing_marker_ids.remove(24)
-        return ocr_metadata, metadata, missing_marker_ids
-
-    def _open_registration_dialog(
-        self,
-        small_image,
-        boundaries,
-        markers,
-        missing_marker_ids,
-        metadata,
-        marker_to_compartment,
-        rotation_angle,
-        image_path,
-    ):
-        """Show the compartment registration dialog on the main thread."""
-
-        def process_image_callback(params):
-            temp_metadata = dict(metadata) if metadata else {}
-            temp_metadata['boundary_adjustments'] = params
-            new_analysis = self.aruco_manager.analyze_compartment_boundaries(
-                small_image,
-                markers,
-                compartment_count=self.config.get('compartment_count', 20),
-                smart_cropping=True,
-                metadata=temp_metadata,
-            )
-            return {
-                'boundaries': new_analysis['boundaries'],
-                'visualization': new_analysis['visualization'],
-            }
-
-        return self.handle_markers_and_boundaries(
-            small_image.copy(),
-            boundaries,
-            missing_marker_ids=missing_marker_ids,
-            metadata=metadata,
-            vertical_constraints=(self.top_y, self.bottom_y) if hasattr(self, 'top_y') and hasattr(self, 'bottom_y') else None,
-            marker_to_compartment=marker_to_compartment,
-            rotation_angle=rotation_angle,
-            corner_markers=self.corner_markers if hasattr(self, 'corner_markers') else None,
-            markers=markers,
-            initial_mode=0,
-            on_apply_adjustments=process_image_callback,
-            image_path=image_path,
-            scale_data=self.current_scale_data if hasattr(self, 'current_scale_data') else None,
-        )
-
-    def _apply_skew_to_original(self, original_image, rotation_angle):
-        """Apply the skew correction angle to the high-resolution image."""
-        if rotation_angle and rotation_angle != 0.0:
-            h, w = original_image.shape[:2]
-            center = (w // 2, h // 2)
-            matrix = cv2.getRotationMatrix2D(center, rotation_angle, 1.0)
-            return apply_transform(original_image, matrix)
-        return original_image
-
-    def _scale_boundaries(self, boundaries, metadata, small_image, original_image):
-        """Scale boundaries from the processing image back to the original size."""
-        if small_image.shape == original_image.shape:
-            return boundaries
-        scale_x = original_image.shape[1] / small_image.shape[1]
-        scale_y = original_image.shape[0] / small_image.shape[0]
-        self.image_scale_factor = scale_x
-        if hasattr(self, 'current_scale_data') and self.current_scale_data:
-            self.current_scale_data['scale_px_per_cm_small'] = self.current_scale_data['scale_px_per_cm']
-            self.current_scale_data['scale_px_per_cm_original'] = self.current_scale_data['scale_px_per_cm'] * scale_x
-            self.current_scale_data['scale_factor'] = scale_x
-        scaled = []
-        for x1, y1, x2, y2 in boundaries:
-            scaled.append((int(x1 * scale_x), int(y1 * scale_y), int(x2 * scale_x), int(y2 * scale_y)))
-        return scaled
-
-    def _handle_duplicates_and_save(
-        self,
-        image_path,
-        metadata,
-        boundaries,
-        small_image,
-        original_image,
-        processing_messages,
-        add_message,
-    ):
-        """Check duplicates and save compartments using FileManager."""
-        corners_list = []
-        depth_from = metadata.get('depth_from')
-        interval = metadata.get('compartment_interval', 1)
-        for i, (x1, y1, x2, y2) in enumerate(boundaries):
-            corners_list.append(
-                {
-                    'depth_to': depth_from + ((i + 1) * interval),
-                    'corners': [
-                        [x1, y1],
-                        [x2, y1],
-                        [x2, y2],
-                        [x1, y2],
-                    ],
-                }
-            )
-
-        compartments = self.extract_compartments_from_boundaries(original_image, boundaries)
-
-        continue_processing = True
-        while continue_processing:
-            duplicate_result = self.duplicate_handler.check_duplicate(
-                metadata['hole_id'],
-                metadata['depth_from'],
-                metadata['depth_to'],
-                small_image,
-                image_path,
-                extracted_compartments=compartments,
-            )
-
-            if isinstance(duplicate_result, dict) and duplicate_result.get('action') == 'modify_metadata':
-                metadata['hole_id'] = duplicate_result.get('hole_id', metadata['hole_id'])
-                metadata['depth_from'] = duplicate_result.get('depth_from', metadata['depth_from'])
-                metadata['depth_to'] = duplicate_result.get('depth_to', metadata['depth_to'])
-            else:
-                continue_processing = False
-                result = {
-                    'action': duplicate_result.get('action') if isinstance(duplicate_result, dict) else 'continue',
-                    'hole_id': metadata.get('hole_id'),
-                    'depth_from': metadata.get('depth_from'),
-                    'depth_to': metadata.get('depth_to'),
-                    'compartment_interval': interval,
-                    'boundaries': boundaries,
-                    'corners_list': corners_list,
-                }
-                saved_paths = self.handle_image_exit(
-                    image_path=image_path,
-                    result=result,
-                    metadata=metadata,
-                    compartments=compartments,
-                    processing_messages=processing_messages,
-                    add_progress_message=add_message,
-                )
-                return bool(saved_paths)
-        return False
-
     def process_image(self, image_path: str) -> bool:
         """
-        Process a single chip tray image directly on the main thread.
+        Process a single chip tray image using full resolution throughout.
         
         This method performs the complete image processing pipeline:
-        1. Load and preprocess the image
+        1. Load image at full resolution
         2. Detect ArUco markers
         3. Correct image orientation/skew
         4. Extract compartment boundaries
-        5. Show the compartment registration dialog.
-        6. On completion of the compartment registration dialog:
-        7. Add to QAQC queue
-        8. Handle duplicates
-        9. Move processed files
+        5. Show registration dialog with downsampled visualization
+        6. Apply adjustments back to full resolution
+        7. Save results
         
         Args:
             image_path: Path to the image file to be processed
-        
+            
         Returns:
             bool: True if processing succeeded, False otherwise
         """
-        # ===================================================
-        # REMOVE: old processing pipeline
-        # REPLACE WITH: calls to helper methods
-        # ===================================================
         self.logger = logging.getLogger(__name__)
-        self.clear_visualization_cache()
-
+        self.logger.debug(f"Starting to process image: {image_path}")
+        
+        # Initialize visualization manager for this image
+        if not hasattr(self, 'viz_manager'):
+            self.viz_manager = VisualizationManager(self.file_manager)
+        self.viz_manager.clear()
+        
+        # Initialize progress handling
         processing_messages = []
-
+        
         def add_progress_message(message, progress=None, message_type="info"):
             processing_messages.append((message, progress))
             self.logger.info(message)
@@ -987,860 +756,268 @@ class ChipTrayApp:
                     pass
             if hasattr(self, 'progress_queue') and self.progress_queue:
                 self.progress_queue.put((message, progress))
-
+        
         try:
-            original_image, small_image, previously_processed, metadata = self._load_and_prepare_image(image_path)
-            small_image, markers, rotation_matrix, rotation_angle, missing_marker_ids = self._detect_and_correct_markers(
-                small_image, add_progress_message
-            )
-            boundaries, viz, boundary_missing, marker_to_compartment = self._extract_boundaries(
-                small_image, markers, metadata
-            )
-            missing_marker_ids = sorted(set(missing_marker_ids + boundary_missing))
-            ocr_metadata, metadata, missing_marker_ids = self._extract_or_prompt_metadata(
-                small_image, markers, image_path, previously_processed, missing_marker_ids, add_progress_message
-            )
-            result = self._open_registration_dialog(
-                small_image, boundaries, markers, missing_marker_ids, ocr_metadata,
-                marker_to_compartment, rotation_angle, image_path
-            )
-            if not result:
+            
+            # Step 1: Load full resolution image
+            add_progress_message(f"Loading image: {os.path.basename(image_path)}", None)
+
+            original_image = load_image_to_np_array(image_path)
+            if original_image is None:
+                add_progress_message("Failed to load image", None, "error")
                 return False
-            metadata = {
+
+            # Store original image and its path for metadata preservation
+            self.viz_manager.store_image_in_viz_cache(VisualizationType.ORIGINAL_IMAGE, original_image)
+            self.viz_manager.store_original_image_path(image_path)
+
+            # Check if previously processed
+            previously_processed = self.file_manager.check_original_file_processed(image_path)
+            
+            # Step 2: Detect markers at full resolution
+            add_progress_message("Detecting ArUco markers...", None)
+            
+            markers = self.aruco_manager.improve_marker_detection(original_image)
+            
+            # Calculate expected markers
+            expected = set(self.config['corner_marker_ids'] + self.config['compartment_marker_ids'])
+            missing = list(expected - set(markers.keys()))
+            
+            add_progress_message(f"Detected {len(markers)}/{len(expected)} ArUco markers", None)
+            if missing:
+                add_progress_message(f"Missing markers: {sorted(missing)}", None)
+            
+            # Step 3: Correct image orientation at full resolution
+            add_progress_message("Correcting image orientation...", None)
+            
+            corrected_image, rotation_matrix, rotation_angle = self.aruco_manager.correct_image_skew(
+                original_image, markers, return_transform=True
+            )
+            
+            if corrected_image is not original_image:
+                # Re-detect markers on corrected image
+                markers = self.aruco_manager.improve_marker_detection(corrected_image)
+                self.viz_manager.store_image_in_viz_cache(VisualizationType.CORRECTED_IMAGE, corrected_image)
+                add_progress_message(f"Corrected orientation (angle: {rotation_angle:.2f}°)", None)
+            else:
+                corrected_image = original_image
+                rotation_angle = 0.0
+            
+            # Step 4: Correct skewed markers
+            if markers:
+                add_progress_message("Correcting skewed markers...", None)
+                corrected_markers = self.aruco_manager.correct_skewed_markers(markers)
+                
+                corrected_count = sum(1 for mid in markers 
+                                    if not np.array_equal(markers[mid], corrected_markers[mid]))
+                
+                if corrected_count > 0:
+                    markers = corrected_markers
+                    add_progress_message(f"Corrected {corrected_count} skewed markers", None)
+            
+            # Step 5: Estimate scale from markers
+            self._estimate_scale_from_markers(markers, add_progress_message)
+            
+            # Step 6: Extract compartment boundaries at full resolution
+            add_progress_message("Analyzing compartment boundaries...", None)
+            
+            analysis = self.aruco_manager.analyze_compartment_boundaries(
+                corrected_image, markers,
+                compartment_count=self.config.get('compartment_count', 20),
+                smart_cropping=True
+            )
+            
+            boundaries = analysis['boundaries']
+            vertical_constraints = analysis['vertical_constraints']
+            marker_to_compartment = analysis['marker_to_compartment']
+            
+            if not boundaries:
+                add_progress_message("Failed to extract compartment boundaries", None, "error")
+                return False
+            
+            # Create and store boundary visualization
+            boundaries_viz = self.viz_manager.create_boundary_visualization(
+                corrected_image, boundaries, vertical_constraints
+            )
+            self.viz_manager.store_image_in_viz_cache(VisualizationType.BOUNDARIES_INITIAL, boundaries_viz)
+            
+            # Store full-resolution data
+            self.viz_manager.store_metadata('markers', markers)
+            self.viz_manager.store_metadata('boundaries', boundaries)
+            self.viz_manager.store_metadata('vertical_constraints', vertical_constraints)
+            self.viz_manager.store_metadata('rotation_angle', rotation_angle)
+            
+            # Step 7: Show registration dialog with DOWNSAMPLED visualization
+            add_progress_message("Opening compartment registration dialog...", None)
+            
+            # Get display image and scale boundaries for dialog
+            display_image = self.viz_manager.get_image_from_viz_cache(VisualizationType.CORRECTED_IMAGE, for_display=True)
+            display_boundaries = self.viz_manager.scale_boundaries_to_display(boundaries)
+            
+            # Scale markers for display
+            display_markers = {}
+            for marker_id, corners in markers.items():
+                display_markers[marker_id] = corners * self.viz_manager.display_scale_factor
+            
+            # Scale vertical constraints
+            if vertical_constraints:
+                display_constraints = self.viz_manager.scale_coordinates_to_display(vertical_constraints)
+            else:
+                display_constraints = None
+            
+            # Create metadata dict from previous processing or start fresh
+            metadata = self._prepare_metadata(previously_processed, image_path)
+            
+            # Show dialog with downsampled data
+            result = self._show_registration_dialog(
+                display_image,
+                display_boundaries,
+                display_markers,
+                missing,
+                metadata,
+                display_constraints,
+                marker_to_compartment,
+                rotation_angle,
+                image_path
+            )
+            
+            if not result:
+                add_progress_message("Processing canceled by user", None)
+                return False
+            
+            # Handle dialog result
+            if result.get('quit', False):
+                self.processing_complete = True
+                return False
+                
+            if result.get('rejected', False):
+                return self._handle_rejected_image(
+                    image_path, result, metadata, processing_messages, add_progress_message
+                )
+            
+            # Step 8: Scale adjustments back to full resolution
+            final_boundaries = self._apply_dialog_adjustments(
+                result, corrected_image, markers, boundaries
+            )
+            
+            # Step 9: Extract and save compartments at full resolution
+            compartments = self.extract_compartments_from_boundaries(corrected_image, final_boundaries)
+            
+            # Step 10: Handle duplicates and save
+            final_metadata = {
                 'hole_id': result.get('hole_id'),
                 'depth_from': result.get('depth_from'),
                 'depth_to': result.get('depth_to'),
-                'compartment_interval': result.get('compartment_interval', 1),
+                'compartment_interval': result.get('compartment_interval', 1)
             }
-            boundaries = result.get('boundaries', boundaries)
-            original_image = self._apply_skew_to_original(original_image, rotation_angle)
-            boundaries = self._scale_boundaries(boundaries, metadata, small_image, original_image)
+            
             return self._handle_duplicates_and_save(
-                image_path, metadata, boundaries, small_image, original_image, processing_messages, add_progress_message
+                image_path, final_metadata, final_boundaries, 
+                corrected_image, compartments, processing_messages, add_progress_message
             )
+            
         except Exception as e:
-            error_msg = f"Error processing {image_path}: {str(e)}"
-            self.logger.error(error_msg)
+            self.logger.error(f"Error processing {image_path}: {str(e)}")
             self.logger.error(traceback.format_exc())
+            
             if hasattr(self, 'progress_queue'):
-                self.progress_queue.put((error_msg, None))
-            self.metadata = {}
-            if hasattr(self, 'visualization_cache'):
-                if 'annotation_status' in self.visualization_cache:
-                    self.visualization_cache['annotation_status'] = {'annotated_markers': []}
-                if 'current_processing' in self.visualization_cache:
-                    self.visualization_cache['current_processing'] = {}
+                self.progress_queue.put((f"Error: {str(e)}", None))
+                
             return False
 
-            # Recalculate missing markers since skew correction may have found more
-            detected_markers = set(markers.keys())
-            missing_markers = expected_markers - detected_markers
-            missing_marker_ids = list(missing_markers)  # Update the list
-            
-            self.logger.debug(f" After skew correction - detected markers: {sorted(detected_markers)}")
-            self.logger.debug(f" After skew correction - missing markers: {sorted(missing_marker_ids)}")
-            
-            if missing_marker_ids:
-                self.logger.info(f"After correction, still missing markers: {sorted(missing_marker_ids)}")
-                if self.progress_queue:
-                    add_progress_message(f"Still missing markers after correction: {sorted(missing_marker_ids)}", None)
-    
-
-            # ===================================================
-            # STEP 5.5: ESTIMATE IMAGE SCALE FROM MARKERS AND CORRECT SKEWED MARKERS TO SQUARES
-            # ===================================================
-            
-            # Correct skewed markers before scale estimation - Reconstructs markers to squares using two valid edges - sometimes the detection is slightly off and you get deformed squares.
-            if markers and len(markers) > 0:
-                add_progress_message("Correcting skewed markers...", None)
-                try:
-                    corrected_markers = self.aruco_manager.correct_skewed_markers(
-                        markers,
-                        tolerance_pixels=5.0,  # 5 pixel tolerance
-                        max_correction_angle=30.0  # Maximum 30 degree correction
-                    )
-                    
-                    # Count how many markers were corrected
-                    corrected_count = sum(1 for mid in markers 
-                                        if not np.array_equal(markers[mid], corrected_markers[mid]))
-                    
-                    if corrected_count > 0:
-                        self.logger.info(f"Corrected {corrected_count} skewed markers")
-                        add_progress_message(f"Corrected {corrected_count} skewed markers", None)
-                        markers = corrected_markers
-                        
-                        # Update cached markers
-                        self.aruco_manager.cached_markers = markers.copy()
-                        
-                        # Update visualization cache
-                        if hasattr(self, 'visualization_cache'):
-                            self.visualization_cache.setdefault('current_processing', {})['all_markers'] = markers
-                            
-                except Exception as e:
-                    self.logger.error(f"Error correcting skewed markers: {str(e)}")
-
-            scale_data = {}
-            self.current_scale_data = None  # Initialize
-
-            if markers and len(markers) >= self.config.get('scale_min_markers_required', 4):
-                add_progress_message("Estimating image scale from markers...", None)
-
-                try:
-                    # Estimate scale using detected markers
-                    scale_data = self.aruco_manager.estimate_image_scale(
-                        markers, 
-                        use_corner_markers=self.config.get('use_corner_markers_for_scale', False)
-                    )
-
-                    if scale_data.get('scale_px_per_cm'):
-                        # Store as instance variable for later use
-                        self.current_scale_data = scale_data
-
-                        scale_msg = f"Image scale: {scale_data['scale_px_per_cm']:.1f} px/cm"
-                        if scale_data.get('image_width_cm'):
-                            scale_msg += f" (image width: {scale_data['image_width_cm']:.1f} cm)"
-                        scale_msg += f" - Confidence: {scale_data.get('confidence', 0):.0%}"
-
-                        self.logger.info(scale_msg)
-                        add_progress_message(scale_msg, None)
-
-                        # Store in visualization cache for dialog access
-                        if hasattr(self, 'visualization_cache'):
-                            self.visualization_cache.setdefault('current_processing', {})['scale_data'] = scale_data
-                    else:
-                        self.logger.warning("Could not estimate image scale from markers")
-
-                except Exception as e:
-                    self.logger.error(f"Error estimating image scale: {str(e)}")
-
-
-            # ===================================================
-            # STEP 6: ANALYZE COMPARTMENT BOUNDARIES (WITHOUT UI)
-            # ===================================================
-            # Extract initial compartment boundaries without dialog
-            if self.progress_queue:
-                add_progress_message("Analyzing compartment boundaries...", None)
-
-
-            try:
-                # For debugging
-                self.logger.debug(f"Analyzing {len(markers)} markers for compartment boundaries: {sorted(markers.keys())}")
-                self.logger.debug(f" Starting compartment boundary analysis with {len(markers)} markers")
-                
-                # Get initial boundary analysis without UI
-                boundary_analysis = self.aruco_manager.analyze_compartment_boundaries(
-                    small_image, markers, 
-                    compartment_count=self.config.get('compartment_count', 20),
-                    smart_cropping=True,
-                    metadata=metadata
-                )
-                
-                # Extract analysis results
-                boundaries = boundary_analysis['boundaries']
-                boundaries_viz = boundary_analysis['visualization']
-                boundary_missing_markers = boundary_analysis['missing_marker_ids']  # Use different name
-                vertical_constraints = boundary_analysis['vertical_constraints']
-                marker_to_compartment = boundary_analysis['marker_to_compartment']
-
-                # Merge missing markers - keep original missing markers and add any new ones
-                if boundary_missing_markers:
-                    # Combine both lists and remove duplicates
-                    all_missing = list(set(missing_marker_ids + boundary_missing_markers))
-                    missing_marker_ids = sorted(all_missing)
-                    self.logger.debug(f" Combined missing markers: {missing_marker_ids}")
-                
-                # Store top/bottom boundaries for later use
-                if vertical_constraints:
-                    self.top_y, self.bottom_y = vertical_constraints
-                    
-                self.logger.debug(f" Extracted {len(boundaries)} compartment boundaries")
-                if boundaries:
-                    self.logger.debug(f" First boundary coordinates: {boundaries[0]}")
-                    self.logger.debug(f" Last boundary coordinates: {boundaries[-1]}")
-
-                # Simply check if boundaries were found
-                if not boundaries:
-                    error_msg = "Failed to extract compartment boundaries"
-                    self.logger.debug(f" {error_msg}")
-                    self.logger.error(error_msg)
-                    add_progress_message(error_msg, None)
-    
-                    return False
-                
-            except Exception as e:
-                error_msg = f"Error in compartment boundary extraction: {str(e)}"
-                self.logger.debug(f" {error_msg}")
-                self.logger.debug(f" {traceback.format_exc()}")
-                self.logger.error(error_msg)
-                self.logger.error(traceback.format_exc())
-                if self.progress_queue:
-                    add_progress_message(error_msg, None)
-                return False
-
-            # ===================================================
-            # STEP 7: EXTRACT METADATA (FROM OCR OR FILENAME)
-            # ===================================================
-            # Extract metadata region for OCR and visualization using Tesseract_manager
-            if self.progress_queue:
-                add_progress_message("Extracting metadata from detected labels...", None)
-
-
-            self.logger.debug(" Starting metadata region extraction with TesseractManager")
-
-            # Make sure TesseractManager has access to necessary references
-            self.logger.debug(" Setting up TesseractManager references")
-            self.tesseract_manager.file_manager = self.file_manager
-            self.tesseract_manager.extractor = self
-
-            # Check if we already have metadata from the filename
-            if previously_processed:
-                # Use the metadata from the filename and skip OCR extraction
-                metadata = previously_processed
-                self.logger.debug(f" Using metadata from filename: {metadata}")
-                self.logger.info(f"Using metadata from filename: {metadata}")
-                if self.progress_queue:
-                    add_progress_message(f"Using metadata from filename: Hole ID={metadata.get('hole_id')}, Depth={metadata.get('depth_from')}-{metadata.get('depth_to')}m", None)
-                
-                # Create minimal OCR metadata for dialog display
-                self.logger.debug(" Creating metadata structure for dialog display")
-                ocr_metadata = {
-                    'hole_id': metadata.get('hole_id'),
-                    'depth_from': metadata.get('depth_from'),
-                    'depth_to': metadata.get('depth_to'),
-                    'confidence': metadata.get('confidence', 100.0),
-                    'from_filename': True,
-                    'metadata_region': None
-                }
-            else:
-                # No existing metadata, either perform OCR or create minimal structure
-                self.logger.debug(" No existing metadata, checking OCR status")
-                if self.progress_queue:
-                    add_progress_message("Preparing metadata input...", None)
-    
-                
-                # Check if OCR is enabled and available
-                if self.config['enable_ocr'] and self.tesseract_manager.is_available:
-                    self.logger.debug(" OCR is enabled and Tesseract is available")
-                    add_progress_message("Extracting metadata with OCR...", None)
-    
-                    
-                    # First try the composite method
-                    final_viz = self.aruco_manager.viz_steps.get("final_boundaries", small_image)
-
-                    ocr_metadata = self.tesseract_manager.extract_metadata_with_composite(
-                        final_viz, markers, original_filename=image_path, progress_queue=self.progress_queue
-                    )
-                    
-                    # Check if we got good results from the composite method
-                    composite_confidence = ocr_metadata.get('confidence', 0)
-                    composite_has_data = (ocr_metadata.get('hole_id') is not None and 
-                                        ocr_metadata.get('depth_from') is not None and 
-                                        ocr_metadata.get('depth_to') is not None)
-                    
-                    self.logger.debug(f" OCR results - confidence: {composite_confidence:.1f}%, has complete data: {composite_has_data}")
-                    self.logger.debug(f" OCR extracted hole_id: {ocr_metadata.get('hole_id')}")
-                    self.logger.debug(f" OCR extracted depth_from: {ocr_metadata.get('depth_from')}")
-                    self.logger.debug(f" OCR extracted depth_to: {ocr_metadata.get('depth_to')}")
-                    
-                    # If the composite method didn't yield good results, just log it
-                    if not composite_has_data or composite_confidence < self.config['ocr_confidence_threshold']:
-                        self.logger.debug(f" OCR confidence too low ({composite_confidence:.1f}%), will prompt user for metadata")
-                        self.logger.info(f"OCR confidence too low ({composite_confidence:.1f}%), will prompt user for metadata")
-
-                    # Log OCR results
-                    ocr_log_msg = f"OCR Results: Confidence={ocr_metadata.get('confidence', 0):.1f}%"
-                    if ocr_metadata.get('hole_id'):
-                        ocr_log_msg += f", Hole ID={ocr_metadata['hole_id']}"
-                    if ocr_metadata.get('depth_from') is not None and ocr_metadata.get('depth_to') is not None:
-                        ocr_log_msg += f", Depth={ocr_metadata['depth_from']}-{ocr_metadata['depth_to']}"
-                    
-                    self.logger.debug(f" {ocr_log_msg}")
-                    self.logger.info(ocr_log_msg)
-                    add_progress_message(ocr_log_msg, None)
-                else:
-                    # OCR is disabled, create a minimal metadata structure
-                    self.logger.debug(" OCR is disabled, creating minimal metadata structure")
-                    ocr_metadata = {
-                        'hole_id': None,
-                        'depth_from': None,
-                        'depth_to': None,
-                        'confidence': 0.0,
-                        'metadata_region': None
-                    }
-                    
-                    # Try to extract metadata from filename if available
-                    if image_path:
-                        filename_metadata = self.file_manager.extract_metadata_from_filename(image_path)
-                        if filename_metadata:
-                            ocr_metadata.update(filename_metadata)
-                            ocr_metadata['confidence'] = 100.0  # High confidence for filename metadata
-                            ocr_metadata['from_filename'] = True
-                            
-                            self.logger.debug(f" Extracted metadata from filename: {filename_metadata}")
-                    
-                    if 24 in missing_marker_ids:
-                        missing_marker_ids.remove(24)
-                        self.logger.debug(" Removed marker 24 from missing list since OCR is disabled")
-                        self.logger.info("Removed metadata marker 24 from missing list (OCR disabled)")
-
-            # ===================================================
-            # STEP 8: ALWAYS SHOW COMPARTMENT REGISTRATION DIALOG
-            # ===================================================
-            # ALWAYS show the compartment registration dialog
-            if self.progress_queue:
-                add_progress_message("Opening compartment registration dialog...", None)
-
-
-            self.logger.debug(" Preparing to show compartment registration dialog")
-
-            # # Get visualization for dialog - use boundaries_viz if available
-            compartment_viz = small_image.copy()
-            
-            try:
-                # Create unified registration dialog
-                self.logger.debug(" Creating combined registration dialog")
-
-                # Define the callback function for re-processing with adjustments
-                def process_image_callback(params):
-                    # Re-analyze boundaries with adjustment parameters
-                    temp_metadata = dict(ocr_metadata) if ocr_metadata else {}
-                    temp_metadata['boundary_adjustments'] = params
-                    
-                    new_analysis = self.aruco_manager.analyze_compartment_boundaries(
-                        small_image, markers, 
-                        compartment_count=self.config.get('compartment_count', 20),
-                        smart_cropping=True,
-                        metadata=temp_metadata
-                    )
-                    
-                    return {
-                        'boundaries': new_analysis['boundaries'],
-                        'visualization': new_analysis['visualization']
-                    }
-                
-                # Debug missing markers before dialog
-                self.logger.debug(f" Missing marker IDs before dialog: {missing_marker_ids}")
-                self.logger.debug(f" Type of missing_marker_ids: {type(missing_marker_ids)}")
-                
-                # Call handle_markers_and_boundaries with appropriate parameters
-                result = self.handle_markers_and_boundaries(
-                    compartment_viz,
-                    boundaries,
-                    missing_marker_ids=missing_marker_ids,
-                    metadata=ocr_metadata,
-                    vertical_constraints=(self.top_y, self.bottom_y) if hasattr(self, 'top_y') and hasattr(self, 'bottom_y') else None,
-                    marker_to_compartment=marker_to_compartment,
-                    rotation_angle=rotation_angle,
-                    corner_markers=self.corner_markers if hasattr(self, 'corner_markers') else None,
-                    markers=markers,
-                    initial_mode=0,  # Start in MODE_METADATA
-                    on_apply_adjustments=process_image_callback,
-                    image_path=image_path,
-                    scale_data=self.current_scale_data if hasattr(self, 'current_scale_data') else None
-                )
-
-                self.logger.debug(" Registration dialog completed")
-
-                # Process the result based on complete metadata and boundaries
-                if result:
-                    if result.get('quit', False):
-                        # User chose to quit processing
-                        self.logger.debug(" User quit processing")
-                        self.logger.info("User stopped processing")
-                        add_progress_message("Processing stopped by user", None)
-                        
-                        
-                        # Set a flag to stop processing remaining images
-                        self.processing_complete = True
-                        return False  # Return early to stop processing
-                    
-                    self.logger.debug(f" Result dict: {result}")
-                    if result.get('rejected', False):
-                        # Handle rejected case using centralized handler
-                        self.logger.debug(" Image rejected by user")
-                        
-                        exit_handled = self.handle_image_exit(
-                            image_path=image_path,
-                            result=result,
-                            metadata=metadata,  # May be partial at this point
-                            compartments=None,  # No compartments extracted yet
-                            processing_messages=processing_messages,
-                            add_progress_message=add_progress_message
-                        )
-                        
-                        return exit_handled  # True = handled, continue to next image
-                    
-                    else:
-                        # Use all the data from the registration dialog
-                        metadata = {
-                            'hole_id': result.get('hole_id'),
-                            'depth_from': result.get('depth_from'),
-                            'depth_to': result.get('depth_to'),
-                            'compartment_interval': result.get('compartment_interval', 1)
-                        }
-                        
-                        # Update boundaries based on result
-                        if 'top_boundary' in result and 'bottom_boundary' in result:
-                            self.top_y = result['top_boundary']
-                            self.bottom_y = result['bottom_boundary']
-                            
-                        # Store result boundaries for later use
-                        self.result_boundaries = result.get('result_boundaries', {})
-                        
-                        # IMPORTANT: Re-apply boundary adjustments to get final boundaries
-                        if any(key in result for key in ['top_boundary', 'bottom_boundary', 'left_height_offset', 'right_height_offset']):
-                            self.logger.debug(" Re-applying boundary adjustments to get final boundaries")
-                            
-                            # Create adjustment parameters from dialog result
-                            adjustment_params = {
-                                'top_boundary': result.get('top_boundary', self.top_y),
-                                'bottom_boundary': result.get('bottom_boundary', self.bottom_y),
-                                'left_height_offset': result.get('left_height_offset', 0),
-                                'right_height_offset': result.get('right_height_offset', 0)
-                            }
-                            
-                            # Update metadata with boundary adjustments
-                            metadata['boundary_adjustments'] = adjustment_params
-                            
-                            # Re-analyze boundaries with adjustments
-                            self.logger.debug(f" Re-analyzing boundaries with adjustments: {adjustment_params}")
-                            adjusted_analysis = self.aruco_manager.analyze_compartment_boundaries(
-                                small_image, markers,
-                                compartment_count=self.config.get('compartment_count', 20),
-                                smart_cropping=True,
-                                metadata=metadata
-                            )
-                            
-                            # Update boundaries with adjusted values
-                            boundaries = adjusted_analysis['boundaries']
-                            self.logger.debug(f" Updated boundaries after adjustments: {len(boundaries)} compartments")
-                            
-                            # Merge manually placed compartments if any exist
-                            # Check if we have manually placed compartments to merge
-                            if 'result_boundaries' in result and result['result_boundaries']:
-                                self.logger.debug(f" Found {len(result['result_boundaries'])} manually placed compartments to merge")
-                                
-                                # Convert manually placed compartments to boundary format
-                                for marker_id, boundary in result['result_boundaries'].items():
-                                    if marker_id == 24:  # Skip metadata marker
-                                        continue
-                                    
-                                    # Check if this compartment is already in boundaries
-                                    compartment_exists = False
-                                    for existing_boundary in boundaries:
-                                        # Check if x-coordinates overlap significantly
-                                        x1_existing, _, x2_existing, _ = existing_boundary
-                                        if isinstance(boundary, tuple) and len(boundary) == 4:
-                                            x1_new, _, x2_new, _ = boundary
-                                            # Check for overlap
-                                            if (x1_new < x2_existing and x2_new > x1_existing):
-                                                compartment_exists = True
-                                                break
-                                    
-                                    if not compartment_exists and isinstance(boundary, tuple) and len(boundary) == 4:
-                                        boundaries.append(boundary)
-                                        self.logger.debug(f" Added manually placed compartment for marker {marker_id}")
-                                
-                                # Sort boundaries by x-coordinate
-                                boundaries.sort(key=lambda b: b[0])
-                                self.logger.debug(f" Total boundaries after merging: {len(boundaries)}")
-                         
-                        self.logger.debug(f" User completed registration with metadata: {metadata}")
-                        self.logger.info(f"User completed registration with metadata: {metadata}")
-
-                else:
-                    # User canceled the dialog
-                    self.logger.debug(" Dialog canceled by user")
-                    self.logger.warning("Image processing canceled by user")
-                    if self.progress_queue:
-                        add_progress_message("Processing canceled by user", None)
+    def _show_registration_dialog(self, display_image, display_boundaries, display_markers,
+                                missing_marker_ids, metadata, display_constraints,
+                                marker_to_compartment, rotation_angle, image_path):
+        """Show the registration dialog with downsampled visualization."""
         
-                    return False  # Return early to skip processing
-            except Exception as e:
-                self.logger.error(f"Metadata dialog error: {str(e)}")
-                self.logger.error(traceback.format_exc())
-                self.logger.debug(f" Metadata dialog error: {str(e)}")
-                self.logger.debug(f" {traceback.format_exc()}")
-                if self.progress_queue:
-                    add_progress_message(f"Metadata dialog error: {str(e)}", None)
-                return False
-
-
-
-            # ===================================================
-            # STEP 10: APPLY SKEW CORRECTION TO HIGH-RES IMAGE
-            # ===================================================
-            # Apply skew correction to the original high-resolution image if needed
-            if rotation_matrix is not None and rotation_angle != 0.0:
-                self.logger.debug(f" Applying orientation correction to high-res image (angle: {rotation_angle:.2f}°)")
-                if self.progress_queue:
-                    add_progress_message(f"Applying orientation correction to high-resolution image (angle: {rotation_angle:.2f}°)...", None)
-                
-                # Get dimensions for the output image
-                h, w = original_image.shape[:2]
-                
-                # IMPORTANT: Recalculate rotation matrix for the high-res image dimensions
-                # The rotation matrix from the small image has translation components specific to the small image size
-                high_res_center = (w // 2, h // 2)
-                high_res_rotation_matrix = cv2.getRotationMatrix2D(high_res_center, rotation_angle, 1.0)
-                
-                # Apply the rotation with the correctly sized matrix
-                corrected_original_image = cv2.warpAffine(
-                    original_image,
-                    high_res_rotation_matrix,
-                    (w, h),  # Explicitly use width, height order
-                    flags=cv2.INTER_LANCZOS4,
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=(255, 255, 255)
-                )
-                # Use the corrected image for further processing
-                original_image = corrected_original_image
-                self.logger.debug(f" High-resolution image orientation corrected with {rotation_angle:.2f}° rotation")
-                self.logger.info(f"Applied orientation correction to high-resolution image (angle: {rotation_angle:.2f}°)")
-            else:
-                self.logger.debug(" No orientation correction needed for high-resolution image")
-
-
-            # ===================================================
-            # STEP 11: SCALE BOUNDARIES TO ORIGINAL IMAGE SIZE
-            # ===================================================
+        # Define callback for re-processing with adjustments
+        def process_image_callback(params):
+            # Scale adjustment parameters back to full resolution
+            full_params = {
+                'top_boundary': int(params['top_boundary'] / self.viz_manager.display_scale_factor),
+                'bottom_boundary': int(params['bottom_boundary'] / self.viz_manager.display_scale_factor),
+                'left_height_offset': int(params['left_height_offset'] / self.viz_manager.display_scale_factor),
+                'right_height_offset': int(params['right_height_offset'] / self.viz_manager.display_scale_factor)
+            }
             
-            # Report number of compartments found
-            status_msg = f"Found {len(boundaries)}/{self.config['compartment_count']} compartments"
-            self.logger.debug(f" {status_msg}")
-            self.logger.info(status_msg)
-            if self.progress_queue:
-                add_progress_message(status_msg, None)
-
+            # Get full resolution data
+            full_image = self.viz_manager.get_image_from_viz_cache(VisualizationType.CORRECTED_IMAGE)
+            full_markers = self.viz_manager.get_metadata('markers')
             
-            # Scale up the coordinates from small image to original image if necessary
-            if small_image.shape != original_image.shape:
-                self.logger.debug(" Need to scale boundaries to original image size")
-                if self.progress_queue:
-                    add_progress_message("Scaling boundaries to original image size...", None)
-                    
-                # Calculate scale factors
-                scale_x = original_image.shape[1] / small_image.shape[1]
-                scale_y = original_image.shape[0] / small_image.shape[0]
-                self.logger.debug(f" Scale factors: x={scale_x:.4f}, y={scale_y:.4f}")
-
-                # Store the scale factor so we can adjust px/cm measurements later
-                self.image_scale_factor = scale_x  # Assuming x and y scale are similar
-                
-                # Also adjust the scale data if it exists
-                if hasattr(self, 'current_scale_data') and self.current_scale_data:
-                    # Store both the original and adjusted scales
-                    self.current_scale_data['scale_px_per_cm_small'] = self.current_scale_data['scale_px_per_cm']
-                    self.current_scale_data['scale_px_per_cm_original'] = self.current_scale_data['scale_px_per_cm'] * scale_x
-                    self.current_scale_data['scale_factor'] = scale_x
-                    self.logger.debug(f" Stored scale factor {scale_x:.4f} in current_scale_data")
-                    self.logger.debug(f" Small image scale: {self.current_scale_data['scale_px_per_cm_small']:.2f} px/cm")
-                    self.logger.debug(f" Original image scale: {self.current_scale_data['scale_px_per_cm_original']:.2f} px/cm")
-
-
-                # First merge any manually placed compartments before scaling
-                if hasattr(self, 'result_boundaries') and self.result_boundaries:
-                    self.logger.debug(f" Found {len(self.result_boundaries)} result boundaries to merge before scaling")
-                    for marker_id, boundary in self.result_boundaries.items():
-                        if marker_id == 24:  # Metadata marker - not a compartment boundary
-                            # Metadata markers are for OCR, not compartments
-                            # Will be scaled separately below
-                            self.logger.debug(f" Found metadata marker {marker_id} - will scale separately")
-                            continue
-                        if marker_id in [0, 1, 2, 3]:  # Corner markers - not compartment boundaries
-                            # Corner markers define constraints, not compartments
-                            # Will be scaled separately below
-                            self.logger.debug(f" Found corner marker {marker_id} - will scale separately")
-                            continue
-                        if isinstance(boundary, tuple) and len(boundary) == 4:
-                            # Check if this boundary is already in our list
-                            boundary_exists = False
-                            for existing in boundaries:
-                                if (abs(existing[0] - boundary[0]) < 5 and 
-                                    abs(existing[1] - boundary[1]) < 5):
-                                    boundary_exists = True
-                                    break
-                            
-                            if not boundary_exists:
-                                boundaries.append(boundary)
-                                self.logger.debug(f" Added compartment boundary for marker {marker_id} before scaling")
-                    
-                    # Sort boundaries by x-coordinate
-                    boundaries.sort(key=lambda b: b[0])
-                
-                # Scale the boundary adjustments if they exist
-                scaled_left_offset = 0
-                scaled_right_offset = 0
-                scaled_top_y = int(self.top_y * scale_y) if hasattr(self, 'top_y') else None
-                scaled_bottom_y = int(self.bottom_y * scale_y) if hasattr(self, 'bottom_y') else None
-                
-                if metadata and 'boundary_adjustments' in metadata:
-                    adjustments = metadata['boundary_adjustments']
-                    self.logger.debug(f" Scaling boundary adjustments from small to original image")
-                    
-                    # Scale the adjustments
-                    scaled_top_y = int(adjustments['top_boundary'] * scale_y)
-                    scaled_bottom_y = int(adjustments['bottom_boundary'] * scale_y)
-                    scaled_left_offset = int(adjustments['left_height_offset'] * scale_y)
-                    scaled_right_offset = int(adjustments['right_height_offset'] * scale_y)
-                    
-                    self.logger.debug(f" Original adjustments: {adjustments}")
-                    self.logger.debug(f" Scaled adjustments: top={scaled_top_y}, bottom={scaled_bottom_y}, "
-                          f"left_offset={scaled_left_offset}, right_offset={scaled_right_offset}")
-                
-                # Scale up the compartment boundaries and apply adjustments mathematically
-                compartment_boundaries = []
-                img_width = original_image.shape[1]
-                
-                for x1, y1, x2, y2 in boundaries:
-                    # Scale the x coordinates
-                    scaled_x1 = int(x1 * scale_x)
-                    scaled_x2 = int(x2 * scale_x)
-                    
-                    # If we have boundary adjustments, calculate adjusted y values
-                    if scaled_top_y is not None and scaled_bottom_y is not None:
-                        # Calculate the center x position of this compartment
-                        center_x = (scaled_x1 + scaled_x2) / 2
-                        
-                        # Calculate y positions based on the sloped boundaries
-                        left_top_y = scaled_top_y + scaled_left_offset
-                        right_top_y = scaled_top_y + scaled_right_offset
-                        left_bottom_y = scaled_bottom_y + scaled_left_offset
-                        right_bottom_y = scaled_bottom_y + scaled_right_offset
-                        
-                        # Calculate slopes
-                        if img_width > 0:
-                            top_slope = (right_top_y - left_top_y) / img_width
-                            bottom_slope = (right_bottom_y - left_bottom_y) / img_width
-                            
-                            # Calculate y values at this x position
-                            scaled_y1 = int(left_top_y + (top_slope * center_x))
-                            scaled_y2 = int(left_bottom_y + (bottom_slope * center_x))
-                        else:
-                            scaled_y1 = scaled_top_y
-                            scaled_y2 = scaled_bottom_y
-                    else:
-                        # No adjustments, just scale the y coordinates
-                        scaled_y1 = int(y1 * scale_y)
-                        scaled_y2 = int(y2 * scale_y)
-                    
-                    compartment_boundaries.append((scaled_x1, scaled_y1, scaled_x2, scaled_y2))
-                
-                # Scale result_boundaries (manually placed markers)
-                if hasattr(self, 'result_boundaries') and self.result_boundaries:
-                    scaled_result_boundaries = {}
-                    for marker_id, boundary in self.result_boundaries.items():
-                        if marker_id == 24 or marker_id in [0, 1, 2, 3]:  # Special markers
-                            if isinstance(boundary, np.ndarray):
-                                scaled_corners = boundary.copy()
-                                scaled_corners[:, 0] *= scale_x
-                                scaled_corners[:, 1] *= scale_y
-                                scaled_result_boundaries[marker_id] = scaled_corners.astype(np.float32)
-                                self.logger.debug(f" Scaled special marker {marker_id}")
-                        elif isinstance(boundary, tuple) and len(boundary) == 4:
-                            # This is a manually placed compartment - apply same scaling logic
-                            x1, y1, x2, y2 = boundary
-                            scaled_x1 = int(x1 * scale_x)
-                            scaled_x2 = int(x2 * scale_x)
-                            
-                            if scaled_top_y is not None and scaled_bottom_y is not None:
-                                center_x = (scaled_x1 + scaled_x2) / 2
-                                left_top_y = scaled_top_y + scaled_left_offset
-                                right_top_y = scaled_top_y + scaled_right_offset
-                                left_bottom_y = scaled_bottom_y + scaled_left_offset
-                                right_bottom_y = scaled_bottom_y + scaled_right_offset
-                                
-                                if img_width > 0:
-                                    top_slope = (right_top_y - left_top_y) / img_width
-                                    bottom_slope = (right_bottom_y - left_bottom_y) / img_width
-                                    scaled_y1 = int(left_top_y + (top_slope * center_x))
-                                    scaled_y2 = int(left_bottom_y + (bottom_slope * center_x))
-                                else:
-                                    scaled_y1 = scaled_top_y
-                                    scaled_y2 = scaled_bottom_y
-                            else:
-                                scaled_y1 = int(y1 * scale_y)
-                                scaled_y2 = int(y2 * scale_y)
-                                
-                            scaled_result_boundaries[marker_id] = (scaled_x1, scaled_y1, scaled_x2, scaled_y2)
-                            self.logger.debug(f" Scaled compartment boundary for marker {marker_id}")
-                    
-                    self.result_boundaries = scaled_result_boundaries
-                
-                # Update vertical constraints
-                if hasattr(self, 'top_y') and hasattr(self, 'bottom_y'):
-                    self.top_y = scaled_top_y if scaled_top_y is not None else int(self.top_y * scale_y)
-                    self.bottom_y = scaled_bottom_y if scaled_bottom_y is not None else int(self.bottom_y * scale_y)
-                    self.logger.debug(f" Updated vertical constraints: top_y={self.top_y}, bottom_y={self.bottom_y}")
-                    
-                self.logger.debug(f" Scaled {len(compartment_boundaries)} boundaries to original image size")
-                if compartment_boundaries:
-                    self.logger.debug(f" First scaled boundary: {compartment_boundaries[0]}")
-                    self.logger.debug(f" Last scaled boundary: {compartment_boundaries[-1]}")
-                    
-                self.logger.info(f"Scaled {len(compartment_boundaries)} compartment boundaries to original image")
-            else:
-                # No scaling needed
-                self.logger.debug(" No scaling needed - small image and original have same dimensions")
-                compartment_boundaries = boundaries
+            # Re-analyze at full resolution
+            temp_metadata = {'boundary_adjustments': full_params}
+            new_analysis = self.aruco_manager.analyze_compartment_boundaries(
+                full_image, full_markers,
+                compartment_count=self.config.get('compartment_count', 20),
+                smart_cropping=True,
+                metadata=temp_metadata
+            )
             
-            # ===================================================
-            # STEP 12: CONVERT BOUNDARIES TO CORNERS AND EXTRACT COMPARTMENTS AS NP ARRAYS FOR DUPLICATE CHECK DIALOG
-            # ===================================================
-            self.logger.debug(" Converting boundaries to corners format")
-            corners_list = []
-
-            depth_from = metadata.get('depth_from')
-            if depth_from is None:
-                raise ValueError("Missing required metadata: 'depth_from' is not set before compartment boundary conversion.")
-
-            compartment_interval = metadata.get('compartment_interval', 1)
-
-
-            for i, (x1, y1, x2, y2) in enumerate(compartment_boundaries):
-                # Convert boundary to 4 corners (top_left, top_right, bottom_right, bottom_left)
-                corners = {
-                    'depth_to': depth_from + ((i + 1) * compartment_interval),
-                    'corners': [
-                        [x1, y1],  # top_left
-                        [x2, y1],  # top_right
-                        [x2, y2],  # bottom_right
-                        [x1, y2]   # bottom_left
-                    ]
-                }
-                corners_list.append(corners)
-            self.logger.debug(f" Created corners for {len(corners_list)} compartments")
+            # Scale results back to display resolution
+            display_boundaries = self.viz_manager.scale_boundaries_to_display(new_analysis['boundaries'])
             
-            self.logger.debug(" Extracting compartments for duplicate check display")
-            compartments = self.extract_compartments_from_boundaries(original_image, compartment_boundaries)
-            self.logger.debug(f" Extracted {len(compartments)} compartments from boundaries")
-            # ===================================================
-            # STEP 13: CHECK FOR DUPLICATES AND HANDLE ALL EXITS
-            # ===================================================
-            # Check for duplicates BEFORE saving
-            if (metadata.get('hole_id') and 
-                metadata.get('depth_from') is not None and 
-                metadata.get('depth_to') is not None):
-                
-                # Loop for handling metadata modification and re-checking duplicates
-                continue_processing = True
-                while continue_processing:
-                    self.logger.debug(" Checking for duplicates with metadata: hole_id={}, depth={}-{}m".format(
-                        metadata.get('hole_id'), metadata.get('depth_from'), metadata.get('depth_to')))
-                    
-                    # Check for duplicates - this method should run on main thread
-                    self.logger.debug(" Calling duplicate_handler.check_duplicate")
-                    duplicate_result = self.duplicate_handler.check_duplicate(
-                        metadata['hole_id'], 
-                        metadata['depth_from'], 
-                        metadata['depth_to'], 
-                        small_image,  # Use the downsampled image
-                        image_path,
-                        extracted_compartments=compartments  # Pass extracted compartments
-                    )
-                    
-                    self.logger.debug(f" Duplicate check result: {duplicate_result}")
-                    
-                    # Process the result based on action
-                    if isinstance(duplicate_result, dict) and 'action' in duplicate_result:
-                        action = duplicate_result.get('action')
-                        
-                        if action == 'quit':
-                            # User chose to quit processing
-                            self.logger.debug(" User chose to quit processing")
-                            self.logger.info("User stopped processing via duplicate dialog")
-                            self.processing_complete = True
-                            return False  # Stop processing
-                        
-                        elif action == 'modify_metadata':
-                            # User modified metadata - update and re-check
-                            self.logger.debug(f" User modified metadata from {metadata} to {duplicate_result}")
-                            self.logger.info(f"User modified metadata from {metadata} to {duplicate_result}")
-                            
-                            # Update metadata with new values
-                            metadata['hole_id'] = duplicate_result.get('hole_id', metadata['hole_id'])
-                            metadata['depth_from'] = duplicate_result.get('depth_from', metadata['depth_from'])
-                            metadata['depth_to'] = duplicate_result.get('depth_to', metadata['depth_to'])
-                            
-                            # Continue the loop to re-check duplicates with new metadata
-                            # (stays in while loop)
-                        
-                        else:
-                            # All other actions exit the loop and go to handle_image_exit
-                            continue_processing = False
-                            
-                            # Build result for handle_image_exit
-                            result = {
-                                'action': action,
-                                'hole_id': metadata.get('hole_id'),
-                                'depth_from': metadata.get('depth_from'),
-                                'depth_to': metadata.get('depth_to'),
-                                'compartment_interval': metadata.get('compartment_interval', 1),
-                                'boundaries': compartment_boundaries,
-                                'corners_list': corners_list
-                            }
-                            
-                            # Add action-specific data
-                            if action == 'skip':
-                                result['skipped'] = True
-                            
-                            elif action == 'continue':
-                                # No duplicates found - normal processing
-                                pass
-                            
-                            elif action == 'replace_all':
-                                # Delete existing compartment files BEFORE saving new ones
-                                files_to_delete = duplicate_result.get('files_to_delete', [])
-                                if files_to_delete:
-                                    add_progress_message(f"Deleting {len(files_to_delete)} existing compartment files...", None)
-                                    deleted_count = 0
-                                    
-                                    for file_path in files_to_delete:
-                                        try:
-                                            if os.path.exists(file_path):
-                                                os.remove(file_path)
-                                                deleted_count += 1
-                                                self.logger.info(f"Deleted existing compartment: {file_path}")
-                                        except Exception as e:
-                                            self.logger.error(f"Failed to delete {file_path}: {str(e)}")
-                                    
-                                    add_progress_message(f"Deleted {deleted_count} existing compartment files", None)
-                            
-                            elif action == 'selective_replacement':
-                                result['selective_replacement'] = True
-                            
-                            elif action == 'keep_with_gaps':
-                                result['skipped'] = True  # Don't overwrite existing compartments
-                                result['action'] = 'keep_with_gaps'
-                                result['missing_depths'] = duplicate_result.get('missing_depths', [])
-                            
-                            elif action == 'reject':
-                                # Include all rejection details
-                                result.update(duplicate_result)
-                            
-                            # Call handle_image_exit for all non-modify actions
-                            saved_paths = self.handle_image_exit(
-                                image_path=image_path,
-                                result=result,
-                                metadata=metadata,
-                                compartments=compartments,
-                                processing_messages=processing_messages,
-                                add_progress_message=add_progress_message
-                            )
-                            
-                            # ===================================================
-                            # STEP 14: BLUR DETECTION (OPTIONAL)
-                            # ===================================================
-                            # Detect blur in saved compartments if enabled
-                            if self.config['enable_blur_detection'] and saved_paths:
-                                self.logger.debug(f" Blur detection enabled, analyzing {len(saved_paths)} saved compartments")
-                                if self.progress_queue:
-                                    add_progress_message("Analyzing image sharpness...", None)
-                                
-                                blur_results = self.detect_blur_in_saved_compartments(saved_paths, os.path.basename(image_path))
-                                self.logger.debug(f" Blur detection complete, found {sum(1 for r in blur_results if r.get('is_blurry', False))} blurry compartments")
-                            
-                            # ===================================================
+            # Create display visualization
+            display_viz = self.viz_manager.create_boundary_visualization(
+                display_image, display_boundaries
+            )
+            
+            return {
+                'boundaries': display_boundaries,
+                'visualization': display_viz
+            }
+        
+        # Create the dialog with display-resolution data
+        dialog = CompartmentRegistrationDialog(
+            self.root,
+            display_image,
+            display_boundaries,
+            missing_marker_ids,
+            theme_colors=self.gui_manager.theme_colors,
+            gui_manager=self.gui_manager,
+            metadata=metadata,
+            vertical_constraints=display_constraints,
+            marker_to_compartment=marker_to_compartment,
+            rotation_angle=rotation_angle,
+            markers=display_markers,
+            config=self.config,
+            on_apply_adjustments=process_image_callback,
+            image_path=image_path,
+            scale_data=self.viz_manager.get_metadata('scale_data')
+        )
+        
+        dialog.current_mode = 0  # Start in metadata mode
+        dialog._update_mode_indicator()
+        
+        return dialog.show()
+
+    def _apply_dialog_adjustments(self, result, full_image, full_markers, original_boundaries):
+        """Apply dialog adjustments to full resolution boundaries."""
+        
+        if not any(key in result for key in ['top_boundary', 'bottom_boundary', 
+                                            'left_height_offset', 'right_height_offset']):
+            # No adjustments made
+            return original_boundaries
+        
+        # Scale adjustments from display to full resolution
+        adjustment_params = {
+            'top_boundary': int(result.get('top_boundary', 0) / self.viz_manager.display_scale_factor),
+            'bottom_boundary': int(result.get('bottom_boundary', 0) / self.viz_manager.display_scale_factor),
+            'left_height_offset': int(result.get('left_height_offset', 0) / self.viz_manager.display_scale_factor),
+            'right_height_offset': int(result.get('right_height_offset', 0) / self.viz_manager.display_scale_factor)
+        }
+        
+        # Re-analyze boundaries at full resolution with adjustments
+        metadata = {'boundary_adjustments': adjustment_params}
+        
+        adjusted_analysis = self.aruco_manager.analyze_compartment_boundaries(
+            full_image, full_markers,
+            compartment_count=self.config.get('compartment_count', 20),
+            smart_cropping=True,
+            metadata=metadata
+        )
+        
+        return adjusted_analysis['boundaries']
+
     def process_folder(self, folder_path: str) -> Tuple[int, int]:
         """
         Process all images in a folder, one at a time on the main thread.
@@ -1866,7 +1043,7 @@ class ChipTrayApp:
         
         # Get all image files from the folder
         self.logger.debug(" Scanning for image files")
-        image_extensions = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
+        image_extensions = ('.jpg', '.jpeg', '.png', '.tif', '.tiff', '.heic', '.heif')
         image_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path)
                     if os.path.isfile(os.path.join(folder_path, f)) and 
                     f.lower().endswith(image_extensions)]
@@ -2425,74 +1602,6 @@ class ChipTrayApp:
         
         return blur_results
 
-    def handle_missing_compartments(self, image, compartment_boundaries, missing_marker_ids, metadata=None, 
-                                vertical_constraints=None, marker_to_compartment=None, is_metadata_marker=False, markers=None, scale_data=None):
-        """
-        Display the manual annotation dialog for missing compartments on the main thread.
-        
-        Args:
-            image: The input image
-            compartment_boundaries: List of already detected boundaries
-            missing_marker_ids: List of marker IDs that need manual annotation
-            metadata: Optional metadata dictionary 
-            vertical_constraints: Optional tuple of (min_y, max_y) for compartment placement
-            marker_to_compartment: Dictionary mapping marker IDs to compartment numbers
-            is_metadata_marker: Whether metadata marker selection is needed
-            markers: Dictionary of all detected ArUco markers {id: corners}
-            
-        Returns:
-            Dictionary of dialog results including manually annotated boundaries and 
-            metadata marker (if selected)
-        """
-        self.logger.debug(" Running wrapper 'handle_missing_compartments' for 'handle_markers_and_boundaries')")
-        return self.handle_markers_and_boundaries(
-            image, 
-            compartment_boundaries, 
-            missing_marker_ids=missing_marker_ids,
-            metadata=metadata, 
-            vertical_constraints=vertical_constraints,
-            marker_to_compartment=marker_to_compartment,
-            markers=markers,  # Pass markers to unified handler
-            scale_data = scale_data,
-            initial_mode=1  # MODE_MISSING_BOUNDARIES
-        )
-
-    def handle_boundary_adjustments(self, image, detected_boundaries, missing_marker_ids=None, 
-                            metadata=None, vertical_constraints=None, 
-                            rotation_angle=0.0, corner_markers=None, marker_to_compartment=None, markers=None, scale_data=None):
-        """
-        Display the boundary adjustment dialog for all images.
-        
-        Args:
-            image: The input image
-            detected_boundaries: List of already detected boundaries
-            missing_marker_ids: Optional list of marker IDs that need manual annotation
-            metadata: Optional metadata dictionary 
-            vertical_constraints: Optional tuple of (min_y, max_y) for compartment placement
-            rotation_angle: Current rotation angle of the image (degrees)
-            corner_markers: Dictionary of corner marker positions {0: (x,y), 1: (x,y)...}
-            marker_to_compartment: Dictionary mapping marker IDs to compartment numbers
-            markers: Dictionary of all detected ArUco markers {id: corners}
-            
-        Returns:
-            Dictionary containing adjusted boundaries and parameters
-        """
-        self.logger.debug(" Running wrapper 'handle_boundary_adjustments' for 'handle_markers_and_boundaries')")
-        return self.handle_markers_and_boundaries(
-            image, 
-            detected_boundaries, 
-            missing_marker_ids=missing_marker_ids,
-            metadata=metadata, 
-            vertical_constraints=vertical_constraints,
-            rotation_angle=rotation_angle,
-            corner_markers=corner_markers,
-            marker_to_compartment=marker_to_compartment,
-            markers=markers,  # Pass markers to unified handler
-            scale_data=scale_data, 
-            initial_mode=2,  # MODE_ADJUST_BOUNDARIES
-            show_adjustment_controls=True  # Make adjustment controls visible by default
-        )
-
     def extract_compartments_from_boundaries(self, image: np.ndarray, boundaries: List[Tuple[int, int, int, int]]) -> List[np.ndarray]:
         """
         Extract compartment regions from image using boundaries. This stores the compartments as np arrays for display in the duplicate handler dialog
@@ -2565,7 +1674,7 @@ class ChipTrayApp:
         self.logger.debug(f" vertical_constraints: {vertical_constraints}")
         self.logger.debug(f" rotation_angle: {rotation_angle}")
         
-        # Get the original image with no annotations if available
+        # Get the original image with no annotations if available TODO - CHECK THIS - THIS MIGHT BE BREAKING THINGS! IF THE SYSTEM FALLS BACK TO AN UNEXPECTED FILE!
         original_unannotated_image = None
         if hasattr(self, 'visualization_cache'):
             self.logger.debug(" Checking for original image in visualization_cache")
@@ -2577,7 +1686,7 @@ class ChipTrayApp:
         
         # If we have a small_image attribute, use that as a fallback
         if original_unannotated_image is None and hasattr(self, 'small_image'):
-            self.logger.debug(" Using small_image as original image")
+            self.logger.error(" Using small_image as original image")
             image = self.small_image.copy()
         
         # Get visualization (will be passed as boundaries_viz but lower priority)
@@ -2720,7 +1829,7 @@ class ChipTrayApp:
                 missing_marker_ids,
                 theme_colors=self.gui_manager.theme_colors,
                 gui_manager=self.gui_manager,
-                boundaries_viz=boundaries_viz,  # This will only be used as fallback
+                boundaries_viz=boundaries_viz,  # This will only be used as fallback TODO - REMOVE ALL FALLBACKS - ALL FALLBACKS SHOULD ERROR
                 original_image=getattr(self, 'original_image', None),
                 output_format=self.config.get('output_format', 'png'),
                 file_manager=self.file_manager,
@@ -2896,7 +2005,6 @@ class ChipTrayApp:
         self.file_manager = FileManager(config['local_folder_path'], config_manager=self.config_manager)
         
         self.logger.info("First run configuration applied successfully")
-
 
 
     def run(self):
