@@ -11,6 +11,12 @@ from processing.drillhole_data_visualizer import (
     PlotType,
     PlotConfig
 )
+from processing.embedding_trainer import (
+    generate_embeddings,
+    plot_embeddings,
+    EmbeddingModel,
+    ImageTabularDataset,
+)
 # ===================================================
 # INSERT: export pipeline helpers
 from processing.pipeline import (
