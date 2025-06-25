@@ -17,6 +17,7 @@ from processing.drillhole_trace_generator import DrillholeTraceGenerator
 from gui.widgets import *
 from gui.qaqc_manager import QAQCManager
 from gui.logging_review_dialog import LoggingReviewDialog
+from gui.embedding_training_dialog import EmbeddingTrainingDialog
 from utils.json_register_manager import JSONRegisterManager
 from utils.register_synchronizer import RegisterSynchronizer
 from gui.progress_dialog import ProgressDialog
@@ -700,6 +701,13 @@ class MainGUI:
                 'color': self.gui_manager.theme_colors["accent_blue"],
                 'command': self.on_generate_trace,
                 'icon': "📊"
+            },
+            {
+                'name': 'embedding_button',
+                'text': self.t("Embedding Tool"),
+                'color': self.gui_manager.theme_colors["accent_blue"],
+                'command': self._open_embedding_dialog,
+                'icon': "🧩"
             },
             {
                 'name': 'quit_button',
@@ -2373,6 +2381,19 @@ class MainGUI:
             "- Originals: HoleID_From-To_Original.ext"
         )
         DialogHelper.show_message(self.root, "File Structure Information", info_message, message_type="info")
+
+    def _open_embedding_dialog(self):
+        """Open the embedding training dialog."""
+        try:
+            dialog = EmbeddingTrainingDialog(self.root, self.gui_manager, self.file_manager)
+        except Exception as e:
+            self.logger.error(f"Error opening embedding dialog: {str(e)}")
+            DialogHelper.show_message(
+                self.root,
+                self.t("Error"),
+                self.t("Failed to open embedding tool") + f"\n{str(e)}",
+                message_type="error",
+            )
 
     def _show_blur_help(self):
         """Show help information about blur detection."""

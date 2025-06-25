@@ -1130,8 +1130,8 @@ class FileManager:
             self.logger.error(f"Error saving debug image: {str(e)}")
             return None
     
-    def save_drill_trace(self, 
-                       image: np.ndarray, 
+    def save_drill_trace(self,
+                       image: np.ndarray,
                        hole_id: str) -> str:
         """
         Save a drill trace image.
@@ -1161,6 +1161,28 @@ class FileManager:
             
         except Exception as e:
             self.logger.error(f"Error saving drill trace image: {str(e)}")
+            return None
+
+    def save_embedding_plot(self, image_path: str, filename: str = "embedding_plot.png") -> Optional[str]:
+        """
+        Save an embedding plot image to the debugging directory.
+
+        Args:
+            image_path: Path to the image file to copy.
+            filename: Desired filename for the saved plot.
+
+        Returns:
+            Path to the saved plot or None if an error occurs.
+        """
+        try:
+            save_dir = self.dir_structure["debugging"]
+            os.makedirs(save_dir, exist_ok=True)
+            dest = os.path.join(save_dir, filename)
+            shutil.copy(image_path, dest)
+            self.logger.info(f"Saved embedding plot: {dest}")
+            return dest
+        except Exception as e:
+            self.logger.error(f"Error saving embedding plot: {str(e)}")
             return None
         
     def save_original_file(self, 

@@ -20,6 +20,7 @@ from gui.drillhole_trace_designer import DrillholeTraceDesigner
 from gui.logging_review_dialog import LoggingReviewDialog
 from gui.progress_dialog import ProgressDialog
 from gui.widgets.modern_notebook import ModernNotebook
+from gui.embedding_training_dialog import EmbeddingTrainingDialog
 
 
 # Optional: Define __all__ to control what gets imported with from gui import *
@@ -41,6 +42,7 @@ __all__ = [
     'LoggingReviewDialog',
     'ProgressDialog',
     'ModernNotebook',
+    'EmbeddingTrainingDialog',
     'FirstRunDialog',
     'ThemedMenu',
     'ThemedMenuBar'
