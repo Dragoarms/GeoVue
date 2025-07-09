@@ -30,22 +30,29 @@ class DialogHelper:
         cls.gui_manager = gui_manager
     
     @classmethod
-    def t(cls, text):
+    def t(cls, text, *args, **kwargs):
         """
         Translate text using the class translator.
         
         Args:
             text (str): The text key to translate
+            *args: Positional arguments for string formatting
+            **kwargs: Keyword arguments for string formatting
             
         Returns:
             str: The translated text or original text if no translation available
         """
         if cls.translator:
-            # Always call translate() - let the TranslationManager handle missing translations
-            return cls.translator.translate(text)
+            # Pass through all arguments to the translator
+            return cls.translator.translate(text, *args, **kwargs)
         else:
-            # No translator available at all
-            return text
+            # No translator available - try basic formatting
+            try:
+                if args or kwargs:
+                    return text.format(*args, **kwargs)
+                return text
+            except:
+                return text
     
     @staticmethod
     def _check_main_thread(method_name):
@@ -135,7 +142,8 @@ class DialogHelper:
 
     @staticmethod
     def center_dialog(dialog, parent=None, size_ratio=None, 
-                    max_width=None, max_height=None):
+                    max_width=None, max_height=None,
+                    min_width=None, min_height=None):  # Add these parameters
         """
         Center a dialog window using its natural content size.
         Call this AFTER all content has been added to the dialog.
@@ -146,6 +154,8 @@ class DialogHelper:
             size_ratio: Optional ratio to scale the natural size (e.g., 1.2 = 120% of content)
             max_width: Maximum width constraint (optional)
             max_height: Maximum height constraint (optional)
+            min_width: Minimum width constraint (optional)
+            min_height: Minimum height constraint (optional)
         """
         # Check thread safety
         DialogHelper._check_main_thread("center_dialog")
@@ -172,6 +182,12 @@ class DialogHelper:
             width = int(natural_width * size_ratio)
             height = int(natural_height * size_ratio)
             logger.debug(f"After ratio {size_ratio}: {width}x{height}")
+        
+        # Apply minimum constraints if specified
+        if min_width and width < min_width:
+            width = min_width
+        if min_height and height < min_height:
+            height = min_height
         
         # Apply maximum constraints if specified
         if max_width and width > max_width:
@@ -214,7 +230,6 @@ class DialogHelper:
         dialog.focus_force()
         
         logger.debug(f"Dialog positioned: {width}x{height}+{x}+{y}")
-
 
     @staticmethod
     def _position_dialog_on_parent(dialog, parent):
@@ -260,28 +275,31 @@ class DialogHelper:
         dialog.focus_force()
 
     @staticmethod
-    def create_error_dialog(parent, title, message):
+    def create_error_dialog(parent, title, message, **kwargs):
         """
         Create a properly configured error dialog with themed components.
         
         Args:
             parent: Parent window
-            title: Dialog title
-            message: Error message
-            
-        Returns:
-            Reference to the error dialog
+            title: Dialog title (will be translated)
+            message: Error message (will be translated)
+            **kwargs: Additional keyword arguments for message translation
         """
         # Check thread safety
         DialogHelper._check_main_thread("create_error_dialog")
         
-        # Create base dialog with appropriate styling for errors
+        # Translate title and message
+        title = DialogHelper.t(title)
+        message = DialogHelper.t(message, **kwargs)
+        
+        # Create base dialog
         dialog = DialogHelper.create_dialog(
             parent, 
-            title, 
+            title,  # Already translated
             modal=True, 
             topmost=True
         )
+        
         
         # Apply theme colors if gui_manager is available
         theme_colors = None
@@ -414,11 +432,23 @@ class DialogHelper:
     
 
     @staticmethod
-    def show_message(parent, title, message, message_type="info"):
-        """Show a message dialog with an OK button."""
+    def show_message(parent, title, message, message_type="info", **kwargs):
+        """
+        Show a message dialog with an OK button.
+        
+        Args:
+            parent: Parent window
+            title: Dialog title (will be translated)
+            message: Message to display (will be translated)
+            message_type: Type of message ("info", "error", "warning", "success")
+            **kwargs: Additional keyword arguments for message translation
+        """
         # Check thread safety
         DialogHelper._check_main_thread("show_message")
         
+        # Translate title and message
+        title = DialogHelper.t(title)
+        message = DialogHelper.t(message, **kwargs)
         dialog = tk.Toplevel(parent)
         dialog.title(title)
         dialog.transient(parent)
@@ -448,6 +478,9 @@ class DialogHelper:
         icon_label = ttk.Label(top_frame, text=icon_text, font=("Arial", 24))
         icon_label.pack(side=tk.LEFT, padx=(0, 10))
         
+        # translate all text        
+        text = DialogHelper.t(text)
+
         # Message with proper wraplength
         msg_label = ttk.Label(
             top_frame, 
@@ -523,8 +556,27 @@ class DialogHelper:
         parent.wait_window(dialog)
 
     @staticmethod
-    def confirm_dialog(parent, title, message, yes_text="Yes", no_text="No"):
-        """Show a confirmation dialog with Yes/No buttons."""
+    def confirm_dialog(parent, title, message, yes_text="Yes", no_text="No", **kwargs):
+        """
+        Show a confirmation dialog with Yes/No buttons.
+        
+        Args:
+            parent: Parent window
+            title: Dialog title (will be translated)
+            message: Message to display (will be translated)
+            yes_text: Text for Yes button (will be translated)
+            no_text: Text for No button (will be translated)
+            **kwargs: Additional keyword arguments for message translation
+        """
+        # Check thread safety
+        DialogHelper._check_main_thread("confirm_dialog")
+        
+        # Translate all text
+        title = DialogHelper.t(title)
+        message = DialogHelper.t(message, **kwargs)
+        yes_text = DialogHelper.t(yes_text)
+        no_text = DialogHelper.t(no_text)
+
         # Check thread safety
         DialogHelper._check_main_thread("confirm_dialog")
         
@@ -788,9 +840,9 @@ class DialogHelper:
             DialogHelper.center_dialog(
                 rejection_dialog,
                 parent_dialog,
-                size_ratio=0.4,
-                min_width=500,
-                min_height=350
+                size_ratio=0.5,
+                max_width= 800,
+                max_height= 800
             )
             
             # Focus on text entry

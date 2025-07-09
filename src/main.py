@@ -18,19 +18,19 @@ Automatically names and organizes outputs
 
 Supports common image formats like JPG and PNG
 
-Basic error handling and logging
+in-depth error handling and logging
 
-QAQC step to review extracted compartments
+QAQC steps to review and classify extracted compartments
 
 Can skip or process specific images based on filters
 
 Auto-generates an Excel register of processed trays
 
-Supports multiple languages (UI - not OCR)
+Supports multiple languages and is easy to expand to more
 
 Checks for script updates automatically
 
-Some advanced config options for users who want more control
+Some advanced config options for customising compartment width / height / number etc.
 
 Status:
 Still under development — some things are a bit rough around the edges and may change depending on what works best in the field...
@@ -46,25 +46,25 @@ Happy to hear suggestions or bug reports if you're trying it.
 import sys
 import logging
 import os
-import json
-import tkinter as tk
-from tkinter import messagebox
 import platform
 import argparse
 import queue
-import cv2
-import numpy as np
 import threading
 import traceback
 from typing import List, Dict, Tuple, Any
 import re
-import pandas as pd
 from datetime import datetime
-from pillow_heif import register_heif_opener # TODO - Add in HEIC support and conversion to JPG
+import tkinter as tk
+from tkinter import messagebox
+import cv2
+import numpy as np
+import pandas as pd
+from PIL import Image as PILImage
+from pillow_heif import register_heif_opener
 from gui.first_run_dialog import FirstRunDialog
 from resources import get_logo_path
-from processing.blur_detector import BlurDetector
-from PIL import Image as PILImage
+from processing.ArucoMarkersAndBlurDetectionStep.blur_detector import BlurDetector
+
 
 # Version detection
 try:
@@ -90,9 +90,9 @@ __version__ = get_version_from_pyproject()
 
 # Logging Configuration
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(levelname)s - %(filename)s - %(funcName)s - Line %(lineno)d - %(message)s',
-    datefmt='%Y-%m-%d %H:%M'
+    level=logging.WARNING,
+    format='%(asctime)s - %(levelname)s - %(name)s - %(funcName)s - Line %(lineno)d - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
 
 # Create a logger instance and explicitly set its level
@@ -105,15 +105,35 @@ logger.info(f"Starting GeoVue v{__version__}")
 # Module-specific logging levels DEBUG, INFO, WARNING, ERROR 
 # ===================================================
 # Turn off or down debug logs for noisy modules
-logging.getLogger('processing.aruco_manager').setLevel(logging.DEBUG)
-logging.getLogger('processing.blur_detector').setLevel(logging.DEBUG)  
-logging.getLogger('core.tesseract_manager').setLevel(logging.DEBUG)
+logging.getLogger('processing.aruco_manager').setLevel(logging.INFO)
+logging.getLogger('processing.blur_detector').setLevel(logging.INFO)  
+# logging.getLogger('core.tesseract_manager').setLevel(logging.INFO)
+
+logging.getLogger('processing.QAQCStep.qaqc_manager').setLevel(logging.DEBUG)
+logging.getLogger('processing.QAQCStep.qaqc_models').setLevel(logging.DEBUG)
+logging.getLogger('processing.QAQCStep.qaqc_processor').setLevel(logging.DEBUG)
+logging.getLogger('processing.QAQCStep.qaqc_scanner').setLevel(logging.DEBUG)
+
+logging.getLogger('processing.visualization_drawer').setLevel(logging.DEBUG)
+
+
+logging.getLogger('gui.gui_manager').setLevel(logging.DEBUG)
+logging.getLogger('gui.dialog_helper').setLevel(logging.DEBUG)
+
 logging.getLogger('gui.duplicate_handler').setLevel(logging.DEBUG)
-logging.getLogger('gui.qaqc_manager').setLevel(logging.DEBUG)
 logging.getLogger('gui.main_gui').setLevel(logging.DEBUG)
 logging.getLogger('gui.compartment_registration_dialog').setLevel(logging.DEBUG)
+logging.getLogger('gui.progress_dialog').setLevel(logging.DEBUG)
+logging.getLogger('gui.logging_review_dialog').setLevel(logging.DEBUG)
 logging.getLogger('gui.first_run_dialog').setLevel(logging.DEBUG)
-logging.getLogger('gui.dialog_helper').setLevel(logging.DEBUG)
+logging.getLogger('gui.embedding_training_dialog').setLevel(logging.DEBUG)
+
+logging.getLogger('gui.widgets').setLevel(logging.DEBUG)
+
+logging.getLogger('utils.json_register_manager').setLevel(logging.DEBUG)
+logging.getLogger('utils.register_synchronizer').setLevel(logging.DEBUG)
+logging.getLogger('utils.image_pan_zoom_handler').setLevel(logging.DEBUG)
+
 
 # Suppress third-party debug logs (set to WARNING or ERROR as needed)
 logging.getLogger("PIL").setLevel(logging.WARNING)
@@ -141,8 +161,7 @@ from gui import (
     GUIManager,
     DuplicateHandler,
     CompartmentRegistrationDialog, 
-    MainGUI,
-    QAQCManager
+    MainGUI
 )
 
 from gui.widgets import *
@@ -153,8 +172,11 @@ from processing import (
     ArucoManager
 )
 
+from gui.qaqc_manager import QAQCManager
+
 from utils import (
-    JSONRegisterManager
+    JSONRegisterManager,
+    DepthValidator
 )
 
 # ===========================================
@@ -207,7 +229,11 @@ class GeoVue:
             'depth_to': None,
             'compartment_interval': 1
         }
-        
+
+        # Initialize depth validation for catching errors during compartment entries
+        self.depth_validator = None
+        self._initialize_depth_validator()  # Load if path exists
+
         # Initialize empty metadata
         self.metadata = {}
         
@@ -231,6 +257,8 @@ class GeoVue:
         # Initialize update checker early to catch first runs
         self.update_checker = RepoUpdater()
 
+        # Set dialog helper on update checker so it can show dialogs
+        self.update_checker.dialog_helper = DialogHelper
         
         # ===================================================
         # STEP 3: CREATE ROOT WINDOW
@@ -243,7 +271,6 @@ class GeoVue:
         self.root.geometry("100x100")
         
         # Center the small root window
-        self.root.update_idletasks()
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         x = (screen_width - 100) // 2
@@ -261,7 +288,9 @@ class GeoVue:
         # Set background to match theme
         self.root.configure(bg=self.gui_manager.theme_colors["background"])
         
-        # Check for updates immediately (blocking)
+        self.root.update_idletasks()
+
+        # Check for updates immediately
         self._perform_startup_version_check()
         
         # ===================================================
@@ -360,6 +389,7 @@ class GeoVue:
         # Set application icon
         self._set_application_icon()
         
+
         # ===================================================
         # STEP 6: INITIALIZE PROCESSING COMPONENTS
         # ===================================================
@@ -385,102 +415,44 @@ class GeoVue:
         self.logger.info("GeoVue initialization complete")
 
 
- 
     def _perform_startup_version_check(self):
         """
         Perform version check during startup.
-        Shows a modal notification if update is available during first run,
-        non-modal otherwise.
+        Block execution if version is too old.
         """
         try:
-            # Get version info
-            version_info = self.update_checker.compare_versions()
+            # IMPORTANT: Ensure root window is properly initialized before showing dialogs
+            self.root.update_idletasks()  # Process any pending events
+            self.root.update()  # Force display update
             
-            self.logger.info(f"Version check - Local: {version_info['local_version']}, "
-                            f"GitHub: {version_info['github_version']}, "
-                            f"Update available: {version_info['update_available']}")
+            # Set dialog helper on update checker
+            self.update_checker.dialog_helper = DialogHelper
             
-            # Only show dialog if update is available
-            if version_info['update_available'] and not version_info.get('error'):
-                # Check if we're in first run mode
-                is_first_run = self.config_manager.is_first_run() or not self._check_configuration()
+            # Check and update with the no parent window
+            result = self.update_checker.check_and_update(
+                parent_window=None,
+                block_if_too_old=True
+            )
+                    
+            # Handle the result
+            if result.get('blocked', False):
+                # Version is too old - dialog is showing, prevent further initialization
+                self.logger.info("Application initialization halted - version too old")
+                self.root.withdraw()  # Hide the main window
+                # The blocking dialog will handle the exit when user clicks button
+                # Just wait here to keep the dialog alive
+                self.root.mainloop()
+                return  # This won't be reached due to os._exit in dialog
                 
-                # Create dialog using DialogHelper - only valid parameters
-                dialog = DialogHelper.create_dialog(
-                    self.root,
-                    self.t("Update Available"),
-                    modal=is_first_run,  # Modal during first run, non-modal otherwise
-                    topmost=True
-                )
+            # Log other results for debugging
+            if result.get('update_available', False):
+                self.logger.info("Update available but not mandatory")
+            else:
+                self.logger.info("Version check completed successfully")
                 
-                # Prevent resizing
-                dialog.resizable(False, False)
-                
-                # Create content frame
-                content_frame = tk.Frame(dialog, bg=self.gui_manager.theme_colors["background"])
-                content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-                
-                # Construct the message
-                message = (
-                    self.t('A new version is available!') + "\n\n" +
-                    self.t('Current version') + f": {version_info['local_version']}\n" +
-                    self.t('Latest version') + f": {version_info['github_version']}\n\n" +
-                    self.t('Contact your administrator for the update.')
-                )
-                
-                # Message label
-                label = tk.Label(
-                    content_frame,
-                    text=message,
-                    justify=tk.CENTER,
-                    bg=self.gui_manager.theme_colors["background"],
-                    fg=self.gui_manager.theme_colors["text"],
-                    font=self.gui_manager.fonts["normal"]
-                )
-                label.pack(pady=(0, 20))
-                
-                # OK button
-                ok_btn = self.gui_manager.create_modern_button(
-                    content_frame,
-                    text=self.t("OK"),
-                    color=self.gui_manager.theme_colors["accent_green"],
-                    command=dialog.destroy
-                )
-                ok_btn.pack()
-
-                # Update dialog to calculate correct size
-                dialog.update_idletasks()
-                
-                # Now center the dialog with size constraints
-                DialogHelper.center_dialog(
-                    dialog,
-                    self.root,
-                    max_width=450,
-                    max_height=200
-                )
-
-                # FORCE dialog to absolute top during first run
-                if is_first_run:
-                    dialog.lift()
-                    dialog.attributes('-topmost', True)
-                    dialog.focus_force()
-                    # Update to ensure it's visible
-                    dialog.update()
-                    # Lift again to be sure
-                    dialog.lift()
-                
-                # If not first run, auto-close after 10 seconds
-                if not is_first_run:
-                    dialog.after(10000, lambda: dialog.destroy() if dialog.winfo_exists() else None)
-                
-                # During first run, wait for the dialog to be closed
-                if is_first_run:
-                    dialog.wait_window()
-            
         except Exception as e:
             # Don't let version check errors prevent app startup
             self.logger.warning(f"Version check failed during startup: {str(e)}")
-            # Don't show error dialog during startup - just log it
 
     def _set_application_icon(self):
         """Set the application icon for all windows."""
@@ -600,6 +572,23 @@ class GeoVue:
             return False
     
     
+    # During app initialization (after config is loaded):
+    def _initialize_depth_validator(self):
+        """Initialize depth validator if CSV path is configured."""
+        csv_path = self.config_manager.get('shared_folder_depth_validation_csv')
+        if csv_path and os.path.exists(csv_path):
+            try:
+                self.depth_validator = DepthValidator(csv_path)
+                if self.depth_validator.is_loaded:
+                    self.logger.info(f"Initialized depth validator with {len(self.depth_validator.depth_ranges)} holes")
+                else:
+                    self.logger.warning("Depth validator CSV exists but failed to load")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize depth validator: {e}")
+                self.depth_validator = None
+
+
+
     def _initialize_core_components(self):
         """Initialize core system components."""
 
@@ -635,12 +624,6 @@ class GeoVue:
     
     def _initialize_processing_components(self):
         """Initialize image processing components."""
-        # OCR component
-        # self.tesseract_manager = TesseractManager()
-        # self.tesseract_manager.config = self.config
-        # self.tesseract_manager.file_manager = self.file_manager
-        # self.tesseract_manager.extractor = self  # Give it access to visualization_cache
-        
         # Blur detection component
         self.blur_detector = BlurDetector(
             threshold=self.config.get('blur_threshold', 150.0),
@@ -675,18 +658,19 @@ class GeoVue:
         self.duplicate_handler.logger = logging.getLogger(__name__)
         self.duplicate_handler.root = self.root  # Set root for dialog creation
         
-        # Initialize QAQC manager
+        
+        # Initialize QAQC manager (old version)
         self.qaqc_manager = QAQCManager(
             file_manager=self.file_manager,
             translator_func=self.t,
             config_manager=self.config_manager,
             app=self,
             logger=self.logger,
-            register_manager=self.register_manager
+            register_manager=self.register_manager,
+            gui_manager=self.gui_manager  # This one is optional but good to include
         )
-
         # Main application GUI - pass the existing root window
-        self.main_gui = MainGUI(self, trace_generator=self.trace_generator)
+        self.main_gui = MainGUI(self)
 
 
 
@@ -827,8 +811,8 @@ class GeoVue:
             target_pixels = 2000000  # Target ~2 million pixels
             small_image = self.viz_manager.create_working_copy(target_pixels=target_pixels)
             
-            # Store as instance variable for backward compatibility
-            self.small_image = small_image
+            # # Store as instance variable for backward compatibility
+            # self.small_image = small_image
             
             # Log the transformation
             working_version = self.viz_manager.versions.get('working')
@@ -861,258 +845,196 @@ class GeoVue:
             metadata = getattr(self, 'metadata', {})
             self.logger.debug(f" Initial metadata: {metadata}")
 
+
             # ===================================================
             # STEP 4: DETECT ARUCO MARKERS
             # ===================================================
             add_progress_message("Detecting ArUco markers...", None, message_type="info")
 
-            self.logger.debug(" Starting ArUco marker detection")
-            # Use ArucoManager to detect and improve marker detection
+            # Detect markers
             markers = self.aruco_manager.improve_marker_detection(small_image)
-            self.logger.debug(f" Detected {len(markers)} ArUco markers: {sorted(markers.keys())}")
             
-            # Store markers in VisualizationManager metadata
+            # Store for visualization purposes only
             self.viz_manager.processing_metadata['markers_detected'] = markers
             self.viz_manager.processing_metadata['marker_ids'] = sorted(markers.keys())
             
-
-            # Report marker detection status
+            # Determine expected markers
             expected_markers = set(self.config['corner_marker_ids'] + 
-                                self.config['compartment_marker_ids'])
+                                 self.config['compartment_marker_ids'])
             
-            # Only expect metadata markers if OCR is enabled and available
-            if self.config.get('enable_ocr', True) and self.tesseract_manager.is_available:
-                expected_markers.update(self.config['metadata_marker_ids'])
-                self.logger.debug(" OCR is enabled - including metadata markers in expected set")
-            else:
-                self.logger.debug(" OCR is disabled - excluding metadata markers from expected set")
-            
+            # Metadata marker is no longer used
             detected_markers = set(markers.keys())
             missing_markers = expected_markers - detected_markers
-            missing_marker_ids = list(missing_markers)  # Convert to list for later use
+            missing_marker_ids = sorted(list(missing_markers))
             
-            self.logger.debug(f" Expected markers: {sorted(expected_markers)}")
-            self.logger.debug(f" Missing markers: {sorted(missing_markers)}")
-
-            # Check if we should remove metadata marker from missing list
-            if not self.config.get('enable_ocr', True) or not self.tesseract_manager.is_available:
-                if 24 in missing_marker_ids:
-                    missing_marker_ids.remove(24)
-                    self.logger.debug(" Removed marker 24 from missing list (OCR disabled or unavailable)")
-                    self.logger.info("Removed metadata marker 24 from missing list (OCR disabled or unavailable)")
-            
-             
+            # Report status
             status_msg = f"Detected {len(detected_markers)}/{len(expected_markers)} ArUco markers"
-            self.logger.info(status_msg)
-            if self.progress_queue:
-                add_progress_message(status_msg, None)
-
-                
-                if missing_markers:
-                    add_progress_message(f"Missing markers: {sorted(missing_markers)}", None)
-    
+            add_progress_message(status_msg, None)
+            
+            if missing_marker_ids:
+                add_progress_message(f"Missing markers: {missing_marker_ids}", None)
 
             # ===================================================
-            # STEP 5: CORRECT IMAGE ORIENTATION AND SKEW
+            # STEP 5: CORRECT IMAGE ORIENTATION
             # ===================================================
-            # Attempt to correct skew using VisualizationManager BEFORE OCR processing
-            if self.progress_queue:
-                add_progress_message("Correcting image orientation...", None)
+            add_progress_message("Correcting image orientation...", None)
 
-            # Initialize rotation variables
-            rotation_matrix = None
             rotation_angle = 0.0
-
             try:
-                self.logger.debug(" Attempting to correct image skew on working image")
+                # Rotate image to level based on markers
+                correction_result = self.viz_manager.rotate_image_to_level(small_image, markers)
                 
-                # Use VisualizationManager for image correction
-                correction_result = self.viz_manager.correct_image_skew(markers)
-                
-                # Extract results from dictionary
                 corrected_small_image = correction_result['image']
-                rotation_matrix = correction_result['rotation_matrix']
                 rotation_angle = correction_result['rotation_angle']
-                corrected_version_key = correction_result['version_key']
                 needs_redetection = correction_result['needs_redetection']
                 
-                self.logger.debug(f" Skew correction applied to small image, rotation angle: {rotation_angle:.2f}°")
-                
-                # ===================================================
-                # INSERT: Extract pure rotation matrix for later use
-                # ===================================================
+                # Store rotation matrix for later use on high-res image
                 if rotation_angle != 0.0:
-                    # Extract the pure 2x2 rotation matrix (independent of image size)
                     theta_rad = np.radians(rotation_angle)
-                    cos_theta = np.cos(theta_rad)
-                    sin_theta = np.sin(theta_rad)
                     self.pure_rotation_matrix = np.array([
-                        [cos_theta, -sin_theta],
-                        [sin_theta, cos_theta]
+                        [np.cos(theta_rad), -np.sin(theta_rad)],
+                        [np.sin(theta_rad), np.cos(theta_rad)]
                     ], dtype=np.float32)
-                    self.logger.debug(f" Stored pure rotation matrix from small image for angle {rotation_angle:.2f}°")
+                
+                # Update working image
+                small_image = corrected_small_image
+                self.small_image = small_image
                 
                 if needs_redetection:
-                    self.logger.debug(" Image was modified during skew correction, need to re-detect markers")
-                    
-                    # Re-detect markers on corrected image
+                    # Re-detect markers on rotated image
                     markers = self.aruco_manager.improve_marker_detection(corrected_small_image)
-                    self.logger.debug(f" Re-detected {len(markers)} markers after correction")
                     
-                    expected_marker_ids = set()
-                    expected_marker_ids.update(self.config.get('corner_marker_ids', [0, 1, 2, 3]))
-                    expected_marker_ids.update(self.config.get('compartment_marker_ids', list(range(4, 24))))
-                    # Filter markers to only include expected ones
-                    filtered_markers = {mid: corners for mid, corners in markers.items() 
-                                    if mid in expected_marker_ids}
-                    
-                    if len(filtered_markers) < len(markers):
-                        unexpected_ids = set(markers.keys()) - expected_marker_ids
-                        self.logger.debug(f"Ignoring unexpected marker IDs for correction: {sorted(unexpected_ids)}")
-                   
-                    # Update the working image reference
-                    small_image = corrected_small_image
-                    self.small_image = small_image
-                    
-                    # Store the corrected version key for later use
-                    self.corrected_version_key = corrected_version_key
-                    
-                    # Update markers in VisualizationManager
+                    # Update visualization metadata
                     self.viz_manager.processing_metadata['markers_detected'] = markers
                     self.viz_manager.processing_metadata['rotation_angle'] = rotation_angle
                     
-                    self.logger.info(f"Image orientation corrected, angle: {rotation_angle:.2f}°, re-detected {len(markers)} markers")
-                    add_progress_message(f"Corrected image orientation (angle: {rotation_angle:.2f}°), re-detected {len(markers)} markers", None)
-                else:
-                    self.logger.debug(" No skew correction needed (or applied)")
-                    # Update the working image reference to the corrected version even if no re-detection needed
-                    small_image = corrected_small_image
-                    self.small_image = small_image
+                    add_progress_message(f"Corrected image orientation (angle: {rotation_angle:.2f}°)", None)
                     
             except Exception as e:
-                self.logger.warning(f"Skew correction failed: {str(e)}")
-                self.logger.error(traceback.format_exc())
-                self.logger.debug(f" Skew correction failed with error: {str(e)}")
-                # Continue with uncorrected image
+                self.logger.warning(f"Image rotation failed: {str(e)}")
+                # Continue with original image
 
-            # Recalculate missing markers since skew correction may have found more
+            # Update missing markers after rotation
             detected_markers = set(markers.keys())
             missing_markers = expected_markers - detected_markers
-            missing_marker_ids = list(missing_markers)  # Update the list
-            
-            self.logger.debug(f" After skew correction - detected markers: {sorted(detected_markers)}")
-            self.logger.debug(f" After skew correction - missing markers: {sorted(missing_marker_ids)}")
-            
-            if missing_marker_ids:
-                self.logger.info(f"After correction, still missing markers: {sorted(missing_marker_ids)}")
+            missing_marker_ids = sorted(list(missing_markers))
 
             # ===================================================
-            # STEP 5.5: ESTIMATE IMAGE SCALE FROM MARKERS AND CORRECT SKEWED MARKERS TO SQUARES
+            # STEP 5.5: CORRECT MARKER GEOMETRY AND ESTIMATE SCALE
             # ===================================================
-            # Correct invalid marker shapes before scale estimation - Reconstructs markers to squares using two valid edges - sometimes the detection is slightly off and you get deformed squares.
-            if markers and len(markers) > 0:
-                add_progress_message("Correcting skewed markers...", None)
+            scale_data = {}
+            self.current_scale_data = None
+
+            if markers:
+                # Correct skewed markers to proper squares
+                add_progress_message("Correcting marker geometry...", None)
+                
                 try:
-
-                    expected_marker_ids = set()
-                    expected_marker_ids.update(self.config.get('corner_marker_ids', [0, 1, 2, 3]))
-                    expected_marker_ids.update(self.config.get('compartment_marker_ids', list(range(4, 24))))
-                    # Filter markers to only include expected ones
-                    filtered_markers = {mid: corners for mid, corners in markers.items() 
-                                    if mid in expected_marker_ids}
-                    
-                    if len(filtered_markers) < len(markers):
-                        unexpected_ids = set(markers.keys()) - expected_marker_ids
-                        self.logger.debug(f"Ignoring unexpected marker IDs for correction: {sorted(unexpected_ids)}")
-                   
-                    corrected_markers = self.viz_manager.correct_marker_geometry(
+                    corrected_markers = self.aruco_manager.correct_marker_geometry(
                         markers,
-                        tolerance_pixels=5.0  # 5 pixel tolerance
+                        tolerance_pixels=5.0
                     )
                     
-                    # Count how many markers were corrected
+                    # Count how many were corrected
                     corrected_count = sum(1 for mid in markers 
-                                        if not np.array_equal(markers[mid], corrected_markers[mid]))
+                                        if mid in corrected_markers and
+                                        not np.array_equal(markers[mid], corrected_markers[mid]))
                     
                     if corrected_count > 0:
-                        self.logger.info(f"Corrected {corrected_count} skewed markers")
                         add_progress_message(f"Corrected {corrected_count} skewed markers", None)
                         markers = corrected_markers
                         
-                        # Update cached markers
-                        self.aruco_manager.cached_markers = markers.copy()
-                        
-                        # Update visualization cache
-                        if hasattr(self, 'visualization_cache'):
-                            self.visualization_cache.setdefault('current_processing', {})['all_markers'] = markers
-                            
                 except Exception as e:
-                    self.logger.error(f"Error correcting skewed markers: {str(e)}")
-            
-            
-            # Store scale data in VisualizationManager
-            scale_data = {}
-            self.current_scale_data = None  # Initialize
-
-            if markers and len(markers) >= self.config.get('scale_min_markers_required', 4):
-                add_progress_message("Estimating image scale from markers...", None)
-
-                try:
-                    # Build marker configuration from app config
-                    marker_config = {
-                        'corner_marker_size_cm': self.config.get('corner_marker_size_cm', 1.0),
-                        'compartment_marker_size_cm': self.config.get('compartment_marker_size_cm', 2.0),
-                        'corner_ids': self.config.get('corner_marker_ids', [0, 1, 2, 3]),
-                        'compartment_ids': self.config.get('compartment_marker_ids', list(range(4, 24))),
-                        'metadata_ids': self.config.get('metadata_marker_ids', [24]),
-                        'use_corner_markers': self.config.get('use_corner_markers_for_scale', False)
-                    }
+                    self.logger.error(f"Error correcting marker geometry: {str(e)}")
+                
+                # Estimate scale from markers
+                if len(markers) >= self.config.get('scale_min_markers_required', 4):
+                    add_progress_message("Estimating image scale from markers...", None)
                     
-                    # Estimate scale using detected markers
-                    scale_data = self.viz_manager.estimate_scale_from_markers(
-                        markers, 
-                        marker_config
-                    )
-                    if scale_data.get('scale_px_per_cm'):
-                        # Store as instance variable for later use
-                        self.current_scale_data = scale_data
+                    try:
+                        marker_config = {
+                            'corner_marker_size_cm': self.config.get('corner_marker_size_cm', 1.0),
+                            'compartment_marker_size_cm': self.config.get('compartment_marker_size_cm', 2.0),
+                            'corner_ids': self.config.get('corner_marker_ids', [0, 1, 2, 3]),
+                            'compartment_ids': self.config.get('compartment_marker_ids', list(range(4, 24))),
+                            'use_corner_markers': self.config.get('use_corner_markers_for_scale', False)
+                        }
                         
-                        # Store scale data in VisualizationManager
-                        self.viz_manager.processing_metadata['scale_data'] = scale_data
-                        self.viz_manager.processing_metadata['scale_px_per_cm'] = scale_data['scale_px_per_cm']
+                        scale_data = self.aruco_manager.estimate_scale_from_markers(
+                            markers, 
+                            marker_config
+                        )
                         
-                        # Store scale factor for working image
-                        if hasattr(self.viz_manager, 'scale_relationships'):
-                            working_to_original_scale = self.viz_manager._get_scale_factor('working', 'original')
-                            scale_data['working_to_original_scale'] = working_to_original_scale
-                            # ===================================================
-                            # If working image is smaller (e.g., 0.2x the size), scale factor is 5.0
-                            # So original has 5x more pixels per cm than working image
+                        if scale_data.get('scale_px_per_cm'):
+                            self.current_scale_data = scale_data
                             
-                            scale_data['scale_px_per_cm_original'] = scale_data['scale_px_per_cm'] * working_to_original_scale
-                            self.logger.debug(f"Scale calculation debug:")
-                            self.logger.debug(f"  Working image scale: {scale_data['scale_px_per_cm']:.2f} px/cm")
-                            self.logger.debug(f"  Working to original scale factor: {working_to_original_scale:.4f}")
-                            self.logger.debug(f"  Original image scale: {scale_data['scale_px_per_cm_original']:.2f} px/cm")
+                            # Share with visualization manager for drawing
+                            self.viz_manager.processing_metadata['scale_data'] = scale_data
+                            
+                            # Calculate scale for original image
+                            if hasattr(self.viz_manager, '_get_scale_factor'):
+                                working_to_original = self.viz_manager._get_scale_factor('working', 'original')
+                                scale_data['working_to_original_scale'] = working_to_original
+                                scale_data['scale_px_per_cm_original'] = (
+                                    scale_data['scale_px_per_cm'] * working_to_original
+                                )
+                            
+                            # Report scale
+                            scale_msg = f"Image scale: {scale_data['scale_px_per_cm']:.1f} px/cm"
+                            if scale_data.get('confidence'):
+                                scale_msg += f" (confidence: {scale_data['confidence']:.0%})"
+                            add_progress_message(scale_msg, None)
+                            
+                    except Exception as e:
+                        self.logger.error(f"Error estimating scale: {str(e)}")
 
-                            # ===================================================
+            # Store final marker data
+            self.detected_markers = markers
+            self.missing_marker_ids = missing_marker_ids
+
+            # ===================================================
+            # STEP 5.6: AUTO-PLACE MISSING COMPARTMENT MARKERS
+            # ===================================================
+            if missing_marker_ids:
+                add_progress_message(f"Attempting to auto-place {len(missing_marker_ids)} missing markers...", None)
+                
+                try:
+                    # Auto-place missing compartment markers
+                    auto_placed_markers = self.aruco_manager.auto_place_missing_compartments(
+                        existing_markers=markers,
+                        missing_ids=missing_marker_ids,
+                        scale_data=self.current_scale_data,
+                        config=self.config,
+                        image_shape=small_image.shape
+                    )
+                    
+                    if auto_placed_markers:
+                        # Add auto-placed markers to the main markers dictionary
+                        markers.update(auto_placed_markers)
                         
-                        scale_msg = f"Image scale: {scale_data['scale_px_per_cm']:.1f} px/cm"
-                        if scale_data.get('image_width_cm'):
-                            scale_msg += f" (image width: {scale_data['image_width_cm']:.1f} cm)"
-                        scale_msg += f" - Confidence: {scale_data.get('confidence', 0):.0%}"
+                        # Update missing markers list
+                        placed_ids = list(auto_placed_markers.keys())
+                        missing_marker_ids = [mid for mid in missing_marker_ids if mid not in placed_ids]
                         
-                        self.logger.info(scale_msg)
-                        add_progress_message(scale_msg, None)
+                        # Store which markers were auto-placed for visualization
+                        self.auto_placed_marker_ids = placed_ids
                         
-                        # Store in visualization cache for dialog access (backward compatibility)
-                        if hasattr(self, 'visualization_cache'):
-                            self.visualization_cache.setdefault('current_processing', {})['scale_data'] = scale_data
+                        add_progress_message(
+                            f"Auto-placed {len(auto_placed_markers)} markers: {sorted(placed_ids)}", 
+                            None
+                        )
+                        
+                        if missing_marker_ids:
+                            add_progress_message(
+                                f"Still missing {len(missing_marker_ids)} markers: {sorted(missing_marker_ids)}", 
+                                None
+                            )
                     else:
-                        self.logger.warning("Could not estimate image scale from markers")
-
+                        self.logger.info("Could not auto-place any missing markers")
+                        
                 except Exception as e:
-                    self.logger.error(f"Error estimating image scale: {str(e)}")
+                    self.logger.error(f"Error auto-placing markers: {str(e)}")
+                    # Continue without auto-placed markers
 
             # ===================================================
             # STEP 6: ANALYZE COMPARTMENT BOUNDARIES (WITHOUT UI)
@@ -1679,7 +1601,7 @@ class GeoVue:
             self.logger.debug(f"Depth from: {depth_from}, interval: {compartment_interval}")
 
             # ===================================================
-            # INSERT: Get vertical offset for corners adjustment
+            # Get vertical offset for corners adjustment
             # ===================================================
             vertical_offset = 0
             if hasattr(self, 'boundaries_vertical_offset'):
@@ -1705,8 +1627,7 @@ class GeoVue:
 
             for i, (x1, y1, x2, y2) in enumerate(compartment_boundaries):
                 # ===================================================
-                # REMOVE: Direct corner coordinates
-                # REPLACE WITH: Vertically adjusted corner coordinates
+                # Vertically adjusted corner coordinates
                 # ===================================================
                 corners = {
                     'depth_to': depth_from + ((i + 1) * compartment_interval),
@@ -1723,6 +1644,7 @@ class GeoVue:
                 corners_list.append(corners)
 
             self.logger.debug(f"Created corners list with {len(corners_list)} compartments (vertical offset: {vertical_offset}px)")
+
             # ===================================================
             # STEP 14: EXTRACT COMPARTMENTS FROM CORRECTED HIGH-RES IMAGE
             # ===================================================
@@ -1759,6 +1681,19 @@ class GeoVue:
                     )
                     
                     self.logger.debug(f" Duplicate check result: {duplicate_result}")
+                    try:
+                        self.update_last_metadata(
+                            metadata["hole_id"],
+                            metadata["depth_from"],
+                            metadata["depth_to"],
+                            metadata.get("compartment_interval", 1),
+                        )
+                        self.logger.debug(
+                            f"Updated last metadata early: {metadata}"
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Failed to update last metadata: {e}")
+
                     
                     # Process the result based on action
                     if isinstance(duplicate_result, dict) and 'action' in duplicate_result:
@@ -2539,63 +2474,64 @@ class GeoVue:
         
         return compartments
 
-    def get_processing_data(self, key: str = None):
-        """Get data from current processing cache."""
-        if not hasattr(self, 'visualization_cache') or 'current_processing' not in self.visualization_cache:
-            return None
+    # def get_processing_data(self, key: str = None):
+    #     """Get data from current processing cache."""
+    #     if not hasattr(self, 'visualization_cache') or 'current_processing' not in self.visualization_cache:
+    #         return None
         
-        if key:
-            return self.visualization_cache['current_processing'].get(key)
-        return self.visualization_cache['current_processing']
+    #     if key:
+    #         return self.visualization_cache['current_processing'].get(key)
+    #     return self.visualization_cache['current_processing']
 
-    def update_processing_data(self, updates: Dict[str, Any]):
-        """Update the current processing cache."""
-        if not hasattr(self, 'visualization_cache'):
-            self.visualization_cache = {}
-        if 'current_processing' not in self.visualization_cache:
-            self.visualization_cache['current_processing'] = {}
+    # def update_processing_data(self, updates: Dict[str, Any]):
+    #     """Update the current processing cache."""
+    #     if not hasattr(self, 'visualization_cache'):
+    #         self.visualization_cache = {}
+    #     if 'current_processing' not in self.visualization_cache:
+    #         self.visualization_cache['current_processing'] = {}
         
-        self.visualization_cache['current_processing'].update(updates)
-        self.logger.debug(f"Updated processing cache with keys: {list(updates.keys())}")
+    #     self.visualization_cache['current_processing'].update(updates)
+    #     self.logger.debug(f"Updated processing cache with keys: {list(updates.keys())}")
 
-    def update_boundaries_from_dialog(self, new_boundaries: List[Tuple[int, int, int, int]], 
-                                    scale: str = 'working'):
-        """Update boundaries in the cache, maintaining scale information."""
-        self.logger.debug(f"update_boundaries_from_dialog called with scale='{scale}'")
-        self.logger.debug(f"Received {len(new_boundaries)} boundaries")
+
+    # def update_boundaries_from_dialog(self, new_boundaries: List[Tuple[int, int, int, int]], 
+    #                                 scale: str = 'working'):
+    #     """Update boundaries in the cache, maintaining scale information."""
+    #     self.logger.debug(f"update_boundaries_from_dialog called with scale='{scale}'")
+    #     self.logger.debug(f"Received {len(new_boundaries)} boundaries")
         
-        # Log first few boundaries for inspection
-        for i, boundary in enumerate(new_boundaries[:3]):
-            self.logger.debug(f"  Boundary {i}: {boundary}")
-        if len(new_boundaries) > 3:
-            self.logger.debug(f"  ... and {len(new_boundaries) - 3} more boundaries")
+    #     # Log first few boundaries for inspection
+    #     for i, boundary in enumerate(new_boundaries[:3]):
+    #         self.logger.debug(f"  Boundary {i}: {boundary}")
+    #     if len(new_boundaries) > 3:
+    #         self.logger.debug(f"  ... and {len(new_boundaries) - 3} more boundaries")
         
-        if scale == 'working':
-            self.logger.debug("Updating processing data with working scale boundaries")
+    #     if scale == 'working':
+    #         self.logger.debug("Updating processing data with working scale boundaries")
             
-            # Get current processing data to check what's there
-            current_data = self.get_processing_data()
-            if current_data:
-                self.logger.debug(f"Current boundaries_scale: {current_data.get('boundaries_scale', 'not set')}")
-                if 'compartment_boundaries' in current_data:
-                    self.logger.debug(f"Current boundaries count: {len(current_data['compartment_boundaries'])}")
+    #         # Get current processing data to check what's there
+    #         current_data = self.get_processing_data()
+    #         if current_data:
+    #             self.logger.debug(f"Current boundaries_scale: {current_data.get('boundaries_scale', 'not set')}")
+    #             if 'compartment_boundaries' in current_data:
+    #                 self.logger.debug(f"Current boundaries count: {len(current_data['compartment_boundaries'])}")
             
-            self.update_processing_data({
-                'compartment_boundaries': new_boundaries,
-                'boundaries_scale': 'working'
-            })
+    #         self.update_processing_data({
+    #             'compartment_boundaries': new_boundaries,
+    #             'boundaries_scale': 'working'
+    #         })
             
-            # Verify the update
-            updated_data = self.get_processing_data()
-            self.logger.debug(f"After update - boundaries_scale: {updated_data.get('boundaries_scale', 'not set')}")
-            self.logger.debug(f"After update - boundaries count: {len(updated_data.get('compartment_boundaries', []))}")
-        else:
-            self.logger.debug(f"WARNING: Called with scale='{scale}' which is not handled!")
+    #         # Verify the update
+    #         updated_data = self.get_processing_data()
+    #         self.logger.debug(f"After update - boundaries_scale: {updated_data.get('boundaries_scale', 'not set')}")
+    #         self.logger.debug(f"After update - boundaries count: {len(updated_data.get('compartment_boundaries', []))}")
+    #     else:
+    #         self.logger.debug(f"WARNING: Called with scale='{scale}' which is not handled!")
         
-        # Re-calculate corners
-        self.logger.debug("Calling _update_corners_from_boundaries")
-        self._update_corners_from_boundaries(new_boundaries)
-        self.logger.debug("update_boundaries_from_dialog completed")
+    #     # Re-calculate corners
+    #     self.logger.debug("Calling _update_corners_from_boundaries")
+    #     self._update_corners_from_boundaries(new_boundaries)
+    #     self.logger.debug("update_boundaries_from_dialog completed")
     
     def handle_markers_and_boundaries(self, image, detected_boundaries, missing_marker_ids=None, 
                             metadata=None, vertical_constraints=None, 
@@ -2640,9 +2576,6 @@ class GeoVue:
         
         self.logger.info(f"Handling {operation_name} dialog on main thread")
         
-        # ===================================================
-        # REMOVE: All the obsolete image fallback logic
-        # REPLACE WITH: Clear validation
         if image is None:
             raise ValueError("Image parameter cannot be None - must provide working/visualization image")
         
@@ -2777,8 +2710,7 @@ class GeoVue:
             self.logger.debug(f"detected_boundaries length: {len(detected_boundaries)}")
             
             # ===================================================
-            # REMOVE: boundaries_viz parameter - let dialog create its own
-            # REPLACE WITH: Pass the working image and original image clearly
+            # Pass the working image and original image clearly
             dialog = CompartmentRegistrationDialog(
                 self.root,
                 image,  # Working/small image for visualization (NOT compartment images!)
@@ -2786,7 +2718,6 @@ class GeoVue:
                 missing_marker_ids,
                 theme_colors=self.gui_manager.theme_colors,
                 gui_manager=self.gui_manager,
-                boundaries_viz=None,  # REMOVED - obsolete
                 original_image=original_image,  # High-res image for extraction
                 output_format=self.config.get('output_format', 'png'),
                 file_manager=self.file_manager,
@@ -2800,6 +2731,7 @@ class GeoVue:
                 on_apply_adjustments=on_apply_adjustments,
                 image_path=image_path,
                 scale_data=scale_data,
+                depth_validator=self.depth_validator,
                 boundary_analysis=boundary_analysis
             )
             # ===================================================
@@ -2950,6 +2882,7 @@ class GeoVue:
             'compartment_interval': compartment_interval
         }
         self.logger.info(f"Updated last metadata: {hole_id} {depth_from}-{depth_to}m (interval: {compartment_interval}m)")
+
 
     def _check_configuration(self) -> bool:
         """

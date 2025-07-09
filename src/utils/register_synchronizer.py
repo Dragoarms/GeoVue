@@ -121,13 +121,18 @@ class RegisterSynchronizer:
             successful = 0
             for update in self.original_updates:
                 try:
-                    if self.json_manager.update_original_image(**update):
+                    # Remove file_count and all_filenames before passing to update_original_image
+                    update_params = update.copy()
+                    update_params.pop('file_count', None)
+                    update_params.pop('all_filenames', None)
+                    
+                    if self.json_manager.update_original_image(**update_params):
                         successful += 1
                 except Exception as e:
                     self.logger.error(f"Error updating original: {e}")
             
             self.logger.info(f"Successfully updated {successful} original image entries")
-
+    
     def synchronize_all(self) -> Dict:
         """
         Synchronize all registers with OneDrive folders.

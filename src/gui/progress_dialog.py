@@ -132,16 +132,6 @@ class ProgressDialog:
             # Schedule update on main thread
             self.dialog.after(0, self._update_progress_ui, message, percentage)
             
-    def _update_progress_ui(self, message: str, percentage: float):
-        """Update UI elements on main thread."""
-        try:
-            self.message_var.set(message)
-            self.progress_var.set(percentage)
-            self.percent_label.config(text=f"{int(percentage)}%")
-            self.dialog.update()
-        except Exception:
-            pass  # Dialog may have been destroyed
-            
     def close(self):
         """Close the progress dialog."""
         if self.dialog and self.dialog.winfo_exists():

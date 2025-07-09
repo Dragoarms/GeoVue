@@ -11,7 +11,8 @@ with Excel files using Power Query for read-only data display. This approach:
 - Provides automatic Power Query setup for new Excel files
 
 The JSON structure is designed to be Power Query friendly, with separate files
-for compartments and original images data.
+for compartments and original images data. Compartment corners are now stored
+in a flattened structure for better scalability with 100,000+ images.
 
 Author: George Symonds
 Created: 2025
@@ -30,7 +31,7 @@ from typing import Optional, Dict, List, Tuple, Union, Any
 from contextlib import contextmanager
 import threading
 import pandas as pd
-import numpy as np
+# import numpy as np
 from openpyxl import workbook, load_workbook
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.utils import get_column_letter
@@ -48,6 +49,7 @@ class JSONRegisterManager:
    COMPARTMENT_JSON = "compartment_register.json"
    ORIGINAL_JSON = "original_images_register.json"
    REVIEW_JSON = "compartment_reviews.json"
+   COMPARTMENT_CORNERS_JSON = "compartment_corners.json"  # NEW: Flattened compartment data
    EXCEL_FILE = "Chip_Tray_Register.xlsx"
    DATA_SUBFOLDER = "Register Data (Do not edit)"
    
@@ -56,6 +58,7 @@ class JSONRegisterManager:
    MANUAL_SHEET = "Manual Entries"
    ORIGINAL_SHEET = "Original Images Register"
    REVIEW_SHEET = "Compartment Reviews"
+   COMPARTMENT_CORNERS_SHEET = "Compartment Corners"  # NEW
    
    
 
@@ -78,6 +81,7 @@ class JSONRegisterManager:
            'compartment_json': (data_path / JSONRegisterManager.COMPARTMENT_JSON).exists(),
            'original_json': (data_path / JSONRegisterManager.ORIGINAL_JSON).exists(),
            'review_json': (data_path / JSONRegisterManager.REVIEW_JSON).exists(),
+           'compartment_corners_json': (data_path / JSONRegisterManager.COMPARTMENT_CORNERS_JSON).exists(),
            'data_folder': data_path.exists() and any(data_path.iterdir()) if data_path.exists() else False
        }
    
@@ -105,6 +109,7 @@ class JSONRegisterManager:
            'compartment_count': 0,
            'original_count': 0,
            'review_count': 0,
+           'corner_count': 0,
            'has_excel': (base / JSONRegisterManager.EXCEL_FILE).exists(),
            'has_json_data': False
        }
@@ -129,6 +134,13 @@ class JSONRegisterManager:
                with open(review_path, 'r', encoding='utf-8') as f:
                    data = json.load(f)
                    summary['review_count'] = len(data)
+                   summary['has_json_data'] = True
+                   
+           corner_path = data_path / JSONRegisterManager.COMPARTMENT_CORNERS_JSON
+           if corner_path.exists():
+               with open(corner_path, 'r', encoding='utf-8') as f:
+                   data = json.load(f)
+                   summary['corner_count'] = len(data)
                    summary['has_json_data'] = True
                    
        except Exception:
@@ -157,17 +169,19 @@ class JSONRegisterManager:
        self.compartment_json_path = self.data_path / self.COMPARTMENT_JSON
        self.original_json_path = self.data_path / self.ORIGINAL_JSON
        self.review_json_path = self.data_path / self.REVIEW_JSON
+       self.compartment_corners_json_path = self.data_path / self.COMPARTMENT_CORNERS_JSON
        
        # Lock files in data folder
        self.compartment_lock = self.compartment_json_path.with_suffix('.json.lock')
        self.original_lock = self.original_json_path.with_suffix('.json.lock')
        self.review_lock = self.review_json_path.with_suffix('.json.lock')
+       self.corners_lock = self.compartment_corners_json_path.with_suffix('.json.lock')
 
        # Use RLock instead of Lock to prevent deadlocks from nested calls
        self._thread_lock = threading.RLock()
        
        # Track lock acquisition order to prevent deadlocks
-       self._lock_order = ['compartment', 'original', 'review']
+       self._lock_order = ['compartment', 'original', 'review', 'corners']
        
        # Lock monitoring for debugging
        self._lock_stats = {
@@ -179,6 +193,9 @@ class JSONRegisterManager:
        
        # Initialize files if needed
        self._initialize_files()
+       
+       # Migrate existing nested data if needed
+       self._migrate_nested_compartments()
    
    def check_existing_files(self) -> Dict[str, bool]:
        """
@@ -192,6 +209,7 @@ class JSONRegisterManager:
            'compartment_json': self.compartment_json_path.exists(),
            'original_json': self.original_json_path.exists(),
            'review_json': self.review_json_path.exists(),
+           'compartment_corners_json': self.compartment_corners_json_path.exists(),
            'data_folder': self.data_path.exists() and any(self.data_path.iterdir())
        }
    
@@ -211,6 +229,7 @@ class JSONRegisterManager:
            'compartment_count': 0,
            'original_count': 0,
            'review_count': 0,
+           'corner_count': 0,
            'has_excel': self.excel_path.exists(),
            'has_json_data': False,
            'lock_stats': self._lock_stats.copy()
@@ -230,6 +249,11 @@ class JSONRegisterManager:
            if self.review_json_path.exists():
                data = self._read_json_file(self.review_json_path, self.review_lock)
                summary['review_count'] = len(data)
+               summary['has_json_data'] = True
+               
+           if self.compartment_corners_json_path.exists():
+               data = self._read_json_file(self.compartment_corners_json_path, self.corners_lock)
+               summary['corner_count'] = len(data)
                summary['has_json_data'] = True
                
        except Exception as e:
@@ -259,12 +283,18 @@ class JSONRegisterManager:
        else:
            self.logger.info(f"Original images JSON already exists: {self.original_json_path}")
        
-       # Initialize review JSON file only if it doesn't exist
        if not self.review_json_path.exists():
            self._write_json_file(self.review_json_path, self.review_lock, [])
            self.logger.info(f"Created review JSON: {self.review_json_path}")
        else:
            self.logger.info(f"Review JSON already exists: {self.review_json_path}")
+       
+       # Initialize compartment corners JSON file only if it doesn't exist
+       if not self.compartment_corners_json_path.exists():
+           self._write_json_file(self.compartment_corners_json_path, self.corners_lock, [])
+           self.logger.info(f"Created compartment corners JSON: {self.compartment_corners_json_path}")
+       else:
+           self.logger.info(f"Compartment corners JSON already exists: {self.compartment_corners_json_path}")
        
 
        # Use template instead of creating from scratch
@@ -274,6 +304,85 @@ class JSONRegisterManager:
            self._create_excel_from_template()
        else:
            self.logger.info(f"Excel file already exists: {self.excel_path}")
+   
+   def _migrate_nested_compartments(self) -> None:
+       """
+       One-time migration of nested compartment data to flattened structure.
+       This checks if there's nested data in the original_images_register.json
+       and migrates it to the compartment_corners.json file.
+       """
+       try:
+           # Check if migration is needed
+           if not self.original_json_path.exists():
+               return
+               
+           original_data = self._read_json_file(self.original_json_path, self.original_lock)
+           corners_data = self._read_json_file(self.compartment_corners_json_path, self.corners_lock)
+           
+           # Check if we already have corner data
+           if corners_data:
+               self.logger.info("Compartment corners already exist, skipping migration")
+               return
+           
+           # Check if any original records have nested Compartments
+           needs_migration = any('Compartments' in record and record['Compartments'] 
+                                for record in original_data)
+           
+           if not needs_migration:
+               self.logger.info("No nested compartment data found, skipping migration")
+               return
+           
+           self.logger.info("Starting migration of nested compartment data...")
+           
+           # Migrate data
+           migrated_corners = []
+           updated_originals = []
+           
+           for record in original_data:
+               # Copy record without Compartments field
+               updated_record = {k: v for k, v in record.items() if k != 'Compartments'}
+               updated_originals.append(updated_record)
+               
+               # Extract compartments if they exist
+               if 'Compartments' in record and record['Compartments']:
+                   for comp_num, corners in record['Compartments'].items():
+                       if isinstance(corners, list) and len(corners) == 4:
+                           corner_record = {
+                               'HoleID': record['HoleID'],
+                               'Depth_From': record['Depth_From'],
+                               'Depth_To': record['Depth_To'],
+                               'Original_Filename': record['Original_Filename'],
+                               'Compartment_Number': int(comp_num),
+                               'Top_Left_X': corners[0][0],
+                               'Top_Left_Y': corners[0][1],
+                               'Top_Right_X': corners[1][0],
+                               'Top_Right_Y': corners[1][1],
+                               'Bottom_Right_X': corners[2][0],
+                               'Bottom_Right_Y': corners[2][1],
+                               'Bottom_Left_X': corners[3][0],
+                               'Bottom_Left_Y': corners[3][1]
+                           }
+                           
+                           # Add scale data if available
+                           if 'Scale_PxPerCm' in record:
+                               corner_record['Scale_PxPerCm'] = record['Scale_PxPerCm']
+                           if 'Scale_Confidence' in record:
+                               corner_record['Scale_Confidence'] = record['Scale_Confidence']
+                               
+                           migrated_corners.append(corner_record)
+           
+           # Save migrated data
+           if migrated_corners:
+               self._write_json_file(self.compartment_corners_json_path, self.corners_lock, migrated_corners)
+               self.logger.info(f"Migrated {len(migrated_corners)} compartment corners")
+               
+               # Update original records (remove Compartments field)
+               self._write_json_file(self.original_json_path, self.original_lock, updated_originals)
+               self.logger.info("Removed nested Compartments from original image records")
+           
+       except Exception as e:
+           self.logger.error(f"Error during compartment migration: {e}")
+           self.logger.error(traceback.format_exc())
    
    def _create_excel_from_template(self) -> None:
            """Properly create Excel file from a .xltx template."""
@@ -404,7 +513,7 @@ class JSONRegisterManager:
        Acquire multiple file locks in a consistent order to prevent deadlocks.
        
        Args:
-           required_locks: List of lock names needed ('compartment', 'original', 'review')
+           required_locks: List of lock names needed ('compartment', 'original', 'review', 'corners')
            timeout: Timeout in seconds
            
        Returns:
@@ -413,7 +522,8 @@ class JSONRegisterManager:
        lock_map = {
            'compartment': self.compartment_lock,
            'original': self.original_lock,
-           'review': self.review_lock
+           'review': self.review_lock,
+           'corners': self.corners_lock
        }
        
        acquired = {}
@@ -437,7 +547,8 @@ class JSONRegisterManager:
        lock_map = {
            'compartment': self.compartment_lock,
            'original': self.original_lock,
-           'review': self.review_lock
+           'review': self.review_lock,
+           'corners': self.corners_lock
        }
        
        # Release in reverse order
@@ -457,29 +568,115 @@ class JSONRegisterManager:
        finally:
            self._release_file_locks_ordered(list(lock_names))
    
-   def _read_json_file(self, file_path: Path, lock_path: Path) -> List[Dict]:
-       """Read JSON file with locking."""
-       if not self._acquire_file_lock(lock_path):
-           raise RuntimeError(f"Could not acquire lock for {file_path}")
-       
-       try:
-           if file_path.exists():
-               with open(file_path, 'r', encoding='utf-8') as f:
-                   return json.load(f)
-           return []
-       finally:
-           self._release_file_lock(lock_path)
    
-   def _write_json_file(self, file_path: Path, lock_path: Path, data: List[Dict]) -> None:
-        """Write JSON file with locking and backup."""
+   def _read_json_file(self, file_path: Path, lock_path: Path) -> List[Dict]:
+        """Read JSON file with locking and error handling."""
         if not self._acquire_file_lock(lock_path):
             raise RuntimeError(f"Could not acquire lock for {file_path}")
         
         try:
-            # Create backup if file exists
-            if file_path.exists():
+            if not file_path.exists():
+                # File doesn't exist - return empty list (normal for first run)
+                self.logger.info(f"JSON file does not exist yet: {file_path}")
+                return []
+                
+            # Check if file is empty
+            if file_path.stat().st_size == 0:
+                self.logger.warning(f"JSON file is empty: {file_path}")
+                return []
+                
+            # Try to read and parse JSON
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    
+                # Validate that we got a list
+                if not isinstance(data, list):
+                    self.logger.error(f"JSON file does not contain a list: {file_path}")
+                    # Try to recover if it's a dict by wrapping in list
+                    if isinstance(data, dict):
+                        self.logger.warning("Converting single dict to list")
+                        return [data]
+                    else:
+                        self.logger.error("Invalid data format, returning empty list")
+                        return []
+                        
+                # Validate that list contains dictionaries
+                if data and not all(isinstance(item, dict) for item in data):
+                    self.logger.error(f"JSON file contains non-dictionary items: {file_path}")
+                    # Filter out non-dict items
+                    valid_data = [item for item in data if isinstance(item, dict)]
+                    self.logger.warning(f"Filtered out {len(data) - len(valid_data)} invalid items")
+                    return valid_data
+                    
+                return data
+                
+            except json.JSONDecodeError as e:
+                self.logger.error(f"JSON decode error in {file_path}: {e}")
+                
+                # Try to read backup if available
                 backup_path = file_path.with_suffix('.json.backup')
-                shutil.copy2(file_path, backup_path)
+                if backup_path.exists():
+                    self.logger.info("Attempting to read from backup file")
+                    try:
+                        with open(backup_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        if isinstance(data, list):
+                            self.logger.info("Successfully recovered data from backup")
+                            # Restore the backup over the corrupted file
+                            shutil.copy2(backup_path, file_path)
+                            return data
+                    except Exception as backup_error:
+                        self.logger.error(f"Backup file also corrupted: {backup_error}")
+                        
+                # If we can't recover, return empty list
+                self.logger.error("Unable to recover data, returning empty list")
+                return []
+                
+            except UnicodeDecodeError as e:
+                self.logger.error(f"Unicode decode error in {file_path}: {e}")
+                # Try different encodings
+                for encoding in ['utf-8-sig', 'latin-1', 'cp1252']:
+                    try:
+                        with open(file_path, 'r', encoding=encoding) as f:
+                            data = json.load(f)
+                        self.logger.info(f"Successfully read file with {encoding} encoding")
+                        return data if isinstance(data, list) else []
+                    except:
+                        continue
+                self.logger.error("Failed to read file with any encoding")
+                return []
+                
+            except Exception as e:
+                self.logger.error(f"Unexpected error reading {file_path}: {e}")
+                self.logger.error(traceback.format_exc())
+                return []
+                
+        finally:
+            self._release_file_lock(lock_path)
+   
+   def _write_json_file(self, file_path: Path, lock_path: Path, data: List[Dict]) -> None:
+        """Write JSON file with locking, backup, and validation."""
+        if not self._acquire_file_lock(lock_path):
+            raise RuntimeError(f"Could not acquire lock for {file_path}")
+        
+        try:
+            # Validate input data
+            if not isinstance(data, list):
+                raise ValueError(f"Data must be a list, got {type(data)}")
+                
+            # Create backup if file exists and is valid
+            if file_path.exists() and file_path.stat().st_size > 0:
+                backup_path = file_path.with_suffix('.json.backup')
+                try:
+                    # Verify the existing file is valid JSON before backing up
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        existing_data = json.load(f)
+                    # Only backup if existing file is valid
+                    shutil.copy2(file_path, backup_path)
+                    self.logger.debug(f"Created backup: {backup_path}")
+                except Exception as e:
+                    self.logger.warning(f"Existing file appears corrupted, skipping backup: {e}")
             
             # If data is empty, add an example record with all columns
             if not data:
@@ -490,14 +687,14 @@ class JSONRegisterManager:
                         "From": 0,
                         "To": 1,
                         "Photo_Status": "Example",
-                        "Processed_Date": datetime.now().isoformat(),  # Changed from Approved_Date
-                        "Processed_By": "System",  # Changed from Approved_By
+                        "Processed_Date": datetime.now().isoformat(),
+                        "Processed_By": "System",
                         "Comments": "This is an example record - please delete after adding real data",
                         "Average_Hex_Color": "#000000",
                         "Image_Width_Cm": 2.0
                     }]
                 elif "original_images_register" in str(file_path):
-                    # Example original image record with compact compartment format
+                    # Example original image record WITHOUT nested compartments
                     data = [{
                         "HoleID": "INITIALISING",
                         "Depth_From": 0,
@@ -512,8 +709,7 @@ class JSONRegisterManager:
                         "Uploaded_By": "System",
                         "Comments": "This is an example record - please delete after adding real data",
                         "Scale_PxPerCm": 50.0,
-                        "Scale_Confidence": 0.95,
-                        "Compartments": {"1": [[0, 0], [100, 0], [100, 100], [0, 100]]}  # Compact on one line
+                        "Scale_Confidence": 0.95
                     }]
                 elif "compartment_reviews" in str(file_path):
                     # Example review record with all columns including toggles
@@ -528,17 +724,57 @@ class JSONRegisterManager:
                         "Comments": "This is an example record - please delete after adding real data",
                         "Bad Image": False,
                         "BIFf": False,
-                        "Compact": False,
-                        "Porous": False,
                         "+ QZ": False,
                         "+ CHH/M": False
                     }]
+                    
+                elif "compartment_corners" in str(file_path):
+                    # Example compartment corner record
+                    data = [{
+                        "HoleID": "INITIALISING",
+                        "Depth_From": 0,
+                        "Depth_To": 20,
+                        "Original_Filename": "EXAMPLE_0-20_Original.jpg",
+                        "Compartment_Number": 1,
+                        "Top_Left_X": 0,
+                        "Top_Left_Y": 0,
+                        "Top_Right_X": 100,
+                        "Top_Right_Y": 0,
+                        "Bottom_Right_X": 100,
+                        "Bottom_Right_Y": 100,
+                        "Bottom_Left_X": 0,
+                        "Bottom_Left_Y": 100,
+                        "Scale_PxPerCm": 50.0,
+                        "Scale_Confidence": 0.95
+                    }]
+             
+            # Create parent directory if it doesn't exist
+            file_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Write data with compact formatting for readability
-            with open(file_path, 'w', encoding='utf-8') as f:
-                # Use separators to make JSON more compact
-                json.dump(data, f, indent=2, ensure_ascii=False, default=str, separators=(',', ': '))
+            # Write to temporary file first
+            temp_path = file_path.with_suffix('.json.tmp')
+            try:
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False, default=str, separators=(',', ': '))
                 
+                # Verify the temporary file is valid
+                with open(temp_path, 'r', encoding='utf-8') as f:
+                    verified_data = json.load(f)
+                    
+                # If verification passes, move temp to final location
+                temp_path.replace(file_path)
+                self.logger.debug(f"Successfully wrote {len(data)} records to {file_path}")
+                
+            except Exception as e:
+                # Clean up temp file on error
+                if temp_path.exists():
+                    temp_path.unlink()
+                raise e
+                
+        except Exception as e:
+            self.logger.error(f"Error writing to {file_path}: {e}")
+            raise
+            
         finally:
             self._release_file_lock(lock_path)
 
@@ -580,8 +816,8 @@ class JSONRegisterManager:
                     # Update existing
                     records[key].update({
                         'Photo_Status': photo_status,
-                        'Processed_Date': timestamp,  # Changed from Approved_Date
-                        'Processed_By': username  # Changed from Approved_By
+                        'Processed_Date': timestamp,
+                        'Processed_By': username
                     })
                     if comments:
                         records[key]['Comments'] = comments
@@ -597,8 +833,8 @@ class JSONRegisterManager:
                         'From': depth_from,
                         'To': depth_to,
                         'Photo_Status': photo_status,
-                        'Processed_Date': timestamp,  # Changed from Approved_Date
-                        'Processed_By': username,  # Changed from Approved_By
+                        'Processed_Date': timestamp,
+                        'Processed_By': username,
                         'Comments': comments
                     }
                     
@@ -628,7 +864,7 @@ class JSONRegisterManager:
                            scale_confidence: Optional[float] = None,
                            compartment_data: Optional[Dict[str, List[List[int]]]] = None) -> bool:
        """
-       Update or create an original image entry.
+       Update or create an original image entry with flattened compartment storage.
        
        Args:
            hole_id: Hole identifier
@@ -647,84 +883,126 @@ class JSONRegisterManager:
        """
        with self._thread_lock:
            try:
-               # Read current data
-               data = self._read_json_file(self.original_json_path, self.original_lock)
-               
-               # Ensure depths are integers
-               depth_from = int(depth_from)
-               depth_to = int(depth_to)
-               
-               timestamp = datetime.now().isoformat()
-               username = uploaded_by or os.getenv("USERNAME", "Unknown")
-               status = "Uploaded" if upload_success else "Failed"
-               
-               # Find existing record for this specific file
-               record_found = False
-               for i, record in enumerate(data):
-                   if (record['HoleID'] == hole_id and 
-                       record['Depth_From'] == depth_from and 
-                       record['Depth_To'] == depth_to and
-                       record['Original_Filename'] == original_filename):
-                       # Update existing record
-                       record_found = True
-                       data[i].update({
+               # Use file locks for both original and corners
+               with self.file_locks('original', 'corners'):
+                   # Read current data
+                   original_data = []
+                   if self.original_json_path.exists():
+                       with open(self.original_json_path, 'r', encoding='utf-8') as f:
+                           original_data = json.load(f)
+                   
+                   corners_data = []
+                   if self.compartment_corners_json_path.exists():
+                       with open(self.compartment_corners_json_path, 'r', encoding='utf-8') as f:
+                           corners_data = json.load(f)
+                   
+                   # Ensure depths are integers
+                   depth_from = int(depth_from)
+                   depth_to = int(depth_to)
+                   
+                   timestamp = datetime.now().isoformat()
+                   username = uploaded_by or os.getenv("USERNAME", "Unknown")
+                   status = "Uploaded" if upload_success else "Failed"
+                   
+                   # Find existing record for this specific file
+                   record_found = False
+                   for i, record in enumerate(original_data):
+                       if (record['HoleID'] == hole_id and 
+                           record['Depth_From'] == depth_from and 
+                           record['Depth_To'] == depth_to and
+                           record['Original_Filename'] == original_filename):
+                           # Update existing record
+                           record_found = True
+                           original_data[i].update({
+                               'Uploaded_By': username,
+                               'Comments': comments
+                           })
+                           
+                           if is_approved:
+                               original_data[i]['Approved_Upload_Date'] = timestamp
+                               original_data[i]['Approved_Upload_Status'] = status
+                           else:
+                               original_data[i]['Rejected_Upload_Date'] = timestamp
+                               original_data[i]['Rejected_Upload_Status'] = status
+                           
+                           # Update scale data
+                           if scale_px_per_cm is not None:
+                               original_data[i]['Scale_PxPerCm'] = scale_px_per_cm
+                           if scale_confidence is not None:
+                               original_data[i]['Scale_Confidence'] = scale_confidence
+                           
+                           break
+                   
+                   if not record_found:
+                       # Create new record
+                       new_record = {
+                           'HoleID': hole_id,
+                           'Depth_From': depth_from,
+                           'Depth_To': depth_to,
+                           'Original_Filename': original_filename,
+                           'File_Count': 1,
+                           'All_Filenames': original_filename,
+                           'Approved_Upload_Date': timestamp if is_approved else None,
+                           'Approved_Upload_Status': status if is_approved else None,
+                           'Rejected_Upload_Date': timestamp if not is_approved else None,
+                           'Rejected_Upload_Status': status if not is_approved else None,
                            'Uploaded_By': username,
                            'Comments': comments
-                       })
+                       }
                        
-                       if is_approved:
-                           data[i]['Approved_Upload_Date'] = timestamp
-                           data[i]['Approved_Upload_Status'] = status
-                       else:
-                           data[i]['Rejected_Upload_Date'] = timestamp
-                           data[i]['Rejected_Upload_Status'] = status
-                       
-                       # Update scale data
+                       # Add scale data if provided
                        if scale_px_per_cm is not None:
-                           data[i]['Scale_PxPerCm'] = scale_px_per_cm
+                           new_record['Scale_PxPerCm'] = scale_px_per_cm
                        if scale_confidence is not None:
-                           data[i]['Scale_Confidence'] = scale_confidence
+                           new_record['Scale_Confidence'] = scale_confidence
                        
-                       # Update compartment data in compact format
-                       if compartment_data is not None:
-                           data[i]['Compartments'] = compartment_data
-                       
-                       break
-               
-               if not record_found:
-                   # Create new record
-                   new_record = {
-                       'HoleID': hole_id,
-                       'Depth_From': depth_from,
-                       'Depth_To': depth_to,
-                       'Original_Filename': original_filename,
-                       'File_Count': 1,  # Each row represents one file now
-                       'All_Filenames': original_filename,
-                       'Approved_Upload_Date': timestamp if is_approved else None,
-                       'Approved_Upload_Status': status if is_approved else None,
-                       'Rejected_Upload_Date': timestamp if not is_approved else None,
-                       'Rejected_Upload_Status': status if not is_approved else None,
-                       'Uploaded_By': username,
-                       'Comments': comments
-                   }
+                       original_data.append(new_record)
                    
-                   # Add scale data if provided
-                   if scale_px_per_cm is not None:
-                       new_record['Scale_PxPerCm'] = scale_px_per_cm
-                   if scale_confidence is not None:
-                       new_record['Scale_Confidence'] = scale_confidence
-                   
-                   # Add compartment data if provided
+                   # Now handle compartment data separately
                    if compartment_data is not None:
-                       new_record['Compartments'] = compartment_data
+                       # Remove existing corners for this image
+                       corners_data = [c for c in corners_data 
+                                     if not (c['HoleID'] == hole_id and 
+                                           c['Depth_From'] == depth_from and 
+                                           c['Depth_To'] == depth_to and
+                                           c['Original_Filename'] == original_filename)]
+                       
+                       # Add new corners
+                       for comp_num, corners in compartment_data.items():
+                           if isinstance(corners, list) and len(corners) == 4:
+                               corner_record = {
+                                   'HoleID': hole_id,
+                                   'Depth_From': depth_from,
+                                   'Depth_To': depth_to,
+                                   'Original_Filename': original_filename,
+                                   'Compartment_Number': int(comp_num),
+                                   'Top_Left_X': corners[0][0],
+                                   'Top_Left_Y': corners[0][1],
+                                   'Top_Right_X': corners[1][0],
+                                   'Top_Right_Y': corners[1][1],
+                                   'Bottom_Right_X': corners[2][0],
+                                   'Bottom_Right_Y': corners[2][1],
+                                   'Bottom_Left_X': corners[3][0],
+                                   'Bottom_Left_Y': corners[3][1]
+                               }
+                               
+                               # Copy scale data if available
+                               if scale_px_per_cm is not None:
+                                   corner_record['Scale_PxPerCm'] = scale_px_per_cm
+                               if scale_confidence is not None:
+                                   corner_record['Scale_Confidence'] = scale_confidence
+                               
+                               corners_data.append(corner_record)
                    
-                   data.append(new_record)
-               
-               # Save updated data
-               self._write_json_file(self.original_json_path, self.original_lock, data)
-               
-               self.logger.info(f"Updated original image: {original_filename}")
-               return True
+                   # Save both files
+                   with open(self.original_json_path, 'w', encoding='utf-8') as f:
+                       json.dump(original_data, f, indent=2, ensure_ascii=False, default=str)
+                   
+                   with open(self.compartment_corners_json_path, 'w', encoding='utf-8') as f:
+                       json.dump(corners_data, f, indent=2, ensure_ascii=False, default=str)
+                   
+                   self.logger.info(f"Updated original image: {original_filename}")
+                   return True
                
            except Exception as e:
                self.logger.error(f"Error updating original image: {e}")
@@ -748,28 +1026,25 @@ class JSONRegisterManager:
        """
        with self._thread_lock:
            try:
-               data = self._read_json_file(self.original_json_path, self.original_lock)
+               data = self._read_json_file(self.compartment_corners_json_path, self.corners_lock)
                
                depth_from = int(depth_from)
                depth_to = int(depth_to)
+               comp_num_int = int(compartment_num)
                
                for record in data:
                    if (record['HoleID'] == hole_id and 
                        record['Depth_From'] == depth_from and 
                        record['Depth_To'] == depth_to and
-                       record['Original_Filename'] == original_filename):
+                       record['Original_Filename'] == original_filename and
+                       record['Compartment_Number'] == comp_num_int):
                        
-                       compartments = record.get('Compartments', {})
-                       if compartment_num in compartments:
-                           corners = compartments[compartment_num]
-                           # Convert compact format to dictionary
-                           if isinstance(corners, list) and len(corners) == 4:
-                               return {
-                                   'top_left': tuple(corners[0]),
-                                   'top_right': tuple(corners[1]),
-                                   'bottom_right': tuple(corners[2]),
-                                   'bottom_left': tuple(corners[3])
-                               }
+                       return {
+                           'top_left': (record['Top_Left_X'], record['Top_Left_Y']),
+                           'top_right': (record['Top_Right_X'], record['Top_Right_Y']),
+                           'bottom_right': (record['Bottom_Right_X'], record['Bottom_Right_Y']),
+                           'bottom_left': (record['Bottom_Left_X'], record['Bottom_Left_Y'])
+                       }
                
                return None
                
@@ -779,7 +1054,7 @@ class JSONRegisterManager:
 
    def batch_remove_compartments(self, removals: List[Dict]) -> int:
        """
-       Batch remove compartments from original image records.
+       Batch remove compartments from flattened corner records.
        
        Args:
            removals: List of dictionaries with keys:
@@ -797,36 +1072,40 @@ class JSONRegisterManager:
        with self._thread_lock:
            try:
                # Read data once
-               data = self._read_json_file(self.original_json_path, self.original_lock)
+               data = self._read_json_file(self.compartment_corners_json_path, self.corners_lock)
                
-               # Process all removals
+               # Create a set of records to remove for efficiency
+               removal_keys = set()
                for removal in removals:
-                   try:
-                       hole_id = removal['hole_id']
-                       depth_from = int(removal['depth_from'])
-                       depth_to = int(removal['depth_to'])
-                       filename = removal['original_filename']
-                       comp_num = str(removal['compartment_num'])
-                       
-                       # Find the record
-                       for record in data:
-                           if (record['HoleID'] == hole_id and 
-                               record['Depth_From'] == depth_from and 
-                               record['Depth_To'] == depth_to and
-                               record['Original_Filename'] == filename):
-                               
-                               if 'Compartments' in record and comp_num in record['Compartments']:
-                                   del record['Compartments'][comp_num]
-                                   successful_removals += 1
-                                   self.logger.info(f"Removed compartment {comp_num} from {filename}")
-                               break
-                               
-                   except Exception as e:
-                       self.logger.error(f"Error removing compartment: {e}")
+                   key = (
+                       removal['hole_id'],
+                       int(removal['depth_from']),
+                       int(removal['depth_to']),
+                       removal['original_filename'],
+                       int(removal['compartment_num'])
+                   )
+                   removal_keys.add(key)
+               
+               # Filter out records that match removal criteria
+               filtered_data = []
+               for record in data:
+                   record_key = (
+                       record['HoleID'],
+                       record['Depth_From'],
+                       record['Depth_To'],
+                       record['Original_Filename'],
+                       record['Compartment_Number']
+                   )
+                   
+                   if record_key not in removal_keys:
+                       filtered_data.append(record)
+                   else:
+                       successful_removals += 1
+                       self.logger.info(f"Removed compartment {record['Compartment_Number']} from {record['Original_Filename']}")
                
                # Save if we made changes
                if successful_removals > 0:
-                   self._write_json_file(self.original_json_path, self.original_lock, data)
+                   self._write_json_file(self.compartment_corners_json_path, self.corners_lock, filtered_data)
                    self.logger.info(f"Batch removed {successful_removals} compartments")
                    
            except Exception as e:
@@ -853,14 +1132,17 @@ class JSONRegisterManager:
        """
        with self._thread_lock:
            try:
-               data = self._read_json_file(self.original_json_path, self.original_lock)
+               # Read original image data for scale info
+               original_data = self._read_json_file(self.original_json_path, self.original_lock)
+               corners_data = self._read_json_file(self.compartment_corners_json_path, self.corners_lock)
                
                depth_from = int(depth_from)
                depth_to = int(depth_to)
                
                result = {}
                
-               for record in data:
+               # First, get all filenames and scale data from original records
+               for record in original_data:
                    if (record['HoleID'] == hole_id and 
                        record['Depth_From'] == depth_from and 
                        record['Depth_To'] == depth_to):
@@ -869,8 +1151,25 @@ class JSONRegisterManager:
                        result[filename] = {
                            'scale_px_per_cm': record.get('Scale_PxPerCm'),
                            'scale_confidence': record.get('Scale_Confidence'),
-                           'compartments': record.get('Compartments', {})
+                           'compartments': {}
                        }
+               
+               # Then, populate compartments from corners data
+               for corner in corners_data:
+                   if (corner['HoleID'] == hole_id and 
+                       corner['Depth_From'] == depth_from and 
+                       corner['Depth_To'] == depth_to):
+                       
+                       filename = corner['Original_Filename']
+                       if filename in result:
+                           comp_num = str(corner['Compartment_Number'])
+                           # Convert back to nested list format for compatibility
+                           result[filename]['compartments'][comp_num] = [
+                               [corner['Top_Left_X'], corner['Top_Left_Y']],
+                               [corner['Top_Right_X'], corner['Top_Right_Y']],
+                               [corner['Bottom_Right_X'], corner['Bottom_Right_Y']],
+                               [corner['Bottom_Left_X'], corner['Bottom_Left_Y']]
+                           ]
                
                return result
                
@@ -1027,8 +1326,23 @@ class JSONRegisterManager:
                     # Read current compartment data
                     comp_data = []
                     if self.compartment_json_path.exists():
-                        with open(self.compartment_json_path, 'r', encoding='utf-8') as f:
-                            comp_data = json.load(f)
+                        # Handle empty or invalid JSON files
+                        try:
+                            # Check if file is empty
+                            if self.compartment_json_path.stat().st_size == 0:
+                                self.logger.warning("Compartment JSON file is empty, starting with empty list")
+                                comp_data = []
+                            else:
+                                with open(self.compartment_json_path, 'r', encoding='utf-8') as f:
+                                    comp_data = json.load(f)
+                        except json.JSONDecodeError as e:
+                            self.logger.error(f"JSON decode error in compartment file: {e}")
+                            self.logger.warning("Starting with empty compartment list")
+                            comp_data = []
+                        except Exception as e:
+                            self.logger.error(f"Error reading compartment file: {e}")
+                            comp_data = []
+                        
                     comp_records = {(r['HoleID'], r['From'], r['To']): r for r in comp_data}
                     
                     # Process all compartment updates
@@ -1252,6 +1566,22 @@ class JSONRegisterManager:
                
            except Exception as e:
                self.logger.error(f"Error getting original image data: {e}")
+               return pd.DataFrame()
+   
+   def get_compartment_corners_data(self, hole_id: Optional[str] = None) -> pd.DataFrame:
+       """Get compartment corners data as DataFrame."""
+       with self._thread_lock:
+           try:
+               data = self._read_json_file(self.compartment_corners_json_path, self.corners_lock)
+               df = pd.DataFrame(data)
+               
+               if hole_id and not df.empty:
+                   df = df[df['HoleID'] == hole_id]
+               
+               return df
+               
+           except Exception as e:
+               self.logger.error(f"Error getting compartment corners data: {e}")
                return pd.DataFrame()
    
    def get_review_data(self, hole_id: Optional[str] = None) -> pd.DataFrame:

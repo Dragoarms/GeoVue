@@ -74,8 +74,8 @@ class FirstRunDialog:
         self.dialog = DialogHelper.create_dialog(
             self.parent,
             DialogHelper.t("Welcome to GeoVue"),
-            modal=True,
-            topmost=True
+            modal=False,
+            topmost=False
         )
         self.logger.debug(f"Dialog created: {self.dialog}")
         
@@ -272,6 +272,12 @@ class FirstRunDialog:
         # Set a minimum size for the dialog to prevent content being cut off
         self.dialog.minsize(850, 700)
         
+        # Automatically check default folder if it exists
+        default_path = Path(self.local_path_var.get())
+        if default_path.exists():
+            self.logger.info(f"Checking default local path: {default_path}")
+            self._check_local_folder_structure(str(default_path))
+
 
         # Ensure dialog is visible
         self.logger.debug(f"Parent exists: {self.parent.winfo_exists()}")

@@ -20,11 +20,6 @@ from gui.widgets.modern_notebook import ModernNotebook
 from gui.dialog_helper import DialogHelper
 
 
-# Configure logging first
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
@@ -59,6 +54,7 @@ class GUIManager:
                 "accent_blue": "#3a7ca5",         # Muted blue accent
                 "accent_green": "#4a8259",        # Muted green accent
                 "accent_red": "#9e4a4a",          # Muted red for quit button
+                "accent_yellow": "#e5c07b",       # Muted yellow accent
                 "field_bg": "#2d2d2d",            # Form field background
                 "field_border": "#3f3f3f",        # Form field border
                 "hover_highlight": "#3a3a3a",     # Highlight color for hover effects
@@ -82,6 +78,7 @@ class GUIManager:
                 "accent_blue": "#4a90c0",         # Blue accent
                 "accent_green": "#5aa06c",        # Green accent
                 "accent_red": "#c05a5a",          # Red for quit button
+                "accent_yellow": "#e5c07b",       # Muted yellow accent
                 "field_bg": "#ffffff",            # Form field background
                 "field_border": "#cccccc",        # Form field border
                 "hover_highlight": "#dddddd",     # Highlight color for hover effects
@@ -114,7 +111,7 @@ class GUIManager:
             "heading": ("Arial", 12, "bold"),
             "normal": ("Arial", 10),
             "small": ("Arial", 9),
-            "code": ("Consolas", 10),
+            "code": ("Consolas", 10, "italic"),
             "button": ("Arial", 11),
         }
     
@@ -464,6 +461,71 @@ class GUIManager:
             background=colors["secondary_bg"],
             tabmargins=[2, 5, 2, 0]
         )
+
+
+        # QAQC Review Visual Feedback Styles
+        style.configure('ToBeReplaced.TLabelframe', 
+                        bordercolor='#ff4444',  # Bright red
+                        relief='solid', 
+                        borderwidth=3,
+                        background=colors["background"],
+                        foreground=colors["text"])
+        
+        style.configure('Replacement.TLabelframe', 
+                        bordercolor='#44ff44',  # Bright green
+                        relief='solid', 
+                        borderwidth=3,
+                        background=colors["background"],
+                        foreground=colors["text"])
+        
+        style.configure('Target.TLabelframe', 
+                        bordercolor=colors["accent_blue"],
+                        relief='solid', 
+                        borderwidth=2,
+                        background=colors["background"],
+                        foreground=colors["text"])
+        
+        style.configure('Accepted.TLabelframe', 
+                        bordercolor=colors["accent_green"],
+                        relief='solid', 
+                        borderwidth=2,
+                        background='#e8f5e9' if self.current_theme == "light" else '#2d4a2d',
+                        foreground=colors["text"])
+        
+        style.configure('Processed.TLabelframe', 
+                        background='#f0f0f0' if self.current_theme == "light" else '#2a2a2a',
+                        foreground='#999999',
+                        bordercolor=colors["border"],
+                        relief='flat')
+        
+        style.configure('Source.TLabelframe', 
+                        bordercolor=colors["accent_blue"],
+                        relief='solid', 
+                        borderwidth=2,
+                        background=colors["background"],
+                        foreground=colors["text"])
+        
+        style.configure('Additional.TLabelframe', 
+                        bordercolor='#ff9800',  # Orange
+                        relief='solid', 
+                        borderwidth=2,
+                        background=colors["background"],
+                        foreground=colors["text"])
+        
+        style.configure('Kept.TLabelframe', 
+                        bordercolor=colors["accent_green"],
+                        relief='solid', 
+                        borderwidth=2,
+                        background=colors["background"],
+                        foreground=colors["text"])
+        
+        style.configure('ToBeDeleted.TLabelframe', 
+                        bordercolor='#ff4444',
+                        relief='dashed', 
+                        borderwidth=3,
+                        background='#ffebeb' if self.current_theme == "light" else '#4a2d2d',
+                        foreground=colors["text"])
+
         
         # Force theme reloading - important for complete theme switching
         style.theme_use(style.theme_use())

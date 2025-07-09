@@ -76,6 +76,17 @@ class ModernButton:
         # If neither exists, silently do nothing
         return self
     
+    def focus_get(self):
+        """
+        Get the widget that currently has focus.
+        
+        Returns:
+            Widget that has focus or None
+        """
+        if hasattr(self, 'frame') and self.frame:
+            return self.frame.focus_get()
+        return None
+
     def set_text(self, text):
         """
         Update the button text.
@@ -156,6 +167,67 @@ class ModernButton:
         # Reset color after a short delay
         self.frame.after(100, self._reset_color)
     
+    def bind(self, sequence, func, add=None):
+        """
+        Bind an event to the button.
+        
+        Args:
+            sequence: Event sequence (e.g., '<Return>', '<Escape>')
+            func: Function to call when event occurs
+            add: Optional, whether to add to existing bindings
+            
+        Returns:
+            Binding ID that can be used with unbind
+        """
+        # Bind to both frame and label to ensure event is caught
+        frame_id = self.frame.bind(sequence, func, add)
+        self.label.bind(sequence, func, add)
+        return frame_id
+
+    def unbind(self, sequence, funcid=None):
+        """
+        Unbind an event from the button.
+        
+        Args:
+            sequence: Event sequence to unbind
+            funcid: Optional function ID returned by bind
+        """
+        self.frame.unbind(sequence, funcid)
+        self.label.unbind(sequence, funcid)
+        return self
+
+    def bind_all(self, sequence, func, add=None):
+        """
+        Bind an event to all instances of this button class.
+        
+        Args:
+            sequence: Event sequence
+            func: Function to call
+            add: Whether to add to existing bindings
+        """
+        return self.frame.bind_all(sequence, func, add)
+
+    def unbind_all(self, sequence):
+        """
+        Unbind an event from all instances.
+        
+        Args:
+            sequence: Event sequence to unbind
+        """
+        self.frame.unbind_all(sequence)
+        return self
+
+    def event_generate(self, sequence, **kwargs):
+        """
+        Generate an event on the button.
+        
+        Args:
+            sequence: Event sequence to generate
+            **kwargs: Additional event parameters
+        """
+        self.frame.event_generate(sequence, **kwargs)
+        return self
+
     def _reset_color(self, event=None):
         """Reset button color to original."""
         try:

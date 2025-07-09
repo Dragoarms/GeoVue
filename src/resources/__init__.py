@@ -88,3 +88,4 @@ def list_color_presets() -> list:
             return [f.name for f in preset_dir.glob("*.json")]
     
     return []
+

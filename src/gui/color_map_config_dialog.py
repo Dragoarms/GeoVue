@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple, Any, Callable
 import logging
 
 from gui.dialog_helper import DialogHelper
-from processing.color_map_manager import ColorMap, ColorMapType, ColorRange, ColorMapManager
+from processing.LoggingReviewStep.color_map_manager import ColorMap, ColorMapType, ColorRange, ColorMapManager
 
 logger = logging.getLogger(__name__)
 

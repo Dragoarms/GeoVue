@@ -1,21 +1,37 @@
-# processing\__init__.py
+"""Processing package for drill hole image analysis and visualization."""
 
-from processing.blur_detector import BlurDetector
-from processing.drillhole_trace_generator import DrillholeTraceGenerator
-from processing.aruco_manager import ArucoManager
-from processing.color_map_manager import ColorMapManager
-from processing.drillhole_data_manager import DrillholeDataManager, DataType, IntervalScale
-from processing.drillhole_data_visualizer import (
+# Import from submodules - using relative imports
+from .ArucoMarkersAndBlurDetectionStep import BlurDetector, ArucoManager
+from .LoggingReviewStep import (
+    DrillholeTraceGenerator,
+    ColorMapManager,
+    DrillholeDataManager,
+    DataType,
+    IntervalScale,
     DrillholeDataVisualizer,
     VisualizationMode,
     PlotType,
     PlotConfig
 )
-# ===================================================
-# INSERT: export pipeline helpers
-from processing.pipeline import (
-    load_image,
-    resize_for_processing,
-    apply_transform,
-)
-# ===================================================
+from .visualization_drawer import VisualizationDrawer
+
+# Define what gets imported with "from processing import *"
+__all__ = [
+    # From ArucoMarkersAndBlurDetectionStep
+    'BlurDetector',
+    'ArucoManager',
+    
+    # From LoggingReviewStep
+    'DrillholeTraceGenerator',
+    'ColorMapManager',
+    'DrillholeDataManager',
+    'DataType',
+    'IntervalScale',
+    'DrillholeDataVisualizer',
+    'VisualizationMode',
+    'PlotType',
+    'PlotConfig',
+    
+    # From root
+    'VisualizationDrawer'
+]

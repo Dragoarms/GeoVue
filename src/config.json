@@ -60,12 +60,28 @@
     "metadata_marker_size_cm": 1.0,
     "scale_estimation_enabled": true,
     "scale_outlier_threshold_iqr": 1.5,
-    "scale_max_cv_threshold": 0.15,
+    "scale_max_cv_threshold": 0.05,
     "scale_min_markers_required": 4,
     "use_corner_markers_for_scale": false,
     
     "compartment_count": 20,
     "compartment_interval": 1,
+    "compartment_intervals_allowed": [
+        1,
+        2,
+        3,
+        5
+    ],
+    "compartment_height_cm": 4.5,
+    "compartment_width_cm": 2.0,
+    
+    "compartment_spacing_mm": 3.0,
+    
+    "compartment_spacing_mm_overrides": {
+    "10-11": 5.0
+    },
+    
+    
     "enable_ocr": false,
     "ocr_confidence_threshold": 70.0,
     "ocr_config_options": [

@@ -13,13 +13,15 @@ import subprocess
 from typing import Dict, List, Optional, Any, Tuple, Union
 import traceback
 from gui.dialog_helper import DialogHelper
-from processing.drillhole_trace_generator import DrillholeTraceGenerator
+# from processing.drillhole_trace_generator import DrillholeTraceGenerator
 from gui.widgets import *
-from gui.qaqc_manager import QAQCManager
+# from processing.QAQCStep.qaqc_manager import QAQCManager
 from gui.logging_review_dialog import LoggingReviewDialog
+from gui.embedding_training_dialog import EmbeddingTrainingDialog
 from utils.json_register_manager import JSONRegisterManager
 from utils.register_synchronizer import RegisterSynchronizer
 from gui.progress_dialog import ProgressDialog
+from utils.image_processing_depth_validation import DepthValidator
 
 
 import threading
@@ -31,7 +33,6 @@ if threading.current_thread() != threading.main_thread():
 logger = logging.getLogger(__name__)
 
 class MainGUI:
-    
     def __init__(self, app):
         """Initialize with reference to main application."""
         self.app = app  # Reference to main app for accessing components
@@ -48,12 +49,17 @@ class MainGUI:
         self.file_manager = app.file_manager
         self.gui_manager = app.gui_manager
         self.translator = app.translator
-        self.tesseract_manager = app.tesseract_manager
         self.blur_detector = app.blur_detector
         self.aruco_manager = app.aruco_manager
+        self.qaqc_manager = app.qaqc_manager
+        self.depth_validator = app.depth_validator
+        self.trace_generator = app.trace_generator  # Yes, get this from app too
+
+        # REMOVE THIS LINE - it's too early!
+        # self._update_depth_csv_status()
 
         # Set a flag to check if processing is active
-        self.is_processing_image = False  # Flag to indicate when an image is being processed
+        self.is_processing_image = False
         
         # Initialize language variable
         self.language_var = tk.StringVar(value=self.translator.get_current_language())
@@ -61,12 +67,11 @@ class MainGUI:
         # Setup configuration
         self.config = app.config_manager.as_dict()
         
-        # ===================================================
-        # Removed OneDrivePathManager - now using FileManager's shared paths
-        # ===================================================
-        
         # Create GUI
         self.create_gui()
+
+        # NOW you can update the status after GUI is created
+        self._update_depth_csv_status()
 
         # Set up the shared paths if available
         self.setup_shared_paths()
@@ -74,8 +79,7 @@ class MainGUI:
         # Initialize visualization cache for dialogs
         self.visualization_cache = {}
         
-        # Delay the first check_progress call until all initialization is complete
-        # Use a longer delay for the initial call to ensure everything is ready
+        # Delay the first check_progress call
         self.root.after(1000, self.check_progress)
     
     def t(self, text):
@@ -305,29 +309,30 @@ class MainGUI:
         
         # Create collapsible sections with the GUIManager
         # Shared Folder Path Settings
-        
+
         # Check if paths exist using FileManager
         approved_path_exists = bool(self.file_manager.get_shared_path('approved_compartments', create_if_missing=False))
         processed_originals_exists = bool(self.file_manager.get_shared_path('processed_originals', create_if_missing=False))
         drill_traces_exists = bool(self.file_manager.get_shared_path('drill_traces', create_if_missing=False))
         register_path_exists = bool(self.file_manager.get_shared_path('register_excel', create_if_missing=False))
-        
+        drillhole_data_csv_exists = bool(self.file_manager.get_shared_path('drillhole_data_csv', create_if_missing=False))
+
         # Expand if any paths are missing
         should_expand = not (approved_path_exists and processed_originals_exists and 
-                        drill_traces_exists and register_path_exists)
-        
+                        drill_traces_exists and register_path_exists and drillhole_data_csv_exists)
+
         shared_collapsible = self.gui_manager.create_collapsible_frame(
             self.content_frame,
             title=self.t("Shared Folder Settings"),
             expanded=should_expand
         )
         self.shared_collapsible = shared_collapsible
-        
         # Create variables for shared paths
         self.approved_path_var = tk.StringVar()
         self.processed_originals_path_var = tk.StringVar()
         self.drill_traces_path_var = tk.StringVar()
         self.register_path_var = tk.StringVar()
+        self.drillhole_data_csv_var = tk.StringVar() 
         
         # Set display values using FileManager's paths or config
         config = self.app.config_manager.as_dict()
@@ -348,6 +353,10 @@ class MainGUI:
         register_path = self.file_manager.get_shared_path('register_excel', create_if_missing=False)
         self.register_path_var.set(str(register_path) if register_path else config.get('shared_folder_register_excel_path', ""))
         
+        # drillhole intervals CSVV
+        depth_csv_path = self.file_manager.get_shared_path('shared_folder_drillhole_intervals_csv', create_if_missing=False)
+        self.drillhole_data_csv_var.set(str(depth_csv_path) if depth_csv_path else config.get('shared_folder_drillhole_data_csv', ""))
+
         # Create path input fields
         self._create_shared_path_field(
             shared_collapsible.content_frame, 
@@ -381,7 +390,14 @@ class MainGUI:
             is_file=True,  # This is a file, not a folder
             path_key='register_excel'
         )
-        
+        self._create_shared_path_field(
+            shared_collapsible.content_frame, 
+            self.t("Drilling intervals CSV:"), 
+            self.drillhole_data_csv_var,
+            drillhole_data_csv_exists,
+            is_file=True,  # This is a file, not a folder
+            path_key='drillhole_data_csv'
+        )
         # Create New Register button
         button_container = ttk.Frame(shared_collapsible.content_frame, style='Content.TFrame')
         button_container.pack(fill=tk.X, pady=(5, 0))
@@ -693,13 +709,20 @@ class MainGUI:
                 'color': self.gui_manager.theme_colors["accent_blue"],
                 'command': self._start_logging_review,
                 'icon': "📋"
-            },
+                        },
             {
                 'name': 'trace_button',
                 'text': self.t("Generate Drillhole Trace"),
                 'color': self.gui_manager.theme_colors["accent_blue"],
                 'command': self.on_generate_trace,
                 'icon': "📊"
+            },
+            {
+                'name': 'embedding_button',
+                'text': self.t("Embedding Tool"),
+                'color': self.gui_manager.theme_colors["accent_blue"],
+                'command': self._open_embedding_dialog,
+                'icon': "🧩"
             },
             {
                 'name': 'quit_button',
@@ -816,7 +839,8 @@ class MainGUI:
         if self.config.get('check_for_updates', True):
             self.root.after(2000, self._check_updates_at_startup)
 
-       
+
+
     def _validate_register_entries(self):
         """Validate that all register entries have existing files."""
         try:
@@ -958,6 +982,13 @@ class MainGUI:
         
         # Update status text
         self.update_status(message, status_type)
+
+    def _on_depth_csv_changed(self, new_path):
+        """Handle Drilling intervals CSV path change."""
+        if new_path and os.path.exists(new_path):
+            # Reload the depth validator
+            self._initialize_depth_validator()
+            self.logger.info(f"Drilling intervals updated: {new_path}")
 
 
     def _update_folder_color(self, *args):
@@ -1113,6 +1144,7 @@ class MainGUI:
             command=lambda: self._browse_shared_path(string_var, entry, is_file=is_file, path_key=path_key)
         )
         browse_button.pack(side=tk.RIGHT)
+    
     def _load_language_preference(self):
         """Load language preference from config file."""
         try:
@@ -1755,10 +1787,27 @@ class MainGUI:
             path_key: The FileManager path key (e.g., 'approved_compartments', 'register_excel')
         """
         if is_file:
+            # Determine file types based on path_key
+            if path_key == 'drillhole_data_csv':
+                title = self.t("Select drilling intervals CSV")
+                filetypes = [("CSV files", "*.csv"), ("All files", "*.*")]
+                # Optionally set initial file if you know the expected name
+                initialfile = "drillhole_data.csv"
+            elif path_key == 'register_excel':
+                title = self.t("Select Excel Register")
+                filetypes = [("Excel files", "*.xlsx"), ("All files", "*.*")]
+                initialfile = None
+            else:
+                # Generic file browser
+                title = self.t("Select File")
+                filetypes = [("All files", "*.*")]
+                initialfile = None
+            
             # Browse for file
             file_path = filedialog.askopenfilename(
-                title=self.t("Select Excel Register"),
-                filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
+                title=title,
+                filetypes=filetypes,
+                initialfile=initialfile if 'initialfile' in locals() else None
             )
             if file_path:
                 string_var.set(file_path)
@@ -1768,6 +1817,12 @@ class MainGUI:
                 # Update FileManager immediately if path_key provided
                 if path_key and self.file_manager:
                     self.file_manager.update_shared_path(path_key, file_path)
+                    
+                # For drillhole intervals CSV, reload the validator
+                if path_key == 'drillhole_data_csv' and self.app.depth_validator:
+                    self.app.depth_validator.reload(file_path)
+                    self._update_depth_csv_status()
+                    
         else:
             # Browse for folder
             folder_path = filedialog.askdirectory(title=self.t("Select shared folder"))
@@ -1779,7 +1834,6 @@ class MainGUI:
                 # Update FileManager immediately if path_key provided
                 if path_key and self.file_manager:
                     self.file_manager.update_shared_path(path_key, folder_path)
-
     def _create_new_register(self):
         """Create a new Excel register using JSONRegisterManager."""
         try:
@@ -2001,7 +2055,7 @@ class MainGUI:
         self.app.blur_detector.roi_ratio = self.app.config['blur_roi_ratio']
         
         # Ensure TesseractManager has the updated config
-        self.app.tesseract_manager.config = self.app.config
+        # self.app.tesseract_manager.config = self.app.config
 
         self.progress_var.set(0)
         self.app.processing_complete = False
@@ -2374,6 +2428,20 @@ class MainGUI:
         )
         DialogHelper.show_message(self.root, "File Structure Information", info_message, message_type="info")
 
+
+    def _open_embedding_dialog(self):
+        """Open the embedding training dialog."""
+        try:
+            dialog = EmbeddingTrainingDialog(self.root, self.gui_manager, self.file_manager)
+        except Exception as e:
+            self.logger.error(f"Error opening embedding dialog: {str(e)}")
+            DialogHelper.show_message(
+                self.root,
+                self.t("Error"),
+                self.t("Failed to open embedding tool") + f"\n{str(e)}",
+                message_type="error",
+            )
+
     def _show_blur_help(self):
         """Show help information about blur detection."""
         help_text = """
@@ -2568,6 +2636,54 @@ class MainGUI:
             # Join paths with semicolons for display
             path_var.set(';'.join(file_paths))
     
+    def _browse_depth_validation_csv(self):
+        """Browse for drillhole intervals CSV file."""
+        initial_dir = None
+        current_path = self.drillhole_data_csv_var.get()
+        if current_path and os.path.exists(os.path.dirname(current_path)):
+            initial_dir = os.path.dirname(current_path)
+        
+        file_path = filedialog.askopenfilename(
+            title=self.translator.get("select_depth_csv", "Select drillhole intervals CSV"),
+            initialdir=initial_dir,
+            filetypes=[
+                ("CSV files", "*.csv"),
+                ("All files", "*.*")
+            ]
+        )
+        
+        if file_path:
+            self.drillhole_data_csv_var.set(file_path)
+            self.config_manager.set('shared_folder_drillhole_data_csv', file_path)
+            self._update_depth_csv_status(file_path)
+            
+            # Update file manager if it exists
+            if hasattr(self, 'file_manager') and self.file_manager:
+                self.file_manager.update_shared_path('drillhole_data.csv', file_path)
+
+    def _update_depth_csv_status(self, csv_path=None):
+        """Update the status indicator for drillhole intervals CSV."""
+        if not hasattr(self, 'depth_csv_status_label'):
+            return
+        
+        # Get path from parameter or from the StringVar
+        if csv_path is None:
+            csv_path = self.drillhole_data_csv_var.get() if hasattr(self, 'drillhole_data_csv_var') else ""
+        
+        if not csv_path:
+            self.depth_csv_status_label.config(text="", foreground="gray")
+            return
+        
+        if not os.path.exists(csv_path):
+            self.depth_csv_status_label.config(text="✗", foreground="red")
+            return
+        
+        # Check if validator is loaded
+        if self.depth_validator and self.depth_validator.is_loaded:
+            self.depth_csv_status_label.config(text="✓", foreground="green")
+        else:
+            self.depth_csv_status_label.config(text="⚠", foreground="orange")
+
     def on_generate_trace(self):
         """Handle the 'Generate Drillhole Trace' button click."""
         try:
@@ -2595,7 +2711,7 @@ class MainGUI:
                     return
                     
                 # Initialize trace generator
-                trace_generator = DrillholeTraceGenerator(
+                trace_generator = self.DrillholeTraceGenerator(
                     config=self.config,
                     progress_queue=self.progress_queue,
                     root=self.root,
@@ -2689,7 +2805,7 @@ class MainGUI:
                     return
 
                 # Rest of original implementation...
-                trace_generator = DrillholeTraceGenerator(
+                trace_generator = self.DrillholeTraceGenerator(
                     config=self.config, 
                     progress_queue=self.progress_queue,
                     root=self.root,

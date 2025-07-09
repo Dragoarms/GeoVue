@@ -15,11 +15,11 @@ import logging
 import traceback
 
 from gui.dialog_helper import DialogHelper
-from processing.drillhole_data_manager import DrillholeDataManager, DataType
-from processing.drillhole_data_visualizer import (
+from processing.LoggingReviewStep.drillhole_data_manager import DrillholeDataManager, DataType
+from processing.LoggingReviewStep.drillhole_data_visualizer import (
     DrillholeDataVisualizer, VisualizationMode, PlotType, PlotConfig
 )
-from processing.color_map_manager import ColorMapManager, ColorMap, ColorMapType
+from processing.LoggingReviewStep.color_map_manager import ColorMapManager, ColorMap, ColorMapType
 from gui.color_map_config_dialog import ColorMapConfigDialog
 
 logger = logging.getLogger(__name__)

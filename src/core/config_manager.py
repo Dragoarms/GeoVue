@@ -16,20 +16,24 @@ class ConfigManager:
     # Define which settings are user-editable
     USER_SETTINGS_KEYS = [
         "language", "theme", "program_initialized", "storage_type",
-        "local_folder_path",
-        "local_folder_images_to_process", "local_folder_processed_originals",
+        "local_folder_path", "local_folder_images_to_process", "local_folder_processed_originals",
         "local_folder_approved_originals", "local_folder_rejected_originals",
         "local_folder_chip_compartments", "local_folder_approved_compartments",
         "local_folder_temp_review", "local_folder_drill_traces",
         "local_folder_debugging", "local_folder_blur_analysis",
         "local_folder_debug_images", 
-         
+
         "shared_folder_path",
-        "shared_folder_register_excel_path", "shared_folder_approved_folder",
+        "shared_folder_register_excel_path", 
+        "shared_folder_drillhole_data_csv",
+        "shared_folder_approved_folder",
         "shared_folder_processed_originals",
-        "shared_folder_rejected_folder", "shared_folder_drill_traces",
-        "shared_folder_register_path", "shared_folder_register_data_folder",
-        "shared_folder_extracted_compartments_folder", "shared_folder_approved_compartments_folder", 
+        "shared_folder_rejected_folder", 
+        "shared_folder_drill_traces",
+        "shared_folder_register_path", 
+        "shared_folder_register_data_folder",
+        "shared_folder_extracted_compartments_folder", 
+        "shared_folder_approved_compartments_folder", 
         "shared_folder_review_compartments_folder",
 
         "output_format", "jpeg_quality", "enable_blur_detection", 
@@ -41,12 +45,14 @@ class ConfigManager:
         "compartment_marker_size_cm",
         "corner_marker_size_cm", 
         "metadata_marker_size_cm",
+        "compartment_spacing_mm",
+        "compartment_spacing_overrides",
         "scale_estimation_enabled",
         "scale_outlier_threshold_iqr",
         "scale_max_cv_threshold",
         "scale_min_markers_required",
         "use_corner_markers_for_scale",
-]
+    ]
     
     def __init__(self, default_config_path: str):
         """
@@ -115,6 +121,10 @@ class ConfigManager:
             "save_blur_visualizations": True,
             "compartment_count": 20,
             "compartment_interval": 1,
+            "compartment_spacing_mm": 3.0,
+            "compartment_spacing_mm_overrides": {
+                "10-11": 5.0
+            },
             "valid_hole_prefixes": ["BA", "NB", "SB", "KM"],
             "enable_prefix_validation": True,
             "shared_folder_path": "",

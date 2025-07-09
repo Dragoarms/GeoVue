@@ -110,6 +110,7 @@ register_heif_opener()
 from PIL import Image as PILImage
 
 
+
 class FileManager:
     """
     Manages file operations for the Chip Tray Extractor.
@@ -193,7 +194,7 @@ class FileManager:
         
         Args:
             shared_base_dir: Base directory for shared folders (OneDrive)
-                           If None, attempts to load from config
+                        If None, attempts to load from config
         """
         # Get shared base directory from parameter or config
         if shared_base_dir:
@@ -209,6 +210,7 @@ class FileManager:
                 "register": self.shared_base_dir / self.FOLDER_NAMES['register'],
                 "register_excel": self.shared_base_dir / self.FOLDER_NAMES['register'] / self.EXCEL_REGISTER_NAME,
                 "register_data": self.shared_base_dir / self.FOLDER_NAMES['register'] / self.SUBFOLDER_NAMES['register_data'],
+                "drillhole_data_csv": self.shared_base_dir / self.FOLDER_NAMES['register'] / "drillhole_data.csv",
                 "images_to_process": self.shared_base_dir / self.FOLDER_NAMES['images'],
                 "processed_originals": self.shared_base_dir / self.FOLDER_NAMES['processed'],
                 "approved_originals": self.shared_base_dir / self.FOLDER_NAMES['processed'] / self.SUBFOLDER_NAMES['approved_originals'],
@@ -223,6 +225,7 @@ class FileManager:
             if self.config_manager:
                 self.config_manager.set('shared_folder_register_path', str(self.shared_paths['register']))
                 self.config_manager.set('shared_folder_register_excel_path', str(self.shared_paths['register_excel']))
+                self.config_manager.set('shared_folder_drillhole_data_csv', str(self.shared_paths['drillhole_data_csv']))
                 self.config_manager.set('shared_folder_register_data_folder', str(self.shared_paths['register_data']))
                 self.config_manager.set('shared_folder_processed_originals', str(self.shared_paths['processed_originals']))
                 self.config_manager.set('shared_folder_approved_folder', str(self.shared_paths['approved_originals']))
@@ -233,7 +236,7 @@ class FileManager:
                 self.config_manager.set('shared_folder_drill_traces', str(self.shared_paths['drill_traces']))
             
             self.logger.info(f"Initialized shared paths with base: {self.shared_base_dir}")
-
+    
     def get_shared_path(self, path_key: str, create_if_missing: bool = True) -> Optional[Path]:
         """
         Get a shared folder path by key.
@@ -296,7 +299,8 @@ class FileManager:
                         'compartments': 'shared_folder_extracted_compartments_folder',
                         'approved_compartments': 'shared_folder_approved_compartments_folder',
                         'review_compartments': 'shared_folder_review_compartments_folder',
-                        'drill_traces': 'shared_folder_drill_traces'
+                        'drill_traces': 'shared_folder_drill_traces',
+                        'drillhole_data_csv': 'shared_folder_drillhole_data_csv'
                     }
                     
                     if path_key in config_key_map:
@@ -1162,7 +1166,28 @@ class FileManager:
         except Exception as e:
             self.logger.error(f"Error saving drill trace image: {str(e)}")
             return None
-        
+
+    def save_embedding_plot(self, image_path: str, filename: str = "embedding_plot.png") -> Optional[str]:
+        """
+        Save an embedding plot image to the debugging directory.
+
+        Args:
+            image_path: Path to the image file to copy.
+            filename: Desired filename for the saved plot.
+
+        Returns:
+            Path to the saved plot or None if an error occurs.
+        """
+        try:
+            save_dir = self.dir_structure["debugging"]
+            os.makedirs(save_dir, exist_ok=True)
+            dest = os.path.join(save_dir, filename)
+            shutil.copy(image_path, dest)
+            self.logger.info(f"Saved embedding plot: {dest}")
+            return dest
+        except Exception as e:
+            self.logger.error(f"Error saving embedding plot: {str(e)}")
+            return None
     def save_original_file(self, 
                     source_path: str, 
                     hole_id: str, 
@@ -1524,18 +1549,22 @@ class FileManager:
             
             if ext in image_extensions:
                 try:
-                    # Read EXIF data from source
-                    exif_dict = piexif.load(source)
-                    
-                    # Write EXIF data to destination
-                    if exif_dict:
-                        piexif.insert(piexif.dump(exif_dict), destination)
-                        self.logger.debug(f"Preserved EXIF metadata for {destination}")
-                        
+                    # Only attempt EXIF read/write for JPEG or TIFF
+                    if ext.lower() in ['.jpg', '.jpeg', '.tif', '.tiff']:
+                        # Read EXIF data from source
+                        exif_dict = piexif.load(source)
+
+                        # Write EXIF data to destination if available
+                        if exif_dict:
+                            piexif.insert(piexif.dump(exif_dict), destination)
+                            self.logger.debug(f"Preserved EXIF metadata for {destination}")
+                    else:
+                        self.logger.debug(f"Skipping EXIF preservation for {destination} (unsupported format: {ext})")
+
                 except Exception as exif_error:
                     # If EXIF preservation fails, log but don't fail the copy
                     self.logger.warning(f"Could not preserve EXIF data: {exif_error}")
-                    # The file is still copied, just without EXIF
+
             
             # Copy additional file attributes
             try:

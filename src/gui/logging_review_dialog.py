@@ -19,7 +19,7 @@ import traceback
 from tkinter import filedialog
 from gui.dialog_helper import DialogHelper
 from gui.widgets.modern_button import ModernButton
-from processing.color_map_manager import ColorMapManager, ColorMapType
+from processing.LoggingReviewStep.color_map_manager import ColorMapManager, ColorMapType
 from utils.image_pan_zoom_handler import ImagePanZoomHandler
 from PIL import Image, ImageTk
 
@@ -1417,7 +1417,7 @@ class LoggingReviewDialog:
                 return self.color_map_manager.create_from_config(map_data)
             else:
                 # Manual recreation if create_from_config doesn't exist
-                from processing.color_map_manager import ColorMap
+                from processing.LoggingReviewStep.color_map_manager import ColorMap
                 
                 color_map = ColorMap(
                     name=f"{column}_custom",
@@ -1435,7 +1435,7 @@ class LoggingReviewDialog:
                     for cat, color in map_data['categories'].items():
                         color_map.add_category(cat, tuple(color))
                 elif map_type == ColorMapType.NUMERIC and 'ranges' in map_data:
-                    from processing.color_map_manager import ColorRange
+                    from processing.LoggingReviewStep.color_map_manager import ColorRange
                     for r in map_data['ranges']:
                         color_range = ColorRange(
                             r['min'],

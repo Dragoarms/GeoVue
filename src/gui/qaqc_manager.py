@@ -1,1581 +1,547 @@
+"""
+Consolidated QAQC (Quality Assurance/Quality Control) system for compartment image review.
+Combines all QAQC functionality into a single organized module.
+"""
+
 import os
 import re
-import cv2
 import shutil
-import logging
-import traceback
-import json
-import time
-from datetime import datetime
-from tkinter import ttk
+import threading
 import tkinter as tk
-from typing import List, Optional, Dict, Tuple
+from tkinter import ttk
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+import logging
+from typing import Dict, List, Optional, Tuple, Set
+import cv2
 import numpy as np
 import pandas as pd
-from pathlib import Path
-import threading
+from PIL import Image, ImageTk
 
 
-# Local imports
-from utils.json_register_manager import JSONRegisterManager
 from gui.dialog_helper import DialogHelper
-
-if threading.current_thread() != threading.main_thread():
-    raise RuntimeError("❌ QAQCManager called from a background thread!")
+from gui.progress_dialog import ProgressDialog
 
 
-class QAQCManager:
-    """
-    Manages quality assurance and quality control of extracted compartment images.
-    Provides a GUI for reviewing images and approving/rejecting them.
-    Handles synchronization between local storage, OneDrive, and register.
-    """
+# ============================================================================
+# DATA MODELS
+# ============================================================================
+
+@dataclass
+class ReviewItem:
+    """Represents a compartment image to be reviewed."""
+    filename: str
+    hole_id: str
+    depth_from: int
+    depth_to: int
+    compartment_depth: int  # The "To" value used in naming
+    image_path: str
+    duplicate_count: int = 0
+    duplicate_paths: List[str] = field(default_factory=list)
+    all_files_for_interval: Dict[str, List[str]] = field(default_factory=dict)
+    moisture: str = "unknown"  # wet/dry/unknown
+    quality: str = "unreviewed"  # OK/Blurry/Damaged/Missing/unreviewed
+    average_hex_color: str = ""
+    is_reviewed: bool = False
+    register_status: Optional[str] = None
+    _image: Optional[np.ndarray] = None
+    is_conflict_resolution: bool = False
+    conflicting_file_path: Optional[str] = None
+    chosen_action: Optional[str] = None
+    is_placeholder: bool = False
+
+    @property
+    def image(self) -> Optional[np.ndarray]:
+        """Lazy load image only when accessed."""
+        if self._image is None and self.image_path and not self.is_placeholder:
+            if os.path.exists(self.image_path):
+                self._image = cv2.imread(self.image_path)
+        return self._image
+
+    def unload_image(self):
+        """Free memory by unloading the image."""
+        self._image = None
+
+
+class QAQCConstants:
+    """Constants used throughout the QAQC system."""
+    STATUS_OK = "OK"
+    STATUS_DAMAGED = "Damaged"
+    STATUS_EMPTY = "Empty"
+    STATUS_WET = "Wet"
+    STATUS_DRY = "Dry"
     
-    def __init__(self, file_manager, translator_func, config_manager, 
-                app, logger, register_manager):
-        """
-        Initialize the QAQC Manager.
-        
-        Args:
-            file_manager: FileManager instance
-            translator_func: Translation function
-            config_manager: ConfigManager instance
-            app: Main application instance (GeoVue)
-            logger: Logger instance
-            register_manager: JSONRegisterManager instance
-        """
-        self.root = app.root # TODO - app.root? or main_app.root??
+    VALID_QAQC_STATUSES = [
+        "OK_Wet", "OK_Dry", "Damaged_Wet", "Damaged_Dry", "Empty"
+    ]
+    
+    NEEDS_REVIEW_STATUSES = [
+        "Found", None, "", "Not Set"
+    ]
+    
+    SKIP_STATUSES = [
+        "MISSING_FILE", "Not Found", "MISSING"
+    ]
+
+
+# ============================================================================
+# SCANNER COMPONENT
+# ============================================================================
+
+class QAQCScanner:
+    """Handles scanning and discovery of compartment files for QAQC."""
+    
+    def __init__(self, file_manager, register_manager, compartment_interval, logger):
         self.file_manager = file_manager
-        self.t = translator_func
-        self.config_manager = config_manager
-        self.app = app
-        self.logger = logger
         self.register_manager = register_manager
+        self.compartment_interval = compartment_interval
+        self.logger = logger
         
-        # Queue for pending trays to review
-        self.pending_trays = []
+        # Regex patterns
+        self.HOLE_ID_PATTERN = re.compile(r'^[A-Z]{2}\d{4}$')
+        self.PROJECT_CODE_PATTERN = re.compile(r'^[A-Z]{2}$')
+        self.COMPARTMENT_FILE_PATTERN = re.compile(
+            r'([A-Z]{2}\d{4})_CC_(\d{3})(?:_temp|_new|_review|_Wet|_Dry)?\.(?:png|tiff|jpg)$',
+            re.IGNORECASE
+        )
         
-        # Current tray being reviewed
-        self.current_tray = None
-        
-        # Current compartment being reviewed
-        self.current_compartment_index = 0
-        
-        # Status data for compartments
-        self.compartment_statuses = {}
-        
-        # Review window
-        self.review_window = None
-        
-        # Constants for status values
-        self.STATUS_OK = "OK"
-        self.STATUS_BLURRY = "Blurry"
-        self.STATUS_DAMAGED = "Damaged"
-        self.STATUS_MISSING = "MISSING"
-        self.STATUS_WET = "Wet"
-        self.STATUS_DRY = "Dry"
-
-        # Valid QAQC statuses that indicate review is complete
-        self.VALID_QAQC_STATUSES = [
-            "OK_Wet",       # OK + wet sample
-            "OK_Dry",       # OK + dry sample  
-            "Blurry",
-            "Damaged",
-            "Missing",
-            "MISSING"       # Alternative format for missing
-        ]
-        
-        # Statuses that need QAQC review
-        self.NEEDS_REVIEW_STATUSES = [
-            "Found",        # Synchronizer found the file
-            None,           # No status set
-            "",             # Empty status
-            "Not Set"       # Placeholder
-        ]
-        
-        # Skip these - can't review
-        self.SKIP_STATUSES = [
-            "MISSING_FILE", # File deleted from shared folder
-            "Not Found"     # Never had an image
-        ]
-        
-
-        # Dry/Wet state tracking
-
-        self.is_wet = False  # Default to Dry TODO - the toggle is a three state toggle from a custom widget - we need a third 'null' state.
-        
-
-        # Processing statistics
-
-        self.stats = {
-            'processed': 0,
-            'uploaded': 0,
-            'upload_failed': 0,
-            'saved_locally': 0,
-            'register_updated': 0,
-            'register_failed': 0
-        }
-        
-
-        # Main GUI reference for status updates
-        self.main_gui = app.main_gui if hasattr(app, 'main_gui') else None
-
-
-    def t(self, text):
-        """Translate text using DialogHelper."""
-        return DialogHelper.t(text)
+        self.compartment_register = {}
     
-    def set_main_gui(self, main_gui):
-        """Set reference to main GUI for status updates."""
-        self.main_gui = main_gui
+    def load_register_into_memory(self) -> Dict[str, pd.DataFrame]:
+        """Load compartment register efficiently."""
+        df = self.register_manager.get_compartment_data()
         
-    # def add_tray_for_review(self, hole_id: str, depth_from: int, depth_to: int, 
-    #                     original_path: str, compartments: List[np.ndarray],
-    #                     is_selective_replacement: bool = False,
-    #                     is_full_replacement: bool = False,
-    #                     corners_list: Optional[List[Dict]] = None):
-    #     """
-    #     Add a tray to the review queue. DEPRECATED
+        if df.empty:
+            return {}
         
-    #     Args:
-    #         hole_id: The hole ID
-    #         depth_from: Starting depth
-    #         depth_to: Ending depth
-    #         original_path: Path to the original image file
-    #         compartments: List of extracted compartment images
-    #         is_selective_replacement: Whether this is a selective replacement
-    #         is_full_replacement: Whether this is a full replacement (replace_all action)
-    #         corners_list: List of corner dictionaries for each compartment
-    #     """
-    #     # Save compartments with appropriate suffix
-    #     temp_paths = []
-    #     temp_review_dir = self.file_manager.get_hole_dir("temp_review", hole_id)
+        relevant_columns = ["HoleID", "From", "To", "Photo_Status"]
+        if all(col in df.columns for col in relevant_columns):
+            df = df[relevant_columns]
+        else:
+            self.logger.warning("Register missing expected columns")
+            return {}
         
-    #     for i, compartment in enumerate(compartments):
-    #         try:
-    #             depth_increment = self.app.config['compartment_interval']
-    #             comp_depth_from = depth_from + (i * depth_increment)
-    #             comp_depth_to = comp_depth_from + depth_increment
-    #             compartment_depth = int(comp_depth_to)
-                
-    #             # Determine suffix based on replacement type
-    #             if is_selective_replacement:
-    #                 suffix = "new"  # For side-by-side comparison
-    #             elif is_full_replacement:
-    #                 suffix = "temp"  # Normal processing (conflicts already deleted)
-    #             else:
-    #                 suffix = "temp"  # Normal processing
-                
-    #             file_path = self.file_manager.save_temp_compartment(
-    #                 compartment, hole_id, compartment_depth, suffix=suffix
-    #             )
-    #             temp_paths.append(file_path)
-                
-    #         except Exception as e:
-    #             self.logger.error(f"Error saving temporary compartment {i+1}: {str(e)}")
-    #             temp_paths.append(None)
+        self.compartment_register = {hole_id: group for hole_id, group in df.groupby('HoleID')}
+        return self.compartment_register
+    
+    # In qaqc_manager.py, QAQCScanner class
+    def scan_local_review_folder(self, temp_review_path: str) -> Dict[str, List[ReviewItem]]:
+        """Scan local temp_review folder for items needing review."""
+        review_items_by_hole = {}
         
-    #     # Add to pending trays
-    #     self.pending_trays.append({
-    #         'hole_id': hole_id,
-    #         'depth_from': depth_from,
-    #         'depth_to': depth_to,
-    #         'original_path': original_path,
-    #         'compartments': compartments.copy(),
-    #         'temp_paths': temp_paths,
-    #         'compartment_statuses': {},
-    #         'is_selective_replacement': is_selective_replacement,
-    #         'is_full_replacement': is_full_replacement,
-    #         'corners_list': corners_list
-    #     })
+        if not os.path.exists(temp_review_path):
+            return review_items_by_hole
         
-    #     # Log appropriate message
-    #     if is_full_replacement:
-    #         message = f"Added tray for review (full replacement): {hole_id} {depth_from}-{depth_to}m"
-    #     elif is_selective_replacement:
-    #         message = f"Added tray for review (selective replacement): {hole_id} {depth_from}-{depth_to}m"
-    #     else:
-    #         message = f"Added tray for review: {hole_id} {depth_from}-{depth_to}m"
-        
-    #     self.logger.info(f"{message} with {len(compartments)} compartments")
-        
-    #     if hasattr(self, 'main_gui') and self.main_gui:
-    #         self.main_gui.direct_status_update(message, status_type="info")
-
-    def start_review_process(self):
-        """Start the review process for all pending trays and sync with register."""
-        # CHANGED: Reset statistics at start
-        self.stats = {
-            'processed': 0,
-            'uploaded': 0,
-            'upload_failed': 0,
-            'saved_locally': 0,
-            'register_updated': 0,
-            'register_failed': 0
-        }
-        
-        # First check if we already have pending trays from previous operation
-        if self.pending_trays:
-            # Process the first tray in the queue
-            self._review_next_tray()
-            return
-        
-        # Check if there are any trays in the Compartments for Review folder
-        temp_review_dir = self.file_manager.dir_structure["temp_review"]
-        if os.path.exists(temp_review_dir):
-            # Get all hole IDs from project code subdirectories
-            hole_dirs = []
-            # First look for project code directories
-            for project_code in os.listdir(temp_review_dir):
-                project_path = os.path.join(temp_review_dir, project_code)
-                if os.path.isdir(project_path) and re.match(r'^[A-Z]{2}$', project_code):
-                    # Look for hole IDs within project folder
-                    for hole_id in os.listdir(project_path):
-                        hole_path = os.path.join(project_path, hole_id)
-                        if os.path.isdir(hole_path) and re.match(r'^[A-Z]{2}\d{4}$', hole_id):
-                            hole_dirs.append((hole_id, hole_path))
-            
-            if hole_dirs:
-                # Process temp review files
-                self._load_temp_review_files(temp_review_dir, hole_dirs)
-                
-        # Check for unregistered compartments in approved folder
-        if not self.pending_trays:
-            self._check_approved_vs_register()
-
-                # Update status if we found entries needing QAQC
-        if self.pending_trays:
-            total_compartments = sum(len(tray['compartments']) for tray in self.pending_trays)
-            needs_qaqc = sum(1 for tray in self.pending_trays if tray.get('from_register_review', False))
-            
-            if needs_qaqc > 0:
-                if hasattr(self, 'main_gui') and self.main_gui:
-                    self.main_gui.direct_status_update(
-                        f"Found {needs_qaqc} entries with 'Found' status needing QAQC review", 
-                        status_type="info"
+        # Find all compartment files
+        for root, dirs, files in os.walk(temp_review_path):
+            for file in files:
+                match = self.COMPARTMENT_FILE_PATTERN.match(file)
+                if match:
+                    hole_id = match.group(1)
+                    depth = int(match.group(2))
+                    full_path = os.path.join(root, file)
+                    
+                    # ===================================================
+                    # INSERT: Pre-load moisture status from filename
+                    moisture = "unknown"
+                    if "_Wet" in file:
+                        moisture = "Wet"
+                    elif "_Dry" in file:
+                        moisture = "Dry"
+                    # ===================================================
+                    
+                    # Create review item
+                    review_item = ReviewItem(
+                        filename=file,
+                        hole_id=hole_id,
+                        depth_from=depth - self.compartment_interval,
+                        depth_to=depth,
+                        compartment_depth=depth,
+                        image_path=full_path,
+                        register_status=self.get_register_status(hole_id, depth),
+                        # ===================================================
+                        # INSERT: Set moisture from filename
+                        moisture=moisture,
+                        quality="OK" if moisture != "unknown" else "unreviewed"
+                        # ===================================================
                     )
+                    
+                    # Add to hole's list
+                    if hole_id not in review_items_by_hole:
+                        review_items_by_hole[hole_id] = []
+                    review_items_by_hole[hole_id].append(review_item)
         
-        if not self.pending_trays:
-            DialogHelper.show_message(
-                self.root, 
-                self.t("Review Complete"), 
-                self.t("No images to review and all files are synchronized."), 
-                message_type="info"
-            )
-            return
-        
-        # Process the first tray
-        self._review_next_tray()
+        return review_items_by_hole
     
-    def _load_temp_review_files(self, temp_review_dir: str, hole_dirs: List[str]):
-        """Load compartments from temp review directory."""
-
-        # Update main GUI with loading status
-
-        if hasattr(self, 'main_gui') and self.main_gui:
-            self.main_gui.direct_status_update(f"Loading temporary review files from {len(hole_dirs)} holes...", status_type="info")
+    def scan_shared_folders_for_review(self) -> Dict[str, List[str]]:
+        """Scan shared folders for compartments needing review."""
+        items_by_hole = {}
         
-        total_compartments_loaded = 0
+        # Check review folder
+        review_path = self.file_manager.get_shared_path('review_compartments', create_if_missing=False)
+        if review_path and os.path.exists(review_path):
+            self._scan_shared_folder(review_path, items_by_hole, "review")
         
-        for hole_id, hole_dir_path in hole_dirs:
-            
-            # Find all temporary compartment images
-            temp_files = [f for f in os.listdir(hole_dir_path) 
-                        if (f.endswith('_temp.png') or f.endswith('_new.png')) and hole_id in f]
-            
-            if not temp_files:
+        # Check approved folder
+        approved_path = self.file_manager.get_shared_path('approved_compartments', create_if_missing=False)
+        if approved_path and os.path.exists(approved_path):
+            self._scan_shared_folder(approved_path, items_by_hole, "approved")
+        
+        return items_by_hole
+    
+    def _scan_shared_folder(self, base_path: str, items_by_hole: Dict[str, List[str]], folder_type: str):
+        """Scan a shared folder for compartments needing review."""
+        for project_code in os.listdir(base_path):
+            if not self.PROJECT_CODE_PATTERN.match(project_code):
                 continue
             
-    
-            # Update status for each hole being loaded
-    
-            if hasattr(self, 'main_gui') and self.main_gui:
-                self.main_gui.direct_status_update(f"Loading {len(temp_files)} compartments for hole {hole_id}...", status_type="info")
-                
-            # Extract depth range from filenames
-            depths = []
-            depth_increment = self.app.config['compartment_interval']
-            for filename in temp_files:
-                match = re.search(r'([A-Za-z]{2}\d{4})_CC_(\d{3})_(?:temp|new)\.png', filename)
-                if match:
-                    depth = int(match.group(2))
-                    depths.append(depth)
+            project_path = os.path.join(base_path, project_code)
+            if not os.path.isdir(project_path):
+                continue
             
-            if depths:
-                # Sort depths to find min and max
-                depths.sort()
-                min_depth = depths[0] - depth_increment
-                max_depth = depths[-1]
-                
-                # Load the compartment images
-                compartments = []
-                temp_paths = []
-                
-        
-                # FIXED: Use actual depths from files instead of range
-        
-                for depth in depths:
-                    # Look for both temp and new suffixes
-                    for suffix in ['temp', 'new']:
-                        filename = f"{hole_id}_CC_{depth:03d}_{suffix}.png"
-                        file_path = os.path.join(hole_dir_path, filename)
-                        
-                        if os.path.exists(file_path):
-                            # Load image
-                            img = cv2.imread(file_path)
-                            if img is not None:
-                                compartments.append(img)
-                                temp_paths.append(file_path)
-                                break
-                
-        
-                # Track actual number of compartments loaded
-        
-                total_compartments_loaded += len(compartments)
-                
-                # Create a tray entry and add to pending trays
-                tray_entry = {
-                    'hole_id': hole_id,
-                    'depth_from': min_depth,
-                    'depth_to': max_depth,
-                    'original_path': "From Temp_Review folder",
-                    'compartments': compartments,
-                    'temp_paths': temp_paths,
-                    'compartment_statuses': {}
-                }
-                
-                self.pending_trays.append(tray_entry)
-                self.logger.info(f"Added tray for review from Temp_Review folder: {hole_id} {min_depth}-{max_depth}m with {len(compartments)} compartments")
-        
-
-        # Final status update
-
-        if hasattr(self, 'main_gui') and self.main_gui:
-            self.main_gui.direct_status_update(
-                f"Loaded {total_compartments_loaded} compartments from {len(self.pending_trays)} trays for review", 
-                status_type="success"
-            )
-    
-
-    def _load_register_data(self) -> pd.DataFrame:
-        """Load compartment data from JSON register."""
-        return self.register_manager.get_compartment_data()
-
-
-    def _review_next_tray(self):
-        """Display the next tray for review."""
-        if not self.pending_trays:
-    
-            # CHANGED: Show summary and update main GUI
-    
-            self._show_final_summary()
-            return
-        
-        # Get the next tray
-        self.current_tray = self.pending_trays.pop(0)
-        self.current_compartment_index = 0
-        
-
-        # Check for auto-approve flag
-
-        if self.current_tray.get('auto_approve', False):
-            # Auto-approve all compartments
-            for i in range(len(self.current_tray['compartments'])):
-                self.current_tray['compartment_statuses'][i] = self.STATUS_OK
-            
-            # Save and move to next
-            self._save_approved_compartments()
-            self._review_next_tray()
-            return
-        
-        # Don't initialize statuses - wait for user input
-
-        self.current_tray['compartment_statuses'] = {}
-        
-        # Create review window if it doesn't exist
-        if not self.review_window or not self.review_window.winfo_exists():
-            self._create_review_window()
-        
-        # Show first compartment
-        self._show_current_compartment()
-    
-    def _save_temp_compartments(self):
-        """Save compartment images to a temporary location for review."""
-        if not self.current_tray:
-            return
-        
-        # Clear any previous temp paths
-        self.current_tray['temp_paths'] = []
-        
-        # Save each compartment
-        for i, compartment in enumerate(self.current_tray['compartments']):
-            try:
-                # Calculate compartment depth
-                depth_from = self.current_tray['depth_from']
-                depth_increment = self.app.config['compartment_interval']
-                comp_depth_from = depth_from + (i * depth_increment)
-                comp_depth_to = comp_depth_from + depth_increment
-                compartment_depth = int(comp_depth_to)
-                
-        
-                # Use FileManager to save
-                # Check if this is a selective replacement tray
-                is_selective = self.current_tray.get('is_selective_replacement', False)
-                suffix = "new" if is_selective else "temp"
-
-                # Use FileManager to save
-                file_path = self.file_manager.save_temp_compartment(
-                    compartment,
-                    self.current_tray['hole_id'],
-                    compartment_depth,
-                    suffix=suffix
-                )
-                
-                if file_path:
-                    self.current_tray['temp_paths'].append(file_path)
-                else:
-                    self.logger.error(f"Failed to save temporary compartment {i+1}")
-                    
-            except Exception as e:
-                self.logger.error(f"Error saving temporary compartment {i+1}: {str(e)}")
-
-    def _create_review_window(self):
-        """Create a window for reviewing compartments with the specified layout."""
-        # Close existing window if open
-        if self.review_window and self.review_window.winfo_exists():
-            self.review_window.destroy()
-        
-        # Create new window
-        self.review_window = tk.Toplevel(self.root)
-        
-        # Set title based on current tray
-        hole_id = self.current_tray['hole_id']
-        depth_from = self.current_tray['depth_from']
-        depth_to = self.current_tray['depth_to']
-        
-        self.review_window.title(f"QAQC - {hole_id} {depth_from}-{depth_to}")
-        
-        # Set window to appear on top and maximize
-        self.review_window.lift()  # Bring to front explicitly
-        # self.review_window.state('zoomed')  # This maximizes the window
-        
-        # Protocol for window close
-        self.review_window.protocol("WM_DELETE_WINDOW", self._on_review_window_close)
-        
-
-        # Bind keyboard shortcuts
-
-        self.review_window.bind('1', lambda e: self._set_dry_from_keyboard())
-        self.review_window.bind('2', lambda e: self._set_wet_from_keyboard())
-        self.review_window.bind('<Left>', lambda e: self._on_previous())
-        self.review_window.bind('<Right>', lambda e: self._on_next())
-        
-        # Main container frame with padding
-        main_frame = ttk.Frame(self.review_window, padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Title and progress at the top
-        title_frame = ttk.Frame(main_frame)
-        title_frame.pack(fill=tk.X)
-        
-        title_label = ttk.Label(
-            title_frame,
-            text=DialogHelper.t(f"QAQC - {hole_id} {depth_from}-{depth_to}"),
-            font=("Arial", 18, "bold")
-        )
-        title_label.pack(pady=(0, 5))
-        
-        # Progress label (Compartment x/x)
-        self.progress_label = ttk.Label(
-            title_frame,
-            text=DialogHelper.t(f"Compartment {self.current_compartment_index + 1}/{len(self.current_tray['compartments'])}"),
-            font=("Arial", 14)
-        )
-        self.progress_label.pack(pady=(0, 10))
-        
-        
-        # Main content frame for the four panels
-        content_frame = ttk.Frame(main_frame)
-        content_frame.pack(fill=tk.BOTH, expand=True, pady=10)
-        
-        # Frame 1: Existing compartment image (left side)
-        self.existing_frame = ttk.LabelFrame(content_frame, text=DialogHelper.t("Existing Image"), padding=10)
-        self.existing_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
-        
-        # Frame 2: Keep Original button
-        self.keep_original_frame = ttk.LabelFrame(content_frame, text=DialogHelper.t("Keep Original"), padding=10)
-        self.keep_original_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5)
-        
-        # Use ModernButton instead of tk.Button
-        keep_original_btn = self.app.gui_manager.create_modern_button(
-            self.keep_original_frame,
-            text=DialogHelper.t("Keep Original"),
-            color="#4a8259",  # Green color from theme
-            command=self._set_keep_original_and_next
-        )
-        keep_original_btn.pack(fill=tk.X, expand=True, padx=5, pady=20)
-        
-        # Frame 3: New compartment image
-        self.new_frame = ttk.LabelFrame(content_frame, text=DialogHelper.t("New Image"), padding=10)
-        self.new_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
-        
-        # Frame 4: Status buttons with keyboard shortcuts and summary
-        status_container = ttk.Frame(content_frame)
-        status_container.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
-        
-
-        # Sample Moisture frame
-
-        moisture_frame = ttk.LabelFrame(status_container, text=DialogHelper.t("Sample Moisture"), padding=10)
-        moisture_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        self.wet_dry_var = tk.StringVar(value="Dry" if not self.is_wet else "Wet")
-        self.wet_dry_button = self.app.gui_manager.create_modern_button(
-            moisture_frame,
-            text=self.t(f"Sample Type: {self.wet_dry_var.get()}"),
-            color="#4a8259" if not self.is_wet else "#3a7ca5",  # Green for dry, blue for wet
-            command=self._toggle_wet_dry
-        )
-        self.wet_dry_button.pack(fill=tk.X)
-        
-        # Status buttons frame
-        self.status_frame = ttk.LabelFrame(status_container, text=DialogHelper.t("Compartment Status"), padding=10)
-        self.status_frame.pack(fill=tk.X)
-        
-        # Add status buttons using ModernButton
-        ok_button = self.app.gui_manager.create_modern_button(
-            self.status_frame,
-            text=DialogHelper.t("OK"),
-            color="#4a8259",  # Green
-            command=lambda: self._set_status_and_next(self.STATUS_OK)
-        )
-        ok_button.pack(fill=tk.X, pady=5)
-        
-        blurry_button = self.app.gui_manager.create_modern_button(
-            self.status_frame,
-            text=DialogHelper.t("BLURRY"),
-            color="#9e4a4a",  # Red
-            command=lambda: self._set_status_and_next(self.STATUS_BLURRY)
-        )
-        blurry_button.pack(fill=tk.X, pady=5)
-        
-        damaged_button = self.app.gui_manager.create_modern_button(
-            self.status_frame,
-            text=DialogHelper.t("DAMAGED"),
-            color="#d68c23",  # Orange
-            command=lambda: self._set_status_and_next(self.STATUS_DAMAGED)
-        )
-        damaged_button.pack(fill=tk.X, pady=5)
-        
-        missing_button = self.app.gui_manager.create_modern_button(
-            self.status_frame,
-            text=DialogHelper.t("MISSING"),
-            color="#333333",  # Dark gray/black
-            command=lambda: self._set_status_and_next(self.STATUS_MISSING)
-        )
-        missing_button.pack(fill=tk.X, pady=5)
-        
-
-        # Keyboard shortcuts info
-
-        shortcuts_frame = ttk.LabelFrame(status_container, text=DialogHelper.t("Keyboard Shortcuts"), padding=5)
-        shortcuts_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        shortcuts_text = ttk.Label(
-            shortcuts_frame,
-            text=DialogHelper.t("1: Dry | 2: Wet\n← → Navigate (after status set)"),
-            font=("Arial", 9),
-            justify=tk.LEFT
-        )
-        shortcuts_text.pack()
-        
-
-        # Register summary box
-
-        self.summary_frame = ttk.LabelFrame(status_container, text=DialogHelper.t("Register Data"), padding=5)
-        self.summary_frame.pack(fill=tk.X, pady=(10, 0))
-        
-        self.summary_text = tk.Text(
-            self.summary_frame,
-            height=6,
-            width=25,
-            wrap=tk.WORD,
-            bg=self.app.gui_manager.theme_colors["field_bg"],
-            fg=self.app.gui_manager.theme_colors["text"],
-            font=("Arial", 9),
-            state=tk.DISABLED
-        )
-        self.summary_text.pack(fill=tk.X)
-        
-        # Frame for the previous and next buttons at the bottom
-        nav_frame = ttk.Frame(main_frame)
-        nav_frame.pack(fill=tk.X, pady=10)
-        
-        # Previous button using ModernButton
-        self.prev_button = self.app.gui_manager.create_modern_button(
-            nav_frame,
-            text=DialogHelper.t("← Previous"),
-            color="#3a7ca5",  # Blue
-            command=self._on_previous
-        )
-        self.prev_button.pack(side=tk.LEFT, padx=5)
-        
-
-        # Next button
-
-        self.next_button = self.app.gui_manager.create_modern_button(
-            nav_frame,
-            text=DialogHelper.t("Next →"),
-            color="#3a7ca5",  # Blue
-            command=self._on_next
-        )
-        self.next_button.pack(side=tk.LEFT, padx=5)
-        
-        # Initialize the compartment frames to be ready for showing the current compartment
-        self.compartment_frame = self.new_frame  # Set this for compatibility with _show_current_compartment
-        
-        # Ensure the "Keep Original" button frame is hidden initially
-        self.keep_original_frame.pack_forget()
-        self.existing_frame.pack_forget()
-
-    def _toggle_wet_dry(self):
-        """Toggle between Wet and Dry sample types."""
-        self.is_wet = not self.is_wet
-        new_state = "Wet" if self.is_wet else "Dry"
-        self.wet_dry_var.set(new_state)
-
-        # Update both text and color using helper
-        self.wet_dry_button.update_button(
-            text=self.t(f"Sample Type: {new_state}"),
-            color="#3a7ca5" if self.is_wet else "#4a8259"
-        )
-
-        
-
-        # Update register summary
-
-        self._update_register_summary()
-
-    def _set_dry_from_keyboard(self):
-        """Set sample type to Dry from keyboard shortcut."""
-        if self.is_wet:
-            self._toggle_wet_dry()
-
-    def _set_wet_from_keyboard(self):
-        """Set sample type to Wet from keyboard shortcut."""
-        if not self.is_wet:
-            self._toggle_wet_dry()
-
-    def _on_previous(self):
-        """Show the previous compartment."""
-
-        # CHANGED: Check if current has status before allowing navigation
-
-        current_status = self.current_tray['compartment_statuses'].get(self.current_compartment_index, None)
-        
-        # Can always go back if we're not at the first image
-        if self.current_compartment_index > 0:
-            self.current_compartment_index -= 1
-            self._show_current_compartment()
-
-    def _on_next(self):
-        """Move to next compartment without setting status."""
-
-        # CHANGED: Only allow navigation if status is set
-
-        current_status = self.current_tray['compartment_statuses'].get(self.current_compartment_index, None)
-        
-        if not current_status:
-            # No status set - can't navigate forward
-            DialogHelper.show_message(
-                self.review_window,
-                self.t("Status Required"),
-                self.t("Please select a status for this compartment before proceeding."),
-                message_type="warning"
-            )
-            return
-        
-        if self.current_compartment_index < len(self.current_tray['compartments']) - 1:
-            self.current_compartment_index += 1
-            self._show_current_compartment()
-
-    def _update_register_summary(self):
-        """Update the register summary display for current compartment."""
-        try:
-            self.summary_text.config(state=tk.NORMAL)
-            self.summary_text.delete(1.0, tk.END)
-            
-            # Get current compartment info
-            depth_from = self.current_tray['depth_from']
-            depth_increment = self.app.config['compartment_interval']
-            comp_depth_from = depth_from + (self.current_compartment_index * depth_increment)
-            comp_depth_to = comp_depth_from + depth_increment
-            
-            # Get status
-            status = self.current_tray['compartment_statuses'].get(self.current_compartment_index, None)
-            
-            # Build summary text
-            summary_lines = [
-                f"HoleID: {self.current_tray['hole_id']}",
-                f"From: {int(comp_depth_from)}",
-                f"To: {int(comp_depth_to)}"
-            ]
-            
-    
-            # FIXED: Only show photo status if one has been set
-    
-            if status:
-                # Map status to Photo Status
-                if status == "KEEP_ORIGINAL":
-                    photo_status = "[No Change]"
-                elif status == self.STATUS_MISSING:
-                    photo_status = "MISSING"
-                elif status in ["Wet", "Dry"]:
-                    photo_status = f"OK_{status}"
-                else:
-                    photo_status = status
-                    
-                summary_lines.append(f"Photo Status: {photo_status}")
-                summary_lines.append(f"Date: {datetime.now().strftime('%Y-%m-%d')}")
-                summary_lines.append(f"By: {os.getenv('USERNAME', 'Unknown')}")
-            else:
-                # No status set yet - just show basic info
-                summary_lines.append(f"Photo Status: [Not Set]")
-            
-            # Write summary
-            self.summary_text.insert(1.0, "\n".join(summary_lines))
-            self.summary_text.config(state=tk.DISABLED)
-            
-        except Exception as e:
-            self.logger.error(f"Error updating register summary: {str(e)}")
-
-    def _show_current_compartment(self) -> None:
-        """Display the current compartment with the specified layout."""
-        # Clear previous content from image frames
-        for widget in self.new_frame.winfo_children():
-            widget.destroy()
-        
-        for widget in self.existing_frame.winfo_children():
-            widget.destroy()
-        
-        # Update progress label
-        total_compartments = len(self.current_tray['compartments'])
-        self.progress_label.config(
-            text=DialogHelper.t(f"Compartment {self.current_compartment_index + 1}/{total_compartments}")
-        )
-        
-        # Update navigation button states
-        if hasattr(self, 'prev_button'):
-            self.prev_button.set_state("normal" if self.current_compartment_index > 0 else "disabled")
-        if hasattr(self, 'next_button'):
-            self.next_button.set_state("normal" if self.current_compartment_index < total_compartments - 1 else "disabled")
-        
-
-        # Restore wet/dry state if compartment was already reviewed
-
-        current_status = self.current_tray['compartment_statuses'].get(self.current_compartment_index, None)
-        if current_status == "Wet":
-            self.is_wet = True
-            self.wet_dry_var.set("Wet")
-            self.wet_dry_button.set_text(self.t("Sample Type: Wet"))
-            self.wet_dry_button.color = "#3a7ca5"
-            self.wet_dry_button.set_state("normal")
-        elif current_status == "Dry":
-            self.is_wet = False
-            self.wet_dry_var.set("Dry")
-            self.wet_dry_button.set_text(self.t("Sample Type: Dry"))
-            self.wet_dry_button.color = "#4a8259"
-            self.wet_dry_button.set_state("normal")
-        
-
-        # Update register summary
-
-        self._update_register_summary()
-        
-        # Calculate depth for this compartment
-        depth_from = self.current_tray['depth_from']
-        depth_increment = self.app.config['compartment_interval']
-        comp_depth_from = depth_from + (self.current_compartment_index * depth_increment)
-        comp_depth_to = comp_depth_from + depth_increment
-        compartment_depth = int(comp_depth_to)
-        
-        # Check if this is a selective replacement and find existing compartment image
-        is_selective_replacement = self.current_tray.get('is_selective_replacement', False)
-        existing_image_path = None
-        
-        if is_selective_replacement:
-            existing_image_path = self._find_existing_compartment(
-                self.current_tray['hole_id'], 
-                compartment_depth
-            )
-        
-        # Depth label for new image
-        ttk.Label(
-            self.new_frame,
-            text=DialogHelper.t(f"Depth: {int(comp_depth_from)}-{int(comp_depth_to)}m"),
-            font=("Arial", 14, "bold")
-        ).pack(pady=(0, 10))
-        
-        # --- NEW IMAGE (current compartment) ---
-        if self.current_compartment_index < len(self.current_tray['compartments']):
-            current_img_data = self.current_tray['compartments'][self.current_compartment_index]
-            
-            self.logger.info(f"Loading compartment image for index {self.current_compartment_index}")
-            self.logger.info(f"Image shape: {current_img_data.shape if hasattr(current_img_data, 'shape') else 'Not a numpy array'}")
-            
-            if current_img_data is not None and hasattr(current_img_data, 'shape'):
-                from PIL import Image, ImageTk
-                if len(current_img_data.shape) == 2:
-                    display_img = cv2.cvtColor(current_img_data, cv2.COLOR_GRAY2RGB)
-                else:
-                    display_img = cv2.cvtColor(current_img_data, cv2.COLOR_BGR2RGB)
-                
-                h, w = display_img.shape[:2]
-                screen_height = self.review_window.winfo_screenheight()
-                max_height = int(screen_height * 0.9)
-                if h > max_height:
-                    scale = max_height / h
-                    new_width = int(w * scale)
-                    display_img = cv2.resize(display_img, (new_width, max_height), interpolation=cv2.INTER_AREA)
-                
-                pil_img = Image.fromarray(display_img)
-                tk_img = ImageTk.PhotoImage(image=pil_img)
-                
-                img_label = ttk.Label(self.new_frame, image=tk_img)
-                img_label.image = tk_img  # Keep reference
-                img_label.pack(padx=10, pady=10)
-            else:
-                ttk.Label(
-                    self.new_frame,
-                    text=DialogHelper.t("No image available for this compartment"),
-                    foreground="red",
-                    font=("Arial", 12)
-                ).pack(pady=50)
-                self.logger.error(f"No valid image data for compartment index {self.current_compartment_index}")
-        else:
-            ttk.Label(
-                self.new_frame,
-                text=DialogHelper.t("Compartment index out of range"),
-                foreground="red",
-                font=("Arial", 12)
-            ).pack(pady=50)
-            self.logger.error(f"Compartment index {self.current_compartment_index} out of range (total: {len(self.current_tray['compartments'])})")
-        
-        # --- EXISTING IMAGE (optional) ---
-        if existing_image_path:
-            self.existing_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
-            self.keep_original_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5)
-            
-            ttk.Label(
-                self.existing_frame,
-                text=DialogHelper.t(f"Existing Depth: {int(comp_depth_from)}-{int(comp_depth_to)}m"),
-                font=("Arial", 14, "bold")
-            ).pack(pady=(0, 10))
-            
-            try:
-                existing_img = cv2.imread(existing_image_path)
-                if existing_img is not None:
-                    if len(existing_img.shape) == 2:
-                        display_img = cv2.cvtColor(existing_img, cv2.COLOR_GRAY2RGB)
-                    else:
-                        display_img = cv2.cvtColor(existing_img, cv2.COLOR_BGR2RGB)
-                    
-                    h, w = display_img.shape[:2]
-                    screen_height = self.review_window.winfo_screenheight()
-                    max_height = int(screen_height * 0.8)
-                    if h > max_height:
-                        scale = max_height / h
-                        new_width = int(w * scale)
-                        display_img = cv2.resize(display_img, (new_width, max_height), interpolation=cv2.INTER_AREA)
-                    
-                    from PIL import Image, ImageTk
-                    pil_img = Image.fromarray(display_img)
-                    tk_img = ImageTk.PhotoImage(image=pil_img)
-                    
-                    img_label = ttk.Label(self.existing_frame, image=tk_img)
-                    img_label.image = tk_img
-                    img_label.pack(padx=10, pady=10)
-                    
-                    self.current_tray['existing_paths'] = self.current_tray.get('existing_paths', {})
-                    self.current_tray['existing_paths'][self.current_compartment_index] = existing_image_path
-                    
-                    self.logger.info(f"Loaded existing image for comparison: {existing_image_path}")
-                else:
-                    ttk.Label(
-                        self.existing_frame,
-                        text=DialogHelper.t("Could not load existing image"),
-                        foreground="red",
-                        font=("Arial", 12)
-                    ).pack(pady=50)
-                    self.logger.warning(f"Could not load existing image: {existing_image_path}")
-            except Exception as e:
-                self.logger.error(f"Error loading existing compartment: {str(e)}")
-                ttk.Label(
-                    self.existing_frame,
-                    text=DialogHelper.t(f"Error: {str(e)}"),
-                    foreground="red",
-                    font=("Arial", 12)
-                ).pack(pady=50)
-        else:
-            self.existing_frame.pack_forget()
-            self.keep_original_frame.pack_forget()
-        
-        # Update window title
-        self.review_window.title(
-            f"QAQC - {self.current_tray['hole_id']} {self.current_tray['depth_from']}-{self.current_tray['depth_to']} - "
-            f"Compartment {self.current_compartment_index+1}/{total_compartments}"
-        )
-
-    def _find_all_existing_compartments(self, hole_id: str, compartment_depth: int) -> Dict[str, List[str]]:
-        """
-        Find all existing compartment images organized by moisture classification.
-        
-        Returns:
-            Dict with keys 'wet', 'dry', 'unknown' containing lists of file paths
-        """
-        existing = {'wet': [], 'dry': [], 'unknown': []}
-        project_code = hole_id[:2].upper() if len(hole_id) >= 2 else ""
-        
-        # Define search locations
-        search_locations = []
-        
-        # Shared folders
-        for folder_key in ['approved_compartments', 'review_compartments']:
-            path = self.file_manager.get_shared_path(folder_key, create_if_missing=False)
-            if path:
-                search_locations.append(os.path.join(path, project_code, hole_id))
-        
-        # Local folders
-        for folder_type in ['approved_compartments', 'temp_review']:
-            search_locations.append(self.file_manager.get_hole_dir(folder_type, hole_id))
-        
-        # Search all locations
-        for location in search_locations:
-            if os.path.exists(location):
-                for file in os.listdir(location):
-                    if f"{hole_id}_CC_{compartment_depth:03d}" in file:
-                        full_path = os.path.join(location, file)
-                        
-                        # Classify by moisture type
-                        if '_Wet' in file or '_wet' in file:
-                            existing['wet'].append(full_path)
-                        elif '_Dry' in file or '_dry' in file:
-                            existing['dry'].append(full_path)
-                        else:
-                            # No clear classification
-                            existing['unknown'].append(full_path)
-        
-        return existing
-    
-    def _set_status_and_next(self, status):
-        """Set the status for the current compartment and move to the next one."""
-
-        # CHANGED: Include wet/dry in status if OK
-
-        if status == self.STATUS_OK:
-            status = "Wet" if self.is_wet else "Dry"
-        
-        # Save current status
-        self.current_tray['compartment_statuses'][self.current_compartment_index] = status
-        
-        # Check if we have more compartments to review
-        if self.current_compartment_index < len(self.current_tray['compartments']) - 1:
-            # Move to next compartment
-            self.current_compartment_index += 1
-            self._show_current_compartment()
-        else:
-    
-            # CHANGED: Save and move to next tray silently
-    
-            self._complete_current_tray()
-    
-    def _set_keep_original_and_next(self) -> None:
-        """Mark the current compartment to keep the original and move to next."""
-        # Store keep_original flag in the status dictionary
-        self.current_tray['compartment_statuses'][self.current_compartment_index] = "KEEP_ORIGINAL"
-        
-        # Also store the existing image path if we have it
-        if hasattr(self.current_tray, 'existing_paths') and self.current_compartment_index in self.current_tray.get('existing_paths', {}):
-            self.current_tray['kept_original_paths'] = self.current_tray.get('kept_original_paths', {})
-            self.current_tray['kept_original_paths'][self.current_compartment_index] = self.current_tray['existing_paths'][self.current_compartment_index]
-            self.logger.info(f"Marked compartment {self.current_compartment_index+1} to keep original image")
-        
-        # Move to the next compartment
-        if self.current_compartment_index < len(self.current_tray['compartments']) - 1:
-            self.current_compartment_index += 1
-            self._show_current_compartment()
-        else:
-            # Save and move to next tray silently
-            self._complete_current_tray()
-    
-    def _complete_current_tray(self):
-        """Complete processing of current tray and move to next."""
-        # Save approved compartments
-        self._save_approved_compartments()
-        
-
-        # Process next tray
-        self._review_next_tray()
-    
-    def _on_review_window_close(self):
-        """Handle review window close event."""
-        # ===================================================
-        # CHANGED: Simplified close handling
-        # ===================================================
-        if DialogHelper.confirm_dialog(
-            self.review_window,
-            DialogHelper.t("Unsaved Changes"),
-            DialogHelper.t("There are unsaved changes. Save before closing?"),
-            yes_text=DialogHelper.t("Save & Close"),
-            no_text=DialogHelper.t("Close Without Saving")
-        ):
-            # Save current progress
-            if self.current_compartment_index > 0:
-                # Only save compartments that have been reviewed
-                reviewed_compartments = self.current_tray['compartments'][:self.current_compartment_index]
-                reviewed_statuses = {i: self.current_tray['compartment_statuses'].get(i, self.STATUS_OK) 
-                                for i in range(self.current_compartment_index)}
-                
-                # Update current tray to only include reviewed items
-                original_compartments = self.current_tray['compartments']
-                original_statuses = self.current_tray['compartment_statuses']
-                
-                self.current_tray['compartments'] = reviewed_compartments
-                self.current_tray['compartment_statuses'] = reviewed_statuses
-                
-                # Save the reviewed compartments
-                self._save_approved_compartments()
-
-                
-                # Restore original data for unreviewed compartments
-                self.current_tray['compartments'] = original_compartments[self.current_compartment_index:]
-                self.current_tray['compartment_statuses'] = {
-                    i-self.current_compartment_index: original_statuses.get(i, self.STATUS_OK) 
-                    for i in range(self.current_compartment_index, len(original_compartments))
-                }
-                
-                # Check if there are unreviewed compartments
-                if self.current_tray['compartments']:
-                    # ===================================================
-                    # Ask user if they want to move unreviewed compartments to shared folder
-                    # ===================================================
-                    if DialogHelper.confirm_dialog(
-                        self.review_window,
-                        DialogHelper.t("Unreviewed Compartments"),
-                        DialogHelper.t("There are unreviewed compartments. Move them to shared folder for later review?").format(
-                            len(self.current_tray['compartments'])
-                        ),
-                        yes_text=DialogHelper.t("Move to Shared Folder"),
-                        no_text=DialogHelper.t("Keep Local Only")
-                    ):
-                        # Move unreviewed compartments to shared folder
-                        self._move_unreviewed_to_shared()
-                    else:
-                        # Re-add current tray to pending if keeping local
-                        self.pending_trays.insert(0, self.current_tray)
-        
-        # Show summary
-        self._show_final_summary()
-        
-        # Destroy window
-        self.review_window.destroy()
-        self.review_window = None
-
-
-    def _check_approved_vs_register(self):
-        """Check for discrepancies between approved folder and register."""
-        try:
-            # ===================================================
-            # Get shared paths using FileManager
-            # ===================================================
-            approved_path = self.file_manager.get_shared_path('approved_compartments', create_if_missing=False)
-            register_path = self.file_manager.get_shared_path('register_excel', create_if_missing=False)
-            
-            if not approved_path or not register_path:
-                self.logger.warning("Cannot sync - shared folder paths not configured")
-                return
-                
-            # Get compartment data from JSON register
-            register_df = self.register_manager.get_compartment_data()
-            
-            if register_df.empty:
-                self.logger.info("Register is empty - nothing to check")
-
-            else:
-                # Find entries that need QAQC review
-                needs_qaqc = register_df[
-                    (register_df['Photo_Status'].isin(self.NEEDS_REVIEW_STATUSES) | 
-                    register_df['Photo_Status'].isna()) &
-                    ~register_df['Photo_Status'].isin(self.SKIP_STATUSES)
-                ]
-                
-                if not needs_qaqc.empty:
-                    self.logger.info(f"Found {len(needs_qaqc)} register entries needing QAQC review")
-                    
-                    # Group by hole
-                    holes_needing_review = {}
-                    for _, row in needs_qaqc.iterrows():
-                        hole_id = row['HoleID']
-                        depth_to = int(row['To'])
-                        
-                        if hole_id not in holes_needing_review:
-                            holes_needing_review[hole_id] = []
-                        holes_needing_review[hole_id].append((depth_to, row))
-                    
-                    # Create review entries for each hole
-                    for hole_id, depth_data in holes_needing_review.items():
-                        # Sort by depth
-                        depth_data.sort(key=lambda x: x[0])
-                        
-                        # Load compartment images from approved folder
-                        compartments = []
-                        temp_paths = []
-                        depths = []
-                        
-                        project_code = hole_id[:2].upper() if len(hole_id) >= 2 else ""
-                        hole_path = os.path.join(approved_path, project_code, hole_id)
-                        if os.path.exists(hole_path):
-                            for depth_to, row in depth_data:
-                                # Look for compartment image
-                                found = False
-                                for file in os.listdir(hole_path):
-                                    if f"{hole_id}_CC_{depth_to:03d}" in file:
-                                        file_path = os.path.join(hole_path, file)
-                                        img = cv2.imread(file_path)
-                                        if img is not None:
-                                            compartments.append(img)
-                                            temp_paths.append(file_path)
-                                            depths.append(depth_to)
-                                            found = True
-                                            break
-                                
-                                if not found:
-                                    self.logger.warning(f"Could not find image for {hole_id} depth {depth_to}")
-                        
-                        if compartments:
-                            # Create tray entry
-                            depth_increment = self.app.config['compartment_interval']
-                            min_depth = min(depths) - depth_increment
-                            max_depth = max(depths)
-                            
-                            tray_entry = {
-                                'hole_id': hole_id,
-                                'depth_from': min_depth,
-                                'depth_to': max_depth,
-                                'original_path': "From Register - Needs QAQC",
-                                'compartments': compartments,
-                                'temp_paths': temp_paths,
-                                'compartment_statuses': {},
-                                'from_register_review': True  # Flag to identify these
-                            }
-                            
-                            self.pending_trays.append(tray_entry)
-                            self.logger.info(f"Added {len(compartments)} compartments from {hole_id} for QAQC review")
-
-            
-            # Get all compartments from approved folder
-            approved_compartments = set()
-            if os.path.exists(approved_path):
-                # Look for project code directories first
-                for project_code in os.listdir(approved_path):
-                    project_path = os.path.join(approved_path, project_code)
-                    if os.path.isdir(project_path) and re.match(r'^[A-Z]{2}$', project_code):
-                        # Then look for hole IDs within project folder
-                        for hole_id in os.listdir(project_path):
-                            hole_path = os.path.join(project_path, hole_id)
-                            if os.path.isdir(hole_path) and re.match(r'^[A-Z]{2}\d{4}$', hole_id):
-                                # Now look for compartment files within the hole directory
-                                for file in os.listdir(hole_path):
-                                    match = re.search(r'([A-Za-z]{2}\d{4})_CC_(\d{3})(?:_Dry|_Wet)?\.(?:png|tiff|jpg)', file)
-                                    if match:
-                                        hole_id = match.group(1)
-                                        depth = int(match.group(2))
-                                        approved_compartments.add((hole_id, depth))
-            
-            # ===================================================
-            # Check for compartments in review folder
-            # ===================================================
-            review_path = self.file_manager.get_shared_path('review_compartments', create_if_missing=False)
-            if review_path and os.path.exists(review_path):
-                review_compartments = []
-                # Look for project code directories
-                for project_code in os.listdir(review_path):
-                    project_path = os.path.join(review_path, project_code)
-                    if os.path.isdir(project_path) and re.match(r'^[A-Z]{2}$', project_code):
-                        # Look for hole IDs
-                        for hole_id in os.listdir(project_path):
-                            hole_path = os.path.join(project_path, hole_id)
-                            if os.path.isdir(hole_path) and re.match(r'^[A-Z]{2}\d{4}$', hole_id):
-                                # Count review files
-                                review_files = [f for f in os.listdir(hole_path) 
-                                            if f.endswith('_review.png')]
-                                if review_files:
-                                    review_compartments.append((hole_id, len(review_files)))
-                
-                if review_compartments:
-                    self.logger.info(f"Found compartments awaiting review in shared folder:")
-                    for hole_id, count in review_compartments:
-                        self.logger.info(f"  {hole_id}: {count} compartments")
-            
-            # Get all compartments from register
-            register_compartments = set()
-            for _, row in register_df.iterrows():
-                if pd.notna(row.get('HoleID')) and pd.notna(row.get('To')):
-                    register_compartments.add((row['HoleID'], int(row['To'])))
-            
-            # Find compartments in approved but not in register
-            unregistered = approved_compartments - register_compartments
-            
-            # Find compartments in register but not in approved
-            missing = register_compartments - approved_compartments
-            
-            # Update register for missing compartments
-            if missing:
-                self.logger.info(f"Found {len(missing)} compartments in register but not in approved folder")
-                for hole_id, depth in missing:
-                    # ===================================================
-                    # Use register_manager to update status instead of direct DataFrame manipulation
-                    # ===================================================
-                    self.register_manager.update_compartment(
-                        hole_id=hole_id,
-                        depth_from=depth - self.app.config['compartment_interval'],
-                        depth_to=depth,
-                        photo_status='MISSING',
-                        comments='Not found in approved folder during sync check'
-                    )
-                    self.stats['register_updated'] += 1
-            
-            # Create review entries for unregistered compartments
-            if unregistered:
-                self.logger.info(f"Found {len(unregistered)} compartments in approved folder but not in register")
-                
-                # Group by hole
-                holes = {}
-                for hole_id, depth in unregistered:
-                    if hole_id not in holes:
-                        holes[hole_id] = []
-                    holes[hole_id].append(depth)
-                
-                # Create review entries
-                for hole_id, depths in holes.items():
-                    depths.sort()
-                    
-                    # Load compartment images
-                    compartments = []
-                    temp_paths = []
-                    
-                    for depth in depths:
-                        # Find the file with project code organization
-                        project_code = hole_id[:2].upper() if len(hole_id) >= 2 else ""
-                        hole_path = os.path.join(approved_path, project_code, hole_id)
-                        
-                        if os.path.exists(hole_path):
-                            for file in os.listdir(hole_path):
-                                if f"{hole_id}_CC_{depth:03d}" in file:
-                                    file_path = os.path.join(hole_path, file)
-                                    img = cv2.imread(file_path)
-                                    if img is not None:
-                                        compartments.append(img)
-                                        temp_paths.append(file_path)
-                                        break
-                    
-                    if compartments:
-                        # Create tray entry
-                        depth_increment = self.app.config['compartment_interval']
-                        min_depth = min(depths) - depth_increment
-                        max_depth = max(depths)
-                        
-                        tray_entry = {
-                            'hole_id': hole_id,
-                            'depth_from': min_depth,
-                            'depth_to': max_depth,
-                            'original_path': "From Approved folder",
-                            'compartments': compartments,
-                            'temp_paths': temp_paths,
-                            'compartment_statuses': {},
-                            'auto_approve': True  # Flag to auto-approve these
-                        }
-                        
-                        self.pending_trays.append(tray_entry)
-            
-            # ===================================================
-            # REMOVED: _save_register_with_lock call (method doesn't exist)
-            # Register updates are now handled through register_manager
-            # ===================================================
-                
-        except Exception as e:
-            self.logger.error(f"Error checking approved vs register: {str(e)}")
-            self.logger.error(traceback.format_exc())
-
-    def _move_unreviewed_to_shared(self):
-        """Move unreviewed compartments to shared Compartment Images for Review folder."""
-        try:
-            # ===================================================
-            # Get the shared review compartments folder
-            # ===================================================
-            review_path = self.file_manager.get_shared_path('review_compartments', create_if_missing=True)
-            if not review_path:
-                self.logger.warning("Shared review compartments path not configured")
-                return
-            
-            hole_id = self.current_tray['hole_id']
-            project_code = hole_id[:2].upper() if len(hole_id) >= 2 else ""
-            
-            # Create project code and hole ID folders
-            shared_hole_path = os.path.join(review_path, project_code, hole_id)
-            os.makedirs(shared_hole_path, exist_ok=True)
-            
-            # Get starting index for unreviewed compartments
-            start_index = self.current_compartment_index
-            depth_from = self.current_tray['depth_from']
-            depth_increment = self.app.config['compartment_interval']
-            
-            moved_count = 0
-            for i, compartment in enumerate(self.current_tray['compartments']):
-                try:
-                    # Calculate compartment depth
-                    actual_index = start_index + i
-                    comp_depth_from = depth_from + (actual_index * depth_increment)
-                    comp_depth_to = comp_depth_from + depth_increment
-                    compartment_depth = int(comp_depth_to)
-                    
-                    # Create filename
-                    filename = f"{hole_id}_CC_{compartment_depth:03d}_review.png"
-                    file_path = os.path.join(shared_hole_path, filename)
-                    
-                    # Save the compartment image
-                    cv2.imwrite(file_path, compartment)
-                    moved_count += 1
-                    
-                    self.logger.info(f"Moved unreviewed compartment to shared folder: {filename}")
-                    
-                except Exception as e:
-                    self.logger.error(f"Error moving compartment {actual_index+1} to shared folder: {str(e)}")
-            
-            # Clean up local temp files
-            if 'temp_paths' in self.current_tray:
-                for temp_path in self.current_tray['temp_paths'][start_index:]:
-                    if temp_path and os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except Exception as e:
-                            self.logger.warning(f"Could not remove temp file {temp_path}: {str(e)}")
-            
-            # Update stats
-            self.stats['saved_locally'] += moved_count
-            
-            # Show message to user
-            DialogHelper.show_message(
-                self.review_window,
-                DialogHelper.t("Compartments Moved"),
-                DialogHelper.t("{} unreviewed compartments moved to shared folder for later review.").format(moved_count),
-                message_type="info"
-            )
-            
-            self.logger.info(f"Moved {moved_count} unreviewed compartments to shared review folder")
-            
-        except Exception as e:
-            self.logger.error(f"Error moving unreviewed compartments to shared folder: {str(e)}")
-            self.logger.error(traceback.format_exc())
-
-    def _save_approved_compartments(self):
-        """Save approved compartments using FileManager."""
-        if not self.current_tray:
-            return
-        
-        hole_id = self.current_tray['hole_id']
-        depth_from = self.current_tray['depth_from']
-        interval = self.app.config['compartment_interval']
-        
-        # Save each compartment
-        for i, compartment in enumerate(self.current_tray['compartments']):
-            # Calculate depth
-            comp_depth_from = depth_from + (i * interval)
-            comp_depth_to = comp_depth_from + interval
-            compartment_depth = int(comp_depth_to)
-            
-            # Get status
-            status = self.current_tray['compartment_statuses'].get(i, self.STATUS_OK)
-            
-            # Save using FileManager
-            result = self.file_manager.save_reviewed_compartment(
-                image=compartment,
-                hole_id=hole_id,
-                compartment_depth=compartment_depth,
-                status=status,
-                output_format=self.app.config['output_format']
-            )
-            
-            # Update stats
-            if result['local_path']:
-                self.stats['saved_locally'] += 1
-                self.stats['processed'] += 1
-                
-            if result['upload_success']:
-                self.stats['uploaded'] += 1
-            elif result['local_path'] and not result['upload_success']:
-                self.stats['upload_failed'] += 1
-        
-        # Update register with corners
-        self._update_register()
-        
-        # Cleanup temp files using FileManager TODO - make sure this verifies that the save has been successful before deleting
-        self.file_manager.cleanup_temp_compartments(
-            hole_id=self.current_tray['hole_id'],
-            temp_paths=self.current_tray.get('temp_paths', [])
-        )
-
-    def _update_register(self):
-        """Update register with compartment statuses and corners."""
-        if not self.current_tray:
-            return
-        
-        try:
-            # Prepare batch updates
-            updates = []
-            
-            hole_id = self.current_tray['hole_id']
-            depth_from = self.current_tray['depth_from']
-            interval = self.app.config['compartment_interval']
-            corners_list = self.current_tray.get('corners_list', [])
-            
-            # Build updates for each compartment
-            for i, compartment in enumerate(self.current_tray['compartments']):
-                # Get status
-                status = self.current_tray['compartment_statuses'].get(i, self.STATUS_OK)
-                
-                # Skip if keeping original
-                if status == "KEEP_ORIGINAL":
+            for hole_id in os.listdir(project_path):
+                if not self.HOLE_ID_PATTERN.match(hole_id):
                     continue
                 
-                # Calculate depth
-                comp_depth_from = depth_from + (i * interval)
-                comp_depth_to = comp_depth_from + interval
+                hole_path = os.path.join(project_path, hole_id)
+                if not os.path.isdir(hole_path):
+                    continue
                 
-                # Map status to photo status
-                if status == self.STATUS_MISSING:
-                    photo_status = "MISSING"
-                elif status in ["Wet", "Dry"]:
-                    photo_status = f"OK_{status}"
-                else:
-                    photo_status = status
-                
-                # Build update
-                update = {
-                    'hole_id': hole_id,
-                    'depth_from': int(comp_depth_from),
-                    'depth_to': int(comp_depth_to),
-                    'photo_status': photo_status
-                }
-                
-                if corners_list and i < len(corners_list):
-                    update['corners'] = corners_list[i]
-                
-                updates.append(update)
+                for file in os.listdir(hole_path):
+                    match = self.COMPARTMENT_FILE_PATTERN.match(file)
+                    if match:
+                        depth = int(match.group(2))
+                        register_status = self.get_register_status(hole_id, depth)
+                        
+                        if folder_type == "review" or register_status in QAQCConstants.NEEDS_REVIEW_STATUSES:
+                            full_path = os.path.join(hole_path, file)
+                            if hole_id not in items_by_hole:
+                                items_by_hole[hole_id] = []
+                            items_by_hole[hole_id].append(full_path)
+    
+    def get_register_status(self, hole_id: str, depth_to: int) -> Optional[str]:
+        """Get the current Photo_Status from register for a compartment."""
+        if hole_id in self.compartment_register:
+            df = self.compartment_register[hole_id]
+            matching = df[df['To'] == depth_to]
+            if not matching.empty:
+                return matching.iloc[0].get('Photo_Status')
+        return None
+    
+    def scan_specific_files(self, file_paths: List[str]) -> List[ReviewItem]:
+        """Create ReviewItems from specific file paths."""
+        review_items = []
+        
+        for file_path in file_paths:
+            if not os.path.exists(file_path):
+                continue
             
-            # Batch update compartments
-            if updates:
+            filename = os.path.basename(file_path)
+            match = self.COMPARTMENT_FILE_PATTERN.match(filename)
+            
+            if match:
+                hole_id = match.group(1)
+                depth = int(match.group(2))
+                
+                review_item = ReviewItem(
+                    filename=filename,
+                    hole_id=hole_id,
+                    depth_from=depth - self.compartment_interval,
+                    depth_to=depth,
+                    compartment_depth=depth,
+                    image_path=file_path,
+                    register_status=self.get_register_status(hole_id, depth)
+                )
+                
+                review_items.append(review_item)
+        
+        return review_items
+
+
+# ============================================================================
+# PROCESSOR COMPONENT
+# ============================================================================
+
+class QAQCProcessor:
+    """Handles batch processing, saving, and register updates for QAQC."""
+    
+    def __init__(self, file_manager, register_manager, config, logger):
+        self.file_manager = file_manager
+        self.register_manager = register_manager
+        self.config = config
+        self.logger = logger
+        
+        self.COMPARTMENT_FILE_PATTERN = re.compile(
+            r'([A-Z]{2}\d{4})_CC_(\d{3})(?:_temp|_new|_review|_Wet|_Dry)?\.(?:png|tiff|jpg)$',
+            re.IGNORECASE
+        )
+        
+        self.stats = {
+            'processed': 0,
+            'uploaded': 0,
+            'upload_failed': 0,
+            'saved_locally': 0,
+            'register_updated': 0,
+            'register_failed': 0
+        }
+    
+    def reset_stats(self):
+        """Reset processing statistics."""
+        self.stats = {k: 0 for k in self.stats}
+    
+    def batch_process_reviewed_items(self, review_items: List[ReviewItem]):
+        """Batch process all reviewed items for efficiency."""
+        to_save = []
+        to_update_register = []
+        to_delete = []
+        
+        for item in review_items:
+            if not item.is_reviewed:
+                continue
+            
+            if item.quality in ["OK", "Damaged"]:
+                to_save.append(item)
+                to_update_register.append(item)
+            elif item.quality == "Missing":
+                to_delete.append(item.image_path)
+        
+        # Batch operations
+        if to_save:
+            self._batch_save_compartments(to_save)
+        if to_update_register:
+            self._batch_update_register(to_update_register)
+        if to_delete:
+            self._batch_delete_files(to_delete)
+    
+    def _batch_save_compartments(self, items: List[ReviewItem]):
+        """Batch save reviewed compartments."""
+        for item in items:
+            try:
+                # ===================================================
+                # INSERT: Check if file already has the correct suffix
+                current_suffix = None
+                if "_Wet" in item.filename:
+                    current_suffix = "Wet"
+                elif "_Dry" in item.filename:
+                    current_suffix = "Dry"
+                
+                # Skip if already has correct suffix
+                if current_suffix == item.moisture:
+                    self.logger.info(f"File already has correct suffix: {item.filename}")
+                    self.stats['processed'] += 1
+                    continue
+                # ===================================================
+                
+                # Determine final status
+                if item.moisture in ["Wet", "Dry"]:
+                    status = item.moisture
+                else:
+                    status = "unknown"
+                
+                # Save using FileManager
+                result = self.file_manager.save_reviewed_compartment(
+                    image=item.image,
+                    hole_id=item.hole_id,
+                    compartment_depth=item.compartment_depth,
+                    status=status,
+                    output_format=self.config.get('output_format', 'png')
+                )
+                
+                # Update stats
+                if result.get('local_path'):
+                    self.stats['saved_locally'] += 1
+                    self.stats['processed'] += 1
+                
+                if result.get('upload_success'):
+                    self.stats['uploaded'] += 1
+                elif result.get('local_path') and not result.get('upload_success'):
+                    self.stats['upload_failed'] += 1
+                    
+            except Exception as e:
+                self.logger.error(f"Error saving compartment {item.hole_id}_{item.compartment_depth}: {e}")
+    
+    def _batch_update_register(self, items: List[ReviewItem]):
+        """Batch update register entries."""
+        updates = []
+        
+        for item in items:
+            # Determine photo status
+            if item.quality == "OK" and item.moisture in ["Wet", "Dry"]:
+                photo_status = f"OK_{item.moisture}"
+            elif item.quality == "Damaged" and item.moisture in ["Wet", "Dry"]:
+                photo_status = f"Damaged_{item.moisture}"
+            else:
+                photo_status = item.quality
+            
+            update = {
+                'hole_id': item.hole_id,
+                'depth_from': int(item.depth_from),
+                'depth_to': int(item.depth_to),
+                'photo_status': photo_status,
+                'comments': f"QAQC reviewed on {datetime.now().strftime('%Y-%m-%d')}",
+                'qaqc_by': os.getenv('USERNAME', 'Unknown'),
+                'qaqc_date': datetime.now().strftime('%Y-%m-%d')
+            }
+            
+            if item.average_hex_color:
+                update['average_hex_color'] = item.average_hex_color
+            
+            updates.append(update)
+        
+        if updates:
+            try:
                 updated = self.register_manager.batch_update_compartments(updates)
                 self.stats['register_updated'] += updated
                 self.stats['register_failed'] += len(updates) - updated
-                
-                if updated < len(updates):
-                    self.logger.warning(f"Only {updated}/{len(updates)} register updates succeeded")
-            
-            # Update original image entry in register
-            if self.current_tray['original_path'] not in ["From Temp_Review folder", "From Approved folder"]:
-                success = self.register_manager.update_original_image(
-                    hole_id=hole_id,
-                    depth_from=self.current_tray['depth_from'],
-                    depth_to=self.current_tray['depth_to'],
-                    original_filename=os.path.basename(self.current_tray['original_path']),
-                    is_approved=True,
-                    upload_success=True
-                )
-                if not success:
-                    self.logger.error("Failed to update original image register entry")
-                    
-        except Exception as e:
-            self.logger.error(f"Error updating register: {e}")
-            self.logger.error(traceback.format_exc())
-            self.stats['register_failed'] += len(self.current_tray['compartments'])
-
-    def _update_register(self):
-            """Update the register with the approved compartments."""
-            try:
-                if not self.current_tray:
-                    return
-                    
-                # Prepare data
-                hole_id = self.current_tray['hole_id']
-                depth_from = self.current_tray['depth_from']
-                compartment_interval = self.app.config['compartment_interval']
-                
-                # Prepare batch updates
-                updates = []
-                
-                # Update each compartment
-                for i, compartment in enumerate(self.current_tray['compartments']):
-                    # Calculate compartment depth TODO - this needs to be updated to calculate the interval from the depth range on the tray - i.e use the config's 'compartment_count' value but then check the spacings between the depths in the trays (i.e 2,4,6,8 etc would indicate a spacing of 2, but it must be robust enough to handle missing compartments)
-                    comp_depth_from = depth_from + (i * compartment_interval)
-                    comp_depth_to = comp_depth_from + compartment_interval
-                    
-                    # Get status
-                    status = self.current_tray['compartment_statuses'].get(i, self.STATUS_OK)
-                    
-                    # Skip if keeping original
-                    if status == "KEEP_ORIGINAL":
-                        continue
-                    
-                    # Map status to Photo Status
-                    if status == self.STATUS_MISSING:
-                        photo_status = "MISSING"
-                    elif status in ["Wet", "Dry"]:
-                        photo_status = f"OK_{status}"
-                    else:
-                        photo_status = status
-                    
-                    # Add to batch
-                    updates.append({
-                        'hole_id': hole_id,
-                        'depth_from': int(comp_depth_from),
-                        'depth_to': int(comp_depth_to),
-                        'photo_status': photo_status
-                    })
-                
-                # Batch update
-                if updates:
-                    updated = self.register_manager.batch_update_compartments(updates)
-                    self.stats['register_updated'] += updated
-                    self.stats['register_failed'] += len(updates) - updated
-                    
-                    if updated < len(updates):
-                        self.logger.warning(f"Only {updated}/{len(updates)} register updates succeeded")
-                
-                # Update original image entry if this was from a real image
-                if self.current_tray['original_path'] not in ["From Temp_Review folder", "From Approved folder"]:
-                    original_filename = os.path.basename(self.current_tray['original_path'])
-                    success = self.register_manager.update_original_image(
-                        hole_id,
-                        self.current_tray['depth_from'],
-                        self.current_tray['depth_to'],
-                        original_filename,
-                        is_approved=True,
-                        upload_success=True
-                    )
-                    if not success:
-                        self.logger.error("Failed to update original image register entry")
-                        
             except Exception as e:
-                self.logger.error(f"Error updating register: {str(e)}")
-                self.logger.error(traceback.format_exc())
-                self.stats['register_failed'] += len(self.current_tray['compartments']) if self.current_tray else 0
+                self.logger.error(f"Error batch updating register: {e}")
+                self.stats['register_failed'] += len(updates)
     
-    def _show_final_summary(self):
-        """Show final processing summary and update main GUI."""
-        # Create summary message
+    def _batch_delete_files(self, file_paths: List[str]):
+        """Batch delete files."""
+        for file_path in file_paths:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    self.logger.info(f"Deleted file: {file_path}")
+            except Exception as e:
+                self.logger.error(f"Error deleting file {file_path}: {e}")
+    
+    def move_files_to_local(self, hole_id: str, file_paths: List[str]) -> List[str]:
+        """Move files from shared location to local temp_review folder."""
+        local_paths = []
+        
+        temp_review_path = self.file_manager.get_local_path('temp_review')
+        project_code = hole_id[:2]
+        local_hole_path = os.path.join(temp_review_path, project_code, hole_id)
+        
+        os.makedirs(local_hole_path, exist_ok=True)
+        
+        for src_path in file_paths:
+            try:
+                filename = os.path.basename(src_path)
+                dst_path = os.path.join(local_hole_path, filename)
+                
+                shutil.copy2(src_path, dst_path)
+                local_paths.append(dst_path)
+                
+                try:
+                    os.remove(src_path)
+                except Exception as e:
+                    self.logger.warning(f"Could not remove source file {src_path}: {e}")
+                    
+            except Exception as e:
+                self.logger.error(f"Error moving file {src_path}: {e}")
+        
+        return local_paths
+    
+    def move_unreviewed_items_to_shared(self, unreviewed_items: List[ReviewItem], 
+                                       progress_callback=None) -> tuple[int, int]:
+        """Move unreviewed items to shared review folder."""
+        moved_count = 0
+        failed_count = 0
+        
+        shared_review_path = self.file_manager.get_shared_path('review_compartments', create_if_missing=True)
+        if not shared_review_path:
+            self.logger.error("Shared review folder is not configured")
+            return 0, len(unreviewed_items)
+        
+        for idx, item in enumerate(unreviewed_items):
+            if progress_callback:
+                progress_callback(idx + 1, f"Moving {item.filename}...")
+            
+            try:
+                project_code = item.hole_id[:2].upper()
+                shared_hole_path = Path(shared_review_path) / project_code / item.hole_id
+                shared_hole_path.mkdir(parents=True, exist_ok=True)
+                
+                base_name = f"{item.hole_id}_CC_{item.compartment_depth:03d}"
+                if "_review" not in item.filename:
+                    dest_filename = f"{base_name}_review.png"
+                else:
+                    dest_filename = item.filename
+                
+                dest_path = shared_hole_path / dest_filename
+                
+                if self.file_manager.copy_with_metadata(item.image_path, str(dest_path)):
+                    if dest_path.exists():
+                        try:
+                            os.remove(item.image_path)
+                            moved_count += 1
+                            self.logger.info(f"Moved unreviewed file to shared: {dest_filename}")
+                        except Exception as e:
+                            self.logger.warning(f"Could not delete local file after copy: {e}")
+                            moved_count += 1
+                    else:
+                        failed_count += 1
+                        self.logger.error(f"Copy verification failed for {item.filename}")
+                else:
+                    failed_count += 1
+                    self.logger.error(f"Failed to copy {item.filename} to shared folder")
+                    
+            except Exception as e:
+                failed_count += 1
+                self.logger.error(f"Error moving {item.filename}: {e}")
+        
+        return moved_count, failed_count
+    
+    def check_and_move_remaining_temp_files(self, hole_id: str) -> int:
+        """Check for any remaining files in temp_review folder and move them."""
+        try:
+            temp_review_path = Path(self.file_manager.get_hole_dir("temp_review", hole_id))
+            
+            if not temp_review_path.exists():
+                return 0
+            
+            remaining_files = []
+            for file in temp_review_path.iterdir():
+                if file.is_file() and self.COMPARTMENT_FILE_PATTERN.match(file.name):
+                    remaining_files.append(file)
+            
+            if not remaining_files:
+                return 0
+            
+            shared_review_path = self.file_manager.get_shared_path('review_compartments', create_if_missing=True)
+            if not shared_review_path:
+                return 0
+            
+            project_code = hole_id[:2].upper()
+            shared_hole_path = Path(shared_review_path) / project_code / hole_id
+            shared_hole_path.mkdir(parents=True, exist_ok=True)
+            
+            moved_count = 0
+            for file in remaining_files:
+                try:
+                    dest_path = shared_hole_path / file.name
+                    if self.file_manager.copy_with_metadata(str(file), str(dest_path)):
+                        file.unlink()
+                        self.logger.info(f"Moved additional file: {file.name}")
+                        moved_count += 1
+                except Exception as e:
+                    self.logger.error(f"Failed to move additional file {file.name}: {e}")
+            
+            # Clean up empty directories
+            try:
+                if not any(temp_review_path.iterdir()):
+                    temp_review_path.rmdir()
+                    
+                    project_path = temp_review_path.parent
+                    if not any(project_path.iterdir()):
+                        project_path.rmdir()
+            except Exception as e:
+                self.logger.debug(f"Could not remove empty directories: {e}")
+            
+            return moved_count
+                
+        except Exception as e:
+            self.logger.error(f"Error checking for remaining temp files: {e}")
+            return 0
+    
+    def get_summary_message(self) -> str:
+        """Get processing summary message."""
         summary_lines = [
-            f"QAQC Processing Complete:",
+            "QAQC Processing Complete:",
             f"- Compartments processed: {self.stats['processed']}",
             f"- Successfully uploaded to OneDrive: {self.stats['uploaded']}",
             f"- Failed OneDrive uploads: {self.stats['upload_failed']}",
@@ -1583,12 +549,1844 @@ class QAQCManager:
             f"- Register entries updated: {self.stats['register_updated']}",
             f"- Register update failures: {self.stats['register_failed']}"
         ]
+        return "\n".join(summary_lines)
+
+
+# ============================================================================
+# GRID CANVAS UI
+# ============================================================================
+
+class QAQCGridCanvas:
+    """Grid-based canvas for reviewing compartment images."""
+    
+    def __init__(self, parent, gui_manager):
+        self.parent = parent
+        self.gui_manager = gui_manager
+
+        self.logger = logging.getLogger(__name__)
+
+        # Use theme colors from GUI manager
+        if gui_manager:
+            self.theme_colors = gui_manager.theme_colors
+        else:
+            # Fallback colors
+            self.theme_colors = {
+                "background": "#1e1e1e",
+                "text": "#e0e0e0",
+                "border": "#3f3f3f",
+                "accent_blue": "#1e88e5",
+                "accent_green": "#43a047",
+                "accent_red": "#e53935",
+                "accent_yellow": "#fdd835",
+                "row_invalid": "#3a2222",
+                "row_valid": "#223a22",
+                "row_neutral": "#1e1e1e"
+            }
         
-        summary_message = "\n".join(summary_lines)
+        # Create main container
+        self.container = ttk.Frame(parent)
+        self.container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Create canvas with scrollbars
+        self.canvas = tk.Canvas(
+            self.container,
+            bg=self.theme_colors["background"],
+            highlightthickness=0
+        )
+        self.v_scrollbar = ttk.Scrollbar(
+            self.container,
+            orient="vertical",
+            command=self.canvas.yview
+        )
+        self.h_scrollbar = ttk.Scrollbar(
+            self.container,
+            orient="horizontal",
+            command=self.canvas.xview
+        )
+        
+        self.canvas.configure(
+            yscrollcommand=self.v_scrollbar.set,
+            xscrollcommand=self.h_scrollbar.set
+        )
+        
+        # Grid layout for scrollbars
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.v_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.h_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.container.grid_rowconfigure(0, weight=1)
+        self.container.grid_columnconfigure(0, weight=1)
+        
+        # Grid tracking structures
+        self.cells = {}  # {(row, col): cell_data}
+        self.cell_ids = {}  # {(row, col): canvas_item_ids}
+        self.image_refs = {}  # Keep PhotoImage references
+        self.depth_to_row = {}  # Map depth to row for easy lookup
+        self.row_backgrounds = {}  # Track row background rectangles
+        
+        # Initialize all grid settings and caches
+        # Grid settings - will be calculated from images
+        self.base_cell_width = 300  # Default fallback
+        self.base_cell_height = 200  # Default fallback
+        self.scale_factor = 1.0
+        self.cell_width = self.base_cell_width
+        self.cell_height = self.base_cell_height
+        self.padding = 5
+        self.cols_per_row = 6
+        self.target_cols = 6  # Target number of columns
+        
+        # Image dimensions cache - MUST be initialized here
+        self.image_dimensions = {}  # {idx: (width, height)}
+        self.optimal_cell_size = None
+        
+        # Current state
+        self.hole_id = ""
+        self.review_items = []
+        self.current_mode = "select"
+        self.selected_cells = set()
+        self.item_states = {}  # idx: {"moisture": "wet/dry", "delete": bool}
+        
+        self.layout_mode = "grid"  # "grid", "vertical", or "duplicate_resolution"
+
+        # Add new attributes for layout and rotation
+        self.image_rotation = 0  # Current rotation angle
+        self.duplicates_resolved = False  # Track if duplicates have been resolved
+        self.has_duplicates = False  # Track if there are duplicates
+        self.duplicate_depths = {}  # Track which depths have duplicates
+
+        # Selection handling
+        self.drag_start = None
+        self.selection_box = None
+        
+        # Bind events
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.canvas.bind("<Button-1>", self._on_mouse_down)
+        self.canvas.bind("<B1-Motion>", self._on_mouse_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_mouse_release)
+        self.canvas.bind("<Control-MouseWheel>", self._on_ctrl_mousewheel)
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+    
+
+
+    def load_items(self, review_items: List[ReviewItem], hole_id: str):
+        """Load review items with duplicate-first workflow."""
+        self.hole_id = hole_id
+        self.review_items = sorted(review_items, key=lambda x: x.depth_to)
+        
+
+        # Calculate optimal cell size before loading
+        self._calculate_optimal_cell_size()
+    
+        
+        # Initialize states (preserve existing if reloading)
+        if not hasattr(self, 'item_states') or len(self.item_states) != len(self.review_items):
+            self.item_states = {}
+            for i, item in enumerate(self.review_items):
+                # Pre-load state from item's moisture status
+                moisture = None
+                if item.moisture in ["Wet", "Dry"]:
+                    moisture = item.moisture.lower()
+                
+                self.item_states[i] = {
+                    "moisture": moisture,
+                    "delete": False,
+                    "bad_image": False
+                }
+        
+        # Clear existing display only
+        self.canvas.delete("all")
+        self.cells.clear()
+        self.cell_ids.clear()
+        self.image_refs.clear()
+        self.depth_to_row.clear()
+        self.row_backgrounds.clear()
+        self.selected_cells.clear()
+        
+        # Group items by depth to find duplicates
+        self.depth_groups = {}
+        for idx, item in enumerate(self.review_items):
+            depth = item.depth_to
+            if depth not in self.depth_groups:
+                self.depth_groups[depth] = []
+            self.depth_groups[depth].append(idx)
+        
+        # Check if we have duplicates
+        self.has_duplicates = any(len(indices) > 1 for indices in self.depth_groups.values())
+        self.duplicate_depths = {depth: indices for depth, indices in self.depth_groups.items() if len(indices) > 1}
+        
+        # Determine which layout to use
+        if self.has_duplicates and not getattr(self, 'duplicates_resolved', False):
+            # Force duplicate resolution first
+            self._load_duplicate_resolution_layout()
+        elif self.layout_mode == "vertical":
+            # Vertical layout with duplicates side-by-side
+            self._load_vertical_layout_with_duplicates()
+        else:
+            # Standard grid layout
+            self.cols_per_row = max(3, (self.parent.winfo_width() - 100) // (self.cell_width + self.padding))
+            self._load_grid_layout()
+        
+        # Update scroll region
+        self._update_scroll_region()
+        
+        # Update status table if available
+        if hasattr(self.parent.master, 'update_status_table'):
+            self.parent.master.update_status_table()
+    
+
+    def _calculate_optimal_cell_size(self):
+        """Calculate optimal cell size based on all loaded images."""
+        
+        if not hasattr(self, 'image_dimensions'):
+            self.image_dimensions = {}
+            
+        if not hasattr(self, 'logger'):
+            self.logger = logging.getLogger(__name__)
+        # ===================================================
+        
+        if not self.review_items:
+            return
+        
+        # method to calculate dynamic cell size
+        if not self.review_items:
+            return
+        
+        # Sample a subset of images to get dimensions
+        sample_size = min(20, len(self.review_items))  # Sample up to 20 images
+        sample_indices = range(0, len(self.review_items), max(1, len(self.review_items) // sample_size))
+        
+        max_width = 0
+        max_height = 0
+        aspect_ratios = []
+        
+        for idx in sample_indices:
+            item = self.review_items[idx]
+            if item.image_path and os.path.exists(item.image_path):
+                try:
+                    # Read image to get dimensions without loading full data
+                    img = cv2.imread(item.image_path)
+                    if img is not None:
+                        h, w = img.shape[:2]
+                        self.image_dimensions[idx] = (w, h)
+                        
+                        # Consider rotation
+                        if self.image_rotation in [90, 270]:
+                            w, h = h, w  # Swap for rotation
+                        
+                        max_width = max(max_width, w)
+                        max_height = max(max_height, h)
+                        aspect_ratios.append(w / h if h > 0 else 1)
+                except Exception as e:
+                    self.logger.debug(f"Could not read image dimensions: {e}")
+        
+        if not aspect_ratios:
+            return
+        
+        # Calculate median aspect ratio
+        median_aspect = sorted(aspect_ratios)[len(aspect_ratios) // 2]
+        
+        # Get available canvas width
+        canvas_width = self.parent.winfo_width()
+        if canvas_width <= 1:  # Not yet rendered
+            canvas_width = 1200  # Default assumption
+        
+        # Calculate cell width based on target columns
+        available_width = canvas_width - (self.target_cols + 1) * self.padding
+        target_cell_width = available_width // self.target_cols
+        
+        # Calculate corresponding height from aspect ratio
+        target_cell_height = int(target_cell_width / median_aspect)
+        
+        # Apply reasonable limits
+        min_width, max_width = 150, 600
+        min_height, max_height = 100, 400
+        
+        self.base_cell_width = max(min_width, min(max_width, target_cell_width))
+        self.base_cell_height = max(min_height, min(max_height, target_cell_height))
+        
+        # Update current dimensions
+        self.cell_width = int(self.base_cell_width * self.scale_factor)
+        self.cell_height = int(self.base_cell_height * self.scale_factor)
+        
+        # Recalculate columns that fit
+        self.cols_per_row = max(1, (canvas_width - 2 * self.padding) // (self.cell_width + self.padding))
+        
+        self.logger.info(f"Calculated optimal cell size: {self.cell_width}x{self.cell_height} "
+                        f"(aspect ratio: {median_aspect:.2f}, cols: {self.cols_per_row})")
+        # ===================================================
+
+    def validate_duplicate_resolution(self) -> Tuple[bool, List[str]]:
+        """Validate that all duplicates have been properly resolved."""
+        # ===================================================
+        # INSERT: New validation method specifically for duplicates
+        errors = []
+        
+        # Check each depth with duplicates
+        for depth, indices in self.duplicate_depths.items():
+            # Count classifications at this depth
+            wet_count = 0
+            dry_count = 0
+            delete_count = 0
+            unclassified_count = 0
+            
+            for idx in indices:
+                state = self.item_states[idx]
+                if state["delete"]:
+                    delete_count += 1
+                elif state["moisture"] == "wet":
+                    wet_count += 1
+                elif state["moisture"] == "dry":
+                    dry_count += 1
+                else:
+                    unclassified_count += 1
+            
+            # Validation rules for duplicates
+            if unclassified_count > 0:
+                errors.append(f"Depth {depth}m: {unclassified_count} image(s) not classified")
+            
+            # Allow at most 1 wet and 1 dry
+            if wet_count > 1:
+                errors.append(f"Depth {depth}m: Multiple wet images ({wet_count})")
+            if dry_count > 1:
+                errors.append(f"Depth {depth}m: Multiple dry images ({dry_count})")
+            
+            # At least one image should be kept (wet, dry, or both)
+            if wet_count == 0 and dry_count == 0:
+                errors.append(f"Depth {depth}m: No images kept (all marked for deletion)")
+        
+        return len(errors) == 0, errors
+        # ===================================================
+
+    def _load_vertical_layout_with_duplicates(self):
+        """Load items vertically by depth, with duplicates shown horizontally."""
+        row = 0
+        
+        for depth in sorted(self.depth_groups.keys()):
+            indices = self.depth_groups[depth]
+            
+            # Skip if all items at this depth are already classified (optional filter)
+            if self.duplicates_resolved:
+                all_classified = all(
+                    self.item_states[idx]["moisture"] or self.item_states[idx]["delete"] 
+                    for idx in indices
+                )
+                if all_classified:
+                    continue
+            
+            # Create row background
+            row_width = self.padding + (len(indices) * (self.cell_width + self.padding)) + 60  # 60 for depth label
+            bg_rect = self.canvas.create_rectangle(
+                0, row * (self.cell_height + self.padding),
+                row_width, (row + 1) * (self.cell_height + self.padding),
+                fill=self.theme_colors["row_neutral"],
+                outline="",
+                tags=f"row_bg_{depth}"
+            )
+            self.row_backgrounds[depth] = bg_rect
+            
+            # Add depth label
+            self.canvas.create_text(
+                30, row * (self.cell_height + self.padding) + self.cell_height // 2,
+                text=f"{depth}m",
+                fill=self.theme_colors["text"],
+                font=("Arial", 14, "bold"),
+                anchor="center",
+                tags=f"depth_label_{depth}"
+            )
+            
+            # Add items for this depth horizontally
+            for col, idx in enumerate(indices):
+                item = self.review_items[idx]
+                # Offset by 60 pixels for depth label
+                self._create_grid_cell_with_offset(row, col, idx, item, x_offset=60)
+            
+            # Validate this row
+            self._validate_depth_row(depth)
+            
+            row += 1
+
+    def _load_duplicate_resolution_layout(self):
+        """Load items in vertical layout for duplicate resolution."""
+        row = 0
+        
+        # Only show depths with duplicates
+        for depth, indices in sorted(self.duplicate_depths.items()):
+            # Create row background
+            bg_rect = self.canvas.create_rectangle(
+                0, row * (self.cell_height + self.padding),
+                self.padding + (len(indices) * (self.cell_width + self.padding)),
+                (row + 1) * (self.cell_height + self.padding),
+                fill=self.theme_colors["accent_error"],  # Red background for duplicates
+                outline="",
+                tags=f"row_bg_{depth}"
+            )
+            self.row_backgrounds[depth] = bg_rect
+            
+            # Add depth label
+            self.canvas.create_text(
+                10, row * (self.cell_height + self.padding) + self.cell_height // 2,
+                text=f"{depth}m",
+                fill="white",
+                font=("Arial", 16, "bold"),
+                anchor="w",
+                tags=f"depth_label_{depth}"
+            )
+            
+            # Add duplicate images side by side
+            for col, idx in enumerate(indices):
+                item = self.review_items[idx]
+                self._create_grid_cell(row, col, idx, item)
+            
+            row += 1
+
+    def _create_grid_cell_with_offset(self, row: int, col: int, idx: int, item: ReviewItem, x_offset: int = 0):
+        """Create a grid cell with custom x offset."""
+        x = x_offset + col * (self.cell_width + self.padding) + self.padding
+        y = row * (self.cell_height + self.padding) + self.padding
+        
+        # Create background if needed
+        bg_rect = self.canvas.create_rectangle(
+            x, y,
+            x + self.cell_width, y + self.cell_height,
+            fill="#404040",
+            outline="",
+            tags=f"bg_{row}_{col}"
+        )
+        
+        # Rest is same as _create_grid_cell but using the idx parameter
+        cell_data = {
+            'idx': idx,
+            'item': item,
+            'selected': False
+        }
+        
+        # Load and display image
+        img, photo = self._prepare_image(item)
+        if photo:
+            self.image_refs[(row, col)] = photo
+            
+            img_id = self.canvas.create_image(
+                x + self.cell_width // 2,
+                y + self.cell_height // 2,
+                image=photo,
+                tags=f"img_{row}_{col}"
+            )
+        else:
+            img_id = self.canvas.create_text(
+                x + self.cell_width // 2,
+                y + self.cell_height // 2,
+                text="No Image",
+                fill="white",
+                font=("Arial", 12)
+            )
+        
+        # Create border
+        border_id = self.canvas.create_rectangle(
+            x, y,
+            x + self.cell_width, y + self.cell_height,
+            outline=self.theme_colors["border"],
+            width=3,
+            tags=f"border_{row}_{col}"
+        )
+        
+        # Add depth label in corner
+        self.canvas.create_text(
+            x + 5, y + self.cell_height - 5,
+            text=f"{item.compartment_depth}m",
+            fill="white",
+            font=("Arial", 10, "bold"),
+            anchor="sw",
+            tags=f"depth_label_{row}_{col}"
+        )
+        
+        # Store cell data
+        self.cells[(row, col)] = cell_data
+        self.cell_ids[(row, col)] = {
+            'bg': bg_rect,
+            'image': img_id,
+            'border': border_id,
+            'x': x,
+            'y': y
+        }
+        
+        # Apply visual state
+        self._update_cell_visual(row, col)
+
+    def _load_grid_layout(self):
+        """Load items in standard grid layout."""
+        # Filter out items based on current state
+        items_to_show = []
+        for idx, item in enumerate(self.review_items):
+            state = self.item_states[idx]
+            
+            # Skip if already classified and we're past duplicate resolution
+            if self.duplicates_resolved and state["moisture"]:
+                continue
+                
+            items_to_show.append((idx, item))
+        
+        # Create grid
+        for i, (idx, item) in enumerate(items_to_show):
+            row = i // self.cols_per_row
+            col = i % self.cols_per_row
+            self._create_grid_cell(row, col, idx, item)
+
+    def _create_grid_cell(self, row: int, col: int, idx: int, item: ReviewItem):
+        """Create a single grid cell."""
+        x = col * (self.cell_width + self.padding) + self.padding
+        y = row * (self.cell_height + self.padding) + self.padding
+        
+        # Create cell background
+        bg_rect = self.canvas.create_rectangle(
+            x, y,
+            x + self.cell_width, y + self.cell_height,
+            fill="#404040",
+            outline="",
+            tags=f"bg_{row}_{col}"
+        )
+        
+        # Load and display image
+        img, photo = self._prepare_image(item)
+        if photo:
+            self.image_refs[(row, col)] = photo
+            
+            img_id = self.canvas.create_image(
+                x + self.cell_width // 2,
+                y + self.cell_height // 2,
+                image=photo,
+                tags=f"img_{row}_{col}"
+            )
+        else:
+            # Placeholder for missing image
+            img_id = self.canvas.create_text(
+                x + self.cell_width // 2,
+                y + self.cell_height // 2,
+                text="No Image",
+                fill="white",
+                font=("Arial", 12)
+            )
+        
+        # Create border
+        border_id = self.canvas.create_rectangle(
+            x, y,
+            x + self.cell_width, y + self.cell_height,
+            outline=self.theme_colors["border"],
+            width=3,
+            tags=f"border_{row}_{col}"
+        )
+        
+        # Add depth label
+        self.canvas.create_text(
+            x + 5, y + self.cell_height - 5,
+            text=f"{item.compartment_depth}m",
+            fill="white",
+            font=("Arial", 10, "bold"),
+            anchor="sw",
+            tags=f"depth_label_{row}_{col}"
+        )
+        
+        # Store cell data
+        self.cells[(row, col)] = {
+            'idx': idx,
+            'item': item,
+            'selected': False
+        }
+        
+        self.cell_ids[(row, col)] = {
+            'bg': bg_rect,
+            'image': img_id,
+            'border': border_id,
+            'x': x,
+            'y': y
+        }
+        
+        # Apply initial visual state
+        self._update_cell_visual(row, col)
+    
+    def _prepare_image(self, item: ReviewItem) -> Tuple[Optional[Image.Image], Optional[ImageTk.PhotoImage]]:
+        """Prepare image for display with rotation support."""
+        try:
+            img = item.image
+            if img is None:
+                return None, None
+            
+            # Convert to PIL
+            if len(img.shape) == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            else:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            pil_img = Image.fromarray(img)
+            
+            # ===================================================
+            # INSERT: Apply rotation if set
+            if hasattr(self, 'image_rotation') and self.image_rotation > 0:
+                pil_img = pil_img.rotate(-self.image_rotation, expand=True)
+            # ===================================================
+            
+            # Calculate scaled dimensions
+            target_w = int(self.cell_width * 0.99)
+            target_h = int(self.cell_height * 0.99)
+            
+            # Resize maintaining aspect ratio
+            pil_img.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+            
+            # Create PhotoImage
+            photo = ImageTk.PhotoImage(pil_img)
+            
+            return pil_img, photo
+            
+        except Exception as e:
+            self.logger.error(f"Failed to prepare image: {e}")
+            return None, None
+
+    def _update_cell_visual(self, row: int, col: int):
+        """Update visual appearance of a cell with classification text."""
+        if (row, col) not in self.cells or (row, col) not in self.cell_ids:
+            return
+        
+        cell = self.cells[(row, col)]
+        ids = self.cell_ids[(row, col)]
+        idx = cell['idx']
+        state = self.item_states[idx]
+        
+        # Determine border appearance
+        selected = cell.get('selected', False)
+        
+        # Priority: selection > classification > default
+        if selected:
+            border_color = self.theme_colors["accent_yellow"]
+            border_width = 6
+        elif state["delete"]:
+            border_color = self.theme_colors["accent_red"]
+            border_width = 6
+        elif state["moisture"] == "wet":
+            border_color = self.theme_colors["accent_blue"]
+            border_width = 4
+        elif state["moisture"] == "dry":
+            border_color = self.theme_colors["accent_green"]
+            border_width = 4
+        else:
+            border_color = self.theme_colors["border"]
+            border_width = 3
+        
+        # Update border
+        self.canvas.itemconfig(
+            ids['border'],
+            outline=border_color,
+            width=border_width
+        )
+        
+        # ===================================================
+        # INSERT: Add classification text overlay
+        # Remove old text
+        self.canvas.delete(f"class_text_{row}_{col}")
+        
+        # Build classification text
+        text_parts = []
+        if state["moisture"]:
+            text_parts.append(state["moisture"].upper())
+        if state["delete"]:
+            text_parts.append("DELETE")
+        if state["bad_image"]:
+            text_parts.append("BAD")
+        
+        if text_parts:
+            text = " ".join(text_parts)
+            x = ids['x'] + self.cell_width - 10
+            y = ids['y'] + 10
+            
+            # Create text with background
+            text_id = self.canvas.create_text(
+                x, y,
+                text=text,
+                fill="white",
+                font=("Arial", 10, "bold"),
+                anchor="ne",
+                tags=f"class_text_{row}_{col}"
+            )
+            
+            # Add semi-transparent background
+            bbox = self.canvas.bbox(text_id)
+            if bbox:
+                bg_id = self.canvas.create_rectangle(
+                    bbox[0]-2, bbox[1]-2, bbox[2]+2, bbox[3]+2,
+                    fill="#000000",
+                    stipple="gray50",
+                    outline="",
+                    tags=f"class_text_{row}_{col}"
+                )
+                self.canvas.tag_raise(text_id)
+        # ===================================================
+    
+    def _on_mouse_down(self, event):
+        """Handle mouse down for selection/action."""
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        
+        clicked_cell = self._get_cell_at_position(canvas_x, canvas_y)
+        
+        if clicked_cell:
+            row, col = clicked_cell
+            
+            if self.current_mode == "select":
+                if event.state & 0x0004:  # Ctrl held
+                    self._toggle_cell_selection(row, col)
+                elif event.state & 0x0001:  # Shift held
+                    self._select_range_to(row, col)
+                else:
+                    self._clear_selection()
+                    self._select_cell(row, col)
+                    self.drag_start = (canvas_x, canvas_y)
+            else:
+                # Apply action based on mode
+                self._apply_action_to_cell(row, col)
+        else:
+            if self.current_mode == "select":
+                self._clear_selection()
+                self.drag_start = (canvas_x, canvas_y)
+    
+    def _on_mouse_drag(self, event):
+        """Handle mouse drag for box selection."""
+        if self.current_mode != "select" or not self.drag_start:
+            return
+        
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        
+        if self.selection_box:
+            self.canvas.delete(self.selection_box)
+        
+        self.selection_box = self.canvas.create_rectangle(
+            self.drag_start[0], self.drag_start[1],
+            canvas_x, canvas_y,
+            outline=self.theme_colors["accent_yellow"],
+            width=2,
+            dash=(5, 5),
+            tags="selection_box"
+        )
+        
+        self._select_cells_in_box(self.drag_start[0], self.drag_start[1], canvas_x, canvas_y)
+    
+    def _on_mouse_release(self, event):
+        """Handle mouse release."""
+        if self.selection_box:
+            self.canvas.delete(self.selection_box)
+            self.selection_box = None
+        self.drag_start = None
+    
+    def _get_cell_at_position(self, x: float, y: float) -> Optional[Tuple[int, int]]:
+        """Get cell coordinates at canvas position."""
+        for (row, col), ids in self.cell_ids.items():
+            cell_x = ids['x']
+            cell_y = ids['y']
+            
+            if (cell_x <= x <= cell_x + self.cell_width and 
+                cell_y <= y <= cell_y + self.cell_height):
+                return (row, col)
+        
+        return None
+    
+    def _select_cell(self, row: int, col: int):
+        """Select a single cell."""
+        if (row, col) in self.cells:
+            self.selected_cells.add((row, col))
+            self.cells[(row, col)]['selected'] = True
+            self._update_cell_visual(row, col)
+    
+    def _toggle_cell_selection(self, row: int, col: int):
+        """Toggle selection state of a cell."""
+        if (row, col) in self.selected_cells:
+            self.selected_cells.remove((row, col))
+            self.cells[(row, col)]['selected'] = False
+        else:
+            self._select_cell(row, col)
+        self._update_cell_visual(row, col)
+    
+    def _select_range_to(self, row: int, col: int):
+        """Select range from last selected to this cell."""
+        if not self.selected_cells:
+            self._select_cell(row, col)
+            return
+        
+        # Get last selected
+        last_row, last_col = max(self.selected_cells)
+        
+        # Calculate range
+        min_row, max_row = min(row, last_row), max(row, last_row)
+        min_col, max_col = min(col, last_col), max(col, last_col)
+        
+        # Select all cells in range
+        for r in range(min_row, max_row + 1):
+            for c in range(min_col, max_col + 1):
+                if (r, c) in self.cells:
+                    self._select_cell(r, c)
+    
+    def _select_cells_in_box(self, x1: float, y1: float, x2: float, y2: float):
+        """Select all cells within the box."""
+        min_x, max_x = min(x1, x2), max(x1, x2)
+        min_y, max_y = min(y1, y2), max(y1, y2)
+        
+        self._clear_selection()
+        
+        for (row, col), ids in self.cell_ids.items():
+            cell_x = ids['x']
+            cell_y = ids['y']
+            
+            if (cell_x < max_x and cell_x + self.cell_width > min_x and
+                cell_y < max_y and cell_y + self.cell_height > min_y):
+                self._select_cell(row, col)
+    
+    def _clear_selection(self):
+        """Clear all selected cells."""
+        for (row, col) in self.selected_cells:
+            self.cells[(row, col)]['selected'] = False
+            self._update_cell_visual(row, col)
+        self.selected_cells.clear()
+    
+
+    def validate_classifications(self) -> Tuple[bool, List[str]]:
+        """Validate all classifications according to rules."""
+        errors = []
+        
+        # Group items by depth
+        depth_groups = {}
+        for idx, item in enumerate(self.review_items):
+            if item.is_placeholder:
+                continue
+            state = self.item_states[idx]
+            depth = item.depth_to
+            
+            if depth not in depth_groups:
+                depth_groups[depth] = []
+            
+            depth_groups[depth].append({
+                'idx': idx,
+                'state': state,
+                'item': item
+            })
+        
+        # Check each depth
+        for depth, items in depth_groups.items():
+            # Check if all items are classified
+            unclassified = [i for i in items if not i['state']['moisture'] and not i['state']['delete']]
+            if unclassified:
+                errors.append(f"Depth {depth}m has {len(unclassified)} unclassified image(s)")
+            
+            # Check for multiple wet/dry of same type
+            wet_items = [i for i in items if i['state']['moisture'] == 'wet']
+            dry_items = [i for i in items if i['state']['moisture'] == 'dry']
+            
+            if len(wet_items) > 1:
+                errors.append(f"Depth {depth}m has {len(wet_items)} wet images (max 1 allowed)")
+            if len(dry_items) > 1:
+                errors.append(f"Depth {depth}m has {len(dry_items)} dry images (max 1 allowed)")
+        
+        return len(errors) == 0, errors
+
+    def _apply_action_to_cell(self, row: int, col: int):
+        """Apply current mode action to a cell with toggle behavior."""
+        if (row, col) not in self.cells:
+            return
+        
+        cell = self.cells[(row, col)]
+        idx = cell['idx']
+        state = self.item_states[idx]
+        
+        # ===================================================
+        # REPLACE: Handle click behavior based on mode
+        if self.current_mode == "wet":
+            # Toggle wet classification
+            if state["moisture"] == "wet":
+                state["moisture"] = None
+            else:
+                state["moisture"] = "wet"
+                state["delete"] = False
+        elif self.current_mode == "dry":
+            # Toggle dry classification
+            if state["moisture"] == "dry":
+                state["moisture"] = None
+            else:
+                state["moisture"] = "dry"
+                state["delete"] = False
+        elif self.current_mode == "delete":
+            # Toggle delete
+            state["delete"] = not state["delete"]
+            if state["delete"]:
+                state["moisture"] = None
+        elif self.current_mode == "bad_image":
+            # Toggle bad image flag (doesn't affect moisture)
+            state["bad_image"] = not state["bad_image"]
+        # ===================================================
+        
+        self._update_cell_visual(row, col)
+        
+        # Update status table
+        if hasattr(self.parent.master, 'update_status_table'):
+            self.parent.master.update_status_table()
+
+
+    def apply_action_to_selected(self, action: str):
+        """Apply an action to all selected cells."""
+        for (row, col) in self.selected_cells:
+            cell = self.cells[(row, col)]
+            idx = cell['idx']
+            state = self.item_states[idx]
+            
+            if action == "wet":
+                state["moisture"] = "wet"
+                state["delete"] = False
+            elif action == "dry":
+                state["moisture"] = "dry"
+                state["delete"] = False
+            elif action == "delete":
+                state["delete"] = True
+                state["moisture"] = None
+            
+            self._update_cell_visual(row, col)
+        
+        self._clear_selection()
+    
+    def set_mode(self, mode: str):
+        """Set the current interaction mode."""
+        self.current_mode = mode
+        
+        # Update cursor
+        if mode == "select":
+            self.canvas.configure(cursor="arrow")
+        elif mode in ["wet", "dry"]:
+            self.canvas.configure(cursor="hand2")
+        elif mode == "delete":
+            self.canvas.configure(cursor="X_cursor")
+    
+    def get_results(self) -> Tuple[List[ReviewItem], List[ReviewItem]]:
+        """Get reviewed and unreviewed items."""
+        reviewed = []
+        unreviewed = []
+        
+        for idx, item in enumerate(self.review_items):
+            state = self.item_states[idx]
+            
+            if state["delete"]:
+                item.quality = "Missing"
+                item.is_reviewed = True
+                reviewed.append(item)
+            elif state["moisture"]:
+                item.moisture = state["moisture"].capitalize()
+                item.quality = "OK"
+                item.is_reviewed = True
+                reviewed.append(item)
+            else:
+                item.is_reviewed = False
+                unreviewed.append(item)
+        
+        return reviewed, unreviewed
+    
+    def get_status_counts(self) -> Dict[str, int]:
+        """Get counts for status bar."""
+        counts = {
+            'total': len(self.review_items),
+            'wet': 0,
+            'dry': 0,
+            'delete': 0,
+            'unclassified': 0,
+            'selected': len(self.selected_cells)
+        }
+        
+        for state in self.item_states.values():
+            if state["delete"]:
+                counts['delete'] += 1
+            elif state["moisture"] == "wet":
+                counts['wet'] += 1
+            elif state["moisture"] == "dry":
+                counts['dry'] += 1
+            else:
+                counts['unclassified'] += 1
+        
+        return counts
+    
+    def _on_mousewheel(self, event):
+        """Handle mouse wheel scrolling."""
+        if not (event.state & 0x0004):  # Not Ctrl
+            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    
+    def _on_ctrl_mousewheel(self, event):
+        """Handle Ctrl+MouseWheel for zooming."""
+        if event.delta > 0:
+            zoom = 1.1
+        else:
+            zoom = 0.9
+        
+        new_scale = self.scale_factor * zoom
+        new_scale = max(0.5, min(2.0, new_scale))
+        
+        if new_scale != self.scale_factor:
+            self.scale_factor = new_scale
+            self.cell_width = int(self.base_cell_width * self.scale_factor)
+            self.cell_height = int(self.base_cell_height * self.scale_factor)
+            
+            # Reload with new scale
+            self.load_items(self.review_items, self.hole_id) # TODO - make sure this doesn't wipe out the selections.
+    
+    def _update_scroll_region(self):
+        """Update canvas scroll region."""
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+    
+    def _on_canvas_configure(self, event):
+        """Handle canvas resize."""
+        # ===================================================
+        # REPLACE: Recalculate columns on resize
+        new_width = event.width
+        if new_width > 100:  # Meaningful resize
+            new_cols = max(1, (new_width - 2 * self.padding) // (self.cell_width + self.padding))
+            if new_cols != self.cols_per_row and self.layout_mode == "grid":
+                self.cols_per_row = new_cols
+                # Reload grid layout
+                self.canvas.after_idle(lambda: self.load_items(self.review_items, self.hole_id))
+        # ===================================================
+# ============================================================================
+# GRID REVIEW DIALOG
+# ============================================================================
+
+class QAQCGridReviewDialog:
+    """Grid-based review dialog for rapid QAQC classification."""
+    
+    def __init__(self, parent, app, translator_func, logger):
+        self.parent = parent
+        self.app = app
+        self.t = translator_func
+        self.logger = logger
+        self.gui_manager = app.gui_manager if hasattr(app, 'gui_manager') else None
+        
+        self.review_window = None
+        self.close_callback = None
+        self.grid_canvas = None
+        self.status_label = None
+        self.mode_buttons = {}
+    
+    def show_review_window(self, hole_id: str, review_items: List[ReviewItem]):
+        """Show the grid review window."""
+        self._create_window(hole_id, review_items)
+    
+    def _create_window(self, hole_id: str, review_items: List[ReviewItem]):
+        """Create the main window."""
+        if self.review_window and self.review_window.winfo_exists():
+            self.review_window.destroy()
+        
+        self.review_window = tk.Toplevel(self.parent)
+        self.review_window.title(f"QAQC Grid Review - {hole_id}")
+        
+        # Apply theme
+        if self.gui_manager:
+            self.gui_manager.configure_ttk_styles(self.review_window)
+        
+        # Make it nearly fullscreen
+        screen_width = self.review_window.winfo_screenwidth()
+        screen_height = self.review_window.winfo_screenheight()
+        window_width = int(screen_width * 0.95)
+        window_height = int(screen_height * 0.95)
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        self.review_window.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        
+        # Create UI components
+        self._create_toolbar()
+
+        # ===================================================
+        # INSERT: Add status table between toolbar and canvas
+        # Create a frame for the status table
+        self.table_frame = ttk.LabelFrame(self.review_window, text="Register Update Preview", padding=5)
+        self.table_frame.pack(fill=tk.X, padx=5, pady=5)
+
+        # Create treeview for status table
+        self.status_tree = ttk.Treeview(
+            self.table_frame,
+            columns=('depth', 'status', 'action', 'validation'),
+            height=6,
+            show='tree headings'
+        )
+
+        # Configure columns
+        self.status_tree.heading('#0', text='#')
+        self.status_tree.heading('depth', text='Depth (m)')
+        self.status_tree.heading('status', text='Photo Status')
+        self.status_tree.heading('action', text='Action')
+        self.status_tree.heading('validation', text='Validation')
+
+        self.status_tree.column('#0', width=40)
+        self.status_tree.column('depth', width=100)
+        self.status_tree.column('status', width=150)
+        self.status_tree.column('action', width=100)
+        self.status_tree.column('validation', width=200)
+
+        self.status_tree.pack(fill=tk.X, expand=True)
+        # ===================================================
+
+        self._create_canvas_area(hole_id, review_items)
+        self._create_status_bar()
+        
+        # Setup keyboard shortcuts
+        self._setup_keyboard_shortcuts()
+        
+        self.review_window.protocol("WM_DELETE_WINDOW", self._on_close)
+    
+
+    def _create_canvas_area(self, hole_id: str, review_items: List[ReviewItem], parent=None):
+        """Create the grid canvas area."""
+        # ===================================================
+        # REPLACE: Use provided parent or create frame
+        # Create canvas frame
+        canvas_frame = parent if parent else ttk.Frame(self.review_window)
+        if not parent:
+            canvas_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # ===================================================
+        
+        # Create grid canvas
+        self.grid_canvas = QAQCGridCanvas(canvas_frame, self.gui_manager)
+        self.grid_canvas.logger = self.logger  # Add logger reference
+        
+        # Load items
+        self.grid_canvas.load_items(review_items, hole_id)
+    
+
+    def _create_status_table(self, parent):
+        """Create status table on the right side."""
+        # ===================================================
+        # INSERT: New method for vertical status table
+        # Create a frame for the status table
+        self.table_frame = ttk.LabelFrame(parent, text="Register Update Preview", padding=5)
+        self.table_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
+        
+        # Create treeview for status table
+        self.status_tree = ttk.Treeview(
+            self.table_frame,
+            columns=('status', 'action'),
+            height=25,  # Taller for vertical layout
+            show='tree headings'
+        )
+        
+        # Configure columns for narrower width
+        self.status_tree.heading('#0', text='Depth')
+        self.status_tree.heading('status', text='Status')
+        self.status_tree.heading('action', text='Action')
+        
+        self.status_tree.column('#0', width=80)
+        self.status_tree.column('status', width=150)
+        self.status_tree.column('action', width=80)
+        
+        # Add scrollbar
+        scrollbar = ttk.Scrollbar(self.table_frame, command=self.status_tree.yview)
+        self.status_tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.status_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # ===================================================
+
+    def _create_toolbar(self):
+        """Create the toolbar with mode buttons and actions."""
+        toolbar = ttk.Frame(self.review_window)
+        toolbar.pack(fill=tk.X, padx=5, pady=5)
+        
+        # Mode section
+        mode_frame = ttk.LabelFrame(toolbar, text="Classification Mode", padding=5)
+        mode_frame.pack(side=tk.LEFT, padx=5)
+
+        # ===================================================
+        # Mode buttons - removed Select, add Bad Image
+        modes = [
+            ("Wet", "wet", self.gui_manager.theme_colors["accent_blue"] if self.gui_manager else "#1e88e5"),
+            ("Dry", "dry", self.gui_manager.theme_colors["accent_green"] if self.gui_manager else "#43a047"),
+            ("Delete", "delete", self.gui_manager.theme_colors["accent_red"] if self.gui_manager else "#e53935"),
+            ("Bad Image", "bad_image", self.gui_manager.theme_colors["accent_yellow"] if self.gui_manager else "#fdd835")
+        ]
+
+        for text, mode, color in modes:
+            if self.gui_manager:
+                btn = self.gui_manager.create_modern_button(
+                    mode_frame, text, color, lambda m=mode: self._set_mode(m)
+                )
+            else:
+                btn = ttk.Button(mode_frame, text=text, command=lambda m=mode: self._set_mode(m))
+            
+            self.mode_buttons[mode] = btn
+            btn.pack(side=tk.LEFT, padx=2)
+
+        # Set initial mode to wet
+        self.current_mode = "wet"
+        # ===================================================
+        
+        # Duplicate resolution controls
+        self.duplicate_frame = ttk.LabelFrame(toolbar, text="Duplicate Resolution", padding=5)
+        # Don't pack yet - will show only when needed
+        
+        if self.gui_manager:
+            self.apply_dup_button = self.gui_manager.create_modern_button(
+                self.duplicate_frame,
+                "Apply & Continue",
+                self.gui_manager.theme_colors["accent_green"],
+                self._apply_duplicate_resolution
+            )
+        else:
+            self.apply_dup_button = ttk.Button(
+                self.duplicate_frame,
+                text="Apply & Continue",
+                command=self._apply_duplicate_resolution
+            )
+        self.apply_dup_button.pack(side=tk.LEFT, padx=2)
+        # ===================================================
+
+
+        # Actions section with themed buttons
+        action_frame = ttk.LabelFrame(toolbar, text="Actions", padding=5)
+        action_frame.pack(side=tk.LEFT, padx=20)
+
+        # ===================================================
+        # REPLACE: Use themed buttons for actions
+        if self.gui_manager:
+            # Image display controls
+            display_frame = ttk.Frame(action_frame)
+            display_frame.pack(side=tk.LEFT, padx=5)
+            
+            ttk.Label(display_frame, text="Display:").pack(side=tk.LEFT, padx=2)
+            
+            self.gui_manager.create_modern_button(
+                display_frame, "Rotate", 
+                self.gui_manager.theme_colors["secondary_bg"],
+                self._rotate_images
+            ).pack(side=tk.LEFT, padx=2)
+            
+            self.gui_manager.create_modern_button(
+                display_frame, "Grid Layout",
+                self.gui_manager.theme_colors["secondary_bg"],
+                lambda: self._set_layout("grid")
+            ).pack(side=tk.LEFT, padx=2)
+            
+            self.gui_manager.create_modern_button(
+                display_frame, "Column Layout",
+                self.gui_manager.theme_colors["secondary_bg"],
+                lambda: self._set_layout("column")
+            ).pack(side=tk.LEFT, padx=2)
+            
+            # Size controls
+            size_frame = ttk.Frame(action_frame)
+            size_frame.pack(side=tk.LEFT, padx=10)
+            
+            ttk.Label(size_frame, text="Size:").pack(side=tk.LEFT, padx=2)
+            
+            self.gui_manager.create_modern_button(
+                size_frame, "Smaller",
+                self.gui_manager.theme_colors["secondary_bg"],
+                lambda: self._scale_images(0.8)
+            ).pack(side=tk.LEFT, padx=2)
+            
+            self.gui_manager.create_modern_button(
+                size_frame, "Bigger",
+                self.gui_manager.theme_colors["secondary_bg"],
+                lambda: self._scale_images(1.2)
+            ).pack(side=tk.LEFT, padx=2)
+            
+            # Reset button
+            self.gui_manager.create_modern_button(
+                action_frame, "Reset All",
+                self.gui_manager.theme_colors["accent_red"],
+                self._reset_all
+            ).pack(side=tk.LEFT, padx=10)
+        else:
+            # Fallback non-themed buttons
+            ttk.Button(action_frame, text="Rotate", command=self._rotate_images).pack(side=tk.LEFT, padx=2)
+            ttk.Button(action_frame, text="Grid Layout", command=lambda: self._set_layout("grid")).pack(side=tk.LEFT, padx=2)
+            ttk.Button(action_frame, text="Column Layout", command=lambda: self._set_layout("column")).pack(side=tk.LEFT, padx=2)
+            ttk.Button(action_frame, text="Smaller", command=lambda: self._scale_images(0.8)).pack(side=tk.LEFT, padx=2)
+            ttk.Button(action_frame, text="Bigger", command=lambda: self._scale_images(1.2)).pack(side=tk.LEFT, padx=2)
+            ttk.Button(action_frame, text="Reset All", command=self._reset_all).pack(side=tk.LEFT, padx=2)
+        # ===================================================
+        # Save/Cancel on the right
+        button_frame = ttk.Frame(toolbar)
+        button_frame.pack(side=tk.RIGHT, padx=5)
+        
+        if self.gui_manager:
+            save_btn = self.gui_manager.create_modern_button(
+                button_frame, "Save & Close", 
+                self.gui_manager.theme_colors["accent_green"], 
+                self._save_and_close
+            )
+            cancel_btn = self.gui_manager.create_modern_button(
+                button_frame, "Cancel", 
+                self.gui_manager.theme_colors["accent_red"], 
+                self._on_close
+            )
+        else:
+            save_btn = ttk.Button(button_frame, text="Save & Close", command=self._save_and_close)
+            cancel_btn = ttk.Button(button_frame, text="Cancel", command=self._on_close)
+        
+        save_btn.pack(side=tk.LEFT, padx=5)
+        cancel_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Set initial mode after UI is created
+        self.review_window.after(100, lambda: self._set_mode("dry"))
+    
+    def _apply_duplicate_resolution(self):
+        """Apply duplicate resolution and move to normal review."""
+        # ===================================================
+        # Validate duplicates are resolved
+        is_valid, errors = self.grid_canvas.validate_duplicate_resolution()
+        
+        if not is_valid:
+            DialogHelper.show_message(
+                self.review_window,
+                "Validation Error",
+                "Please resolve all duplicates:\n\n" + "\n".join(errors),
+                message_type="error"
+            )
+            return
+        
+        # Mark duplicates as resolved
+        self.grid_canvas.duplicates_resolved = True
+        
+        # Hide duplicate frame, show normal actions
+        self.duplicate_frame.pack_forget()
+        
+        # Reload in standard grid layout
+        self.grid_canvas.layout_mode = "grid"
+        self.grid_canvas.load_items(self.grid_canvas.review_items, self.grid_canvas.hole_id)
+        
+        # Update status
+        self._update_status()
+        self.update_status_table()
+        # ===================================================
+
+    # Update load_items to show/hide duplicate button
+    def _update_duplicate_controls(self):
+        """Show/hide duplicate resolution controls based on state."""
+        # ===================================================
+        # INSERT: New method
+        if hasattr(self, 'duplicate_frame') and hasattr(self.grid_canvas, 'has_duplicates'):
+            if self.grid_canvas.has_duplicates and not self.grid_canvas.duplicates_resolved:
+                self.duplicate_frame.pack(side=tk.LEFT, padx=20, after=self.mode_buttons['bad_image'].master)
+            else:
+                self.duplicate_frame.pack_forget()
+        # ===================================================
+
+    def update_status_table(self):
+        """Update the status table with current classifications."""
+        # Clear existing items
+        for item in self.status_tree.get_children():
+            self.status_tree.delete(item)
+        
+        # Get current results from grid
+        reviewed, unreviewed = self.grid_canvas.get_results()
+        all_items = reviewed + unreviewed
+        
+        # Group by depth
+        depth_groups = {}
+        for item in all_items:
+            depth = item.depth_to
+            if depth not in depth_groups:
+                depth_groups[depth] = []
+            depth_groups[depth].append(item)
+        
+        # Add rows for each depth
+        row_num = 1
+        for depth in sorted(depth_groups.keys()):
+            items = depth_groups[depth]
+            
+            # Determine status
+            statuses = []
+            for item in items:
+                if item.quality == "Missing":
+                    statuses.append("Delete")
+                elif item.moisture:
+                    status = f"OK_{item.moisture}"
+                    # Check for bad image flag
+                    idx = self.grid_canvas.review_items.index(item)
+                    if self.grid_canvas.item_states[idx].get("bad_image"):
+                        status += "_Bad"
+                    statuses.append(status)
+                else:
+                    statuses.append("Unclassified")
+            
+            # Determine action
+            if "Unclassified" in statuses:
+                action = "Pending"
+                validation = "⚠️ Needs classification"
+            elif len([s for s in statuses if s.startswith("OK_")]) > 1:
+                action = "Error"
+                validation = "❌ Multiple files for same moisture"
+            else:
+                action = "Update"
+                validation = "✅ Ready"
+            
+            # Insert row
+            self.status_tree.insert(
+                '', 'end',
+                text=str(row_num),
+                values=(
+                    f"{depth}m",
+                    ", ".join(statuses),
+                    action,
+                    validation
+                )
+            )
+            row_num += 1
+
+    def _create_status_bar(self):
+        """Create status bar at bottom."""
+        status_frame = ttk.Frame(self.review_window)
+        status_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        self.status_label = ttk.Label(status_frame, text="", relief=tk.SUNKEN)
+        self.status_label.pack(fill=tk.X, padx=5, pady=2)
+        
+        self._update_status()
+    
+    def _set_mode(self, mode: str):
+        """Set the current interaction mode."""
+        self.grid_canvas.set_mode(mode)
+        
+        # Update button states
+        for m, btn in self.mode_buttons.items():
+            if m == mode:
+                btn.configure(state="disabled")
+            else:
+                btn.configure(state="normal")
+        
+        self._update_status()
+    
+    def _clear_selection(self):
+        """Clear current selection."""
+        self.grid_canvas._clear_selection()
+        self._update_status()
+    
+    def _reset_all(self):
+        """Reset all classifications."""
+        response = DialogHelper.confirm_dialog(
+            self.review_window,
+            "Reset All",
+            "This will clear all classifications. Continue?"
+        )
+        if response:
+            # Reset all states
+            for state in self.grid_canvas.item_states.values():
+                state["moisture"] = None
+                state["delete"] = False
+            
+            # Update all visuals
+            for (row, col) in self.grid_canvas.cells:
+                self.grid_canvas._update_cell_visual(row, col)
+            
+            self._update_status()
+    
+    def _update_status(self):
+        """Update status bar."""
+        counts = self.grid_canvas.get_status_counts()
+        
+        status = (f"Total: {counts['total']} | "
+                 f"Wet: {counts['wet']} | "
+                 f"Dry: {counts['dry']} | "
+                 f"Delete: {counts['delete']} | "
+                 f"Unclassified: {counts['unclassified']}")
+        
+        if counts['selected'] > 0:
+            status += f" | Selected: {counts['selected']}"
+        
+        status += f" | Mode: {self.grid_canvas.current_mode.upper()}"
+        
+        self.status_label.configure(text=status)
+    
+    def _setup_keyboard_shortcuts(self):
+        """Setup keyboard shortcuts."""
+        self.review_window.bind('s', lambda e: self._set_mode("select"))
+        self.review_window.bind('w', lambda e: self._set_mode("wet"))
+        self.review_window.bind('d', lambda e: self._set_mode("dry"))
+        self.review_window.bind('x', lambda e: self._set_mode("delete"))
+        self.review_window.bind('<Control-a>', lambda e: self._select_all())
+        self.review_window.bind('<Escape>', lambda e: self._clear_selection())
+    
+    def _select_all(self):
+        """Select all items."""
+        for (row, col) in self.grid_canvas.cells:
+            self.grid_canvas._select_cell(row, col)
+        self._update_status()
+    
+    def _save_and_close(self):
+        """Save classifications and close."""
+        if self.close_callback:
+            self.close_callback(cancelled=False)
+        self.review_window.destroy()
+    
+    def _on_close(self):
+        """Handle window close."""
+        response = DialogHelper.confirm_dialog(
+            self.review_window,
+            "Cancel Review",
+            "Are you sure you want to cancel? Unsaved changes will be lost." # TODO - Don't say it will be lost just prompt them to save.
+        )
+        if response:
+            if self.close_callback:
+                self.close_callback(cancelled=True)
+            self.review_window.destroy()
+    
+    def set_close_callback(self, callback): # TODO - check that closing will actually close!
+        """Set callback for window close."""
+        self.close_callback = callback
+    
+    def get_reviewed_items(self) -> List[ReviewItem]:
+        """Get reviewed items."""
+        reviewed, _ = self.grid_canvas.get_results()
+        return reviewed
+    
+    def get_unreviewed_items(self) -> List[ReviewItem]:
+        """Get unreviewed items."""
+        _, unreviewed = self.grid_canvas.get_results()
+        return unreviewed
+
+    def _rotate_images(self):
+        """Rotate all images 90 degrees clockwise."""
+        # ===================================================
+        # REPLACE: Better rotation handling with aspect ratio preservation
+        # Rotate and recalculate optimal dimensions
+        current_rotation = getattr(self.grid_canvas, 'image_rotation', 0)
+        new_rotation = (current_rotation + 90) % 360
+        self.grid_canvas.image_rotation = new_rotation
+        
+        # Swap base dimensions for 90/270 degree rotations
+        if (current_rotation in [0, 180] and new_rotation in [90, 270]) or \
+        (current_rotation in [90, 270] and new_rotation in [0, 180]):
+            # Swap base dimensions
+            self.grid_canvas.base_cell_width, self.grid_canvas.base_cell_height = \
+                self.grid_canvas.base_cell_height, self.grid_canvas.base_cell_width
+        
+        # Apply scale factor
+        self.grid_canvas.cell_width = int(self.grid_canvas.base_cell_width * self.grid_canvas.scale_factor)
+        self.grid_canvas.cell_height = int(self.grid_canvas.base_cell_height * self.grid_canvas.scale_factor)
+        
+        # Recalculate columns
+        canvas_width = self.grid_canvas.parent.winfo_width()
+        self.grid_canvas.cols_per_row = max(1, (canvas_width - 2 * self.grid_canvas.padding) // 
+                                            (self.grid_canvas.cell_width + self.grid_canvas.padding))
+        
+        # Reload with current classifications preserved
+        self.grid_canvas.load_items(self.grid_canvas.review_items, self.grid_canvas.hole_id)
+        self._update_status()
+
+    def _set_layout(self, layout_type: str):
+        """Change the grid layout type."""
+        if layout_type == "grid":
+            self.grid_canvas.cols_per_row = 5  # Default grid columns
+        elif layout_type == "column":
+            self.grid_canvas.layout_mode = "vertical"
+            # self.grid_canvas.cols_per_row = 1  # Single column
+        
+        # Reload with current classifications preserved
+        self.grid_canvas.load_items(self.grid_canvas.review_items, self.grid_canvas.hole_id)
+        self._update_status()
+
+    def _scale_images(self, scale_factor: float):
+        """Scale images by the given factor."""
+        # ===================================================
+        # REPLACE: Better scaling with aspect ratio preservation
+        # Update scale
+        new_scale = self.grid_canvas.scale_factor * scale_factor
+        new_scale = max(0.3, min(2.0, new_scale))
+        
+        if new_scale == self.grid_canvas.scale_factor:
+            return  # No change
+        
+        self.grid_canvas.scale_factor = new_scale
+        
+        # Update cell dimensions maintaining aspect ratio
+        self.grid_canvas.cell_width = int(self.grid_canvas.base_cell_width * new_scale)
+        self.grid_canvas.cell_height = int(self.grid_canvas.base_cell_height * new_scale)
+        
+        # Recalculate columns
+        canvas_width = self.grid_canvas.parent.winfo_width()
+        self.grid_canvas.cols_per_row = max(1, (canvas_width - 2 * self.grid_canvas.padding) // 
+                                            (self.grid_canvas.cell_width + self.grid_canvas.padding))
+        
+        # Reload with current classifications preserved
+        self.grid_canvas.load_items(self.grid_canvas.review_items, self.grid_canvas.hole_id)
+        self._update_status()
+        # ===================================================
+
+    def _reset_all(self):
+        """Reset all classifications after confirmation."""
+        response = DialogHelper.confirm_dialog(
+            self.review_window,
+            "Reset All Classifications",
+            "This will clear all classifications and bring back all images. Continue?"
+        )
+        if response:
+            # Reset all states
+            for state in self.grid_canvas.item_states.values():
+                state["moisture"] = None
+                state["delete"] = False
+                state["bad_image"] = False
+            
+            # Reset duplicate resolution flag if any
+            if hasattr(self.grid_canvas, 'duplicates_resolved'):
+                self.grid_canvas.duplicates_resolved = False
+            
+            # Reload the grid
+            self.grid_canvas.load_items(self.grid_canvas.review_items, self.grid_canvas.hole_id)
+            
+            # Update status
+            self._update_status()
+            self.update_status_table()
+
+# ============================================================================
+# MAIN QAQC MANAGER
+# ============================================================================
+
+class QAQCManager:
+    """Main coordinator for quality assurance and quality control."""
+    
+    def __init__(self, file_manager, translator_func, config_manager,
+                 app, logger, register_manager, gui_manager=None):
+        """Initialize the QAQC Manager."""
+        if threading.current_thread() != threading.main_thread():
+            raise RuntimeError("QAQCManager must be created on the main thread!")
+        
+        self.root = app.root
+        self.file_manager = file_manager
+        self.t = translator_func
+        self.config_manager = config_manager
+        self.app = app
+        self.logger = logger
+        self.register_manager = register_manager
+        self.gui_manager = gui_manager
+        self.stop_review_process = False
+        
+        # Initialize components
+        self.scanner = QAQCScanner(
+            file_manager=file_manager,
+            register_manager=register_manager,
+            compartment_interval=app.config['compartment_interval'],
+            logger=logger
+        )
+        
+        self.processor = QAQCProcessor(
+            file_manager=file_manager,
+            register_manager=register_manager,
+            config=app.config,
+            logger=logger
+        )
+        
+        self.dialog = QAQCGridReviewDialog(
+            parent=self.root,
+            app=app,
+            translator_func=translator_func,
+            logger=logger
+        )
+        
+        self.main_gui = app.main_gui if hasattr(app, 'main_gui') else None
+    
+    def set_main_gui(self, main_gui):
+        """Set reference to main GUI for status updates."""
+        self.main_gui = main_gui
+    
+    def start_review_process(self):
+        """Entry point for the QAQC review process."""
+        # Reset statistics
+        self.processor.reset_stats()
+        
+        # Step 1: Load register data
+        self.scanner.load_register_into_memory()
+        
+        # Step 2: Build review queue from local files
+        temp_review_path = self.file_manager.dir_structure["temp_review"]
+        local_review_items = self.scanner.scan_local_review_folder(temp_review_path)
+        
+        if local_review_items:
+            # Process local files by hole
+            self._process_review_queue(local_review_items)
+        else:
+            # Step 3: Check shared folders for items needing review
+            shared_review_items = self.scanner.scan_shared_folders_for_review()
+            
+            if shared_review_items:
+                # Move one hole at a time to local and process
+                self._process_shared_items(shared_review_items)
+            else:
+                self._show_nothing_to_review_message()
+    
+    def _process_review_queue(self, items_by_hole: Dict[str, List[ReviewItem]]):
+        """Process review items one hole at a time."""
+        total_holes = len(items_by_hole)
+        self.stop_review_process = False
+        
+        for idx, (hole_id, review_items) in enumerate(items_by_hole.items()):
+            # Check if user wants to stop
+            if self.stop_review_process:
+                self.logger.info("Review process stopped by user")
+                break
+            
+            # Update status
+            if self.main_gui:
+                self.main_gui.direct_status_update(
+                    f"Processing hole {idx + 1}/{total_holes}: {hole_id}",
+                    status_type="info"
+                )
+            
+            # Sort by depth
+            review_items.sort(key=lambda x: x.depth_to)
+            
+            # Set callback
+            self.dialog.set_close_callback(
+                lambda cancelled=False: self._on_hole_review_complete(hole_id, cancelled)
+            )
+            
+            # Show review GUI
+            self.dialog.show_review_window(hole_id, review_items)
+            
+            # Wait for dialog to close
+            self.root.wait_window(self.dialog.review_window)
+    
+    def _on_hole_review_complete(self, hole_id: str, cancelled: bool = False):
+        """Handle completion of review for a single hole."""
+        if cancelled:
+            self.stop_review_process = True
+            self.logger.info(f"Review cancelled for hole {hole_id}")
+            return
+        
+        # Get reviewed and unreviewed items
+        reviewed_items = self.dialog.get_reviewed_items()
+        unreviewed_items = self.dialog.get_unreviewed_items()
+        
+
+        # Handle unreviewed items
+        move_to_shared = False  # Track user choice
+        if unreviewed_items:
+            message = self.t(
+                f"There are {len(unreviewed_items)} unreviewed compartments.\n\n"
+                "Would you like to move them to the shared review folder for later processing?\n\n"
+                "Yes - Move to shared folder for team review\n"
+                "No - Keep in local folder (may be lost if not backed up)"
+            )
+            
+            move_to_shared = DialogHelper.confirm_dialog(
+                self.dialog.review_window,
+                self.t("Unreviewed Compartments"),
+                message,
+                yes_text=self.t("Move to Shared"),
+                no_text=self.t("Keep Local")
+            )
+            
+            if move_to_shared:
+                # Create progress dialog if many items
+                progress_dialog = None
+                if len(unreviewed_items) > 3:
+                    progress_dialog = ProgressDialog(
+                        self.dialog.review_window,
+                        self.t("Moving Files"),
+                        self.t("Moving unreviewed files to shared folder..."),
+                        maximum=len(unreviewed_items)
+                    )
+                
+                try:
+                    moved, failed = self.processor.move_unreviewed_items_to_shared(
+                        unreviewed_items,
+                        progress_callback=progress_dialog.update if progress_dialog else None
+                    )
+                    
+                    if failed > 0:
+                        DialogHelper.show_message(
+                            self.dialog.review_window,
+                            self.t("Partial Success"),
+                            self.t(f"Moved {moved} files successfully.\n{failed} files failed to move."),
+                            message_type="warning"
+                        )
+                finally:
+                    if progress_dialog:
+                        progress_dialog.close()
+
+        # Check for any other remaining files
+        if move_to_shared:
+            remaining_moved = self.processor.check_and_move_remaining_temp_files(hole_id)
+            if remaining_moved > 0:
+                self.logger.info(f"Moved {remaining_moved} additional files from temp folder")
+        
+        # ===================================================
+        # Process reviewed items
+        if reviewed_items:
+            self.processor.batch_process_reviewed_items(reviewed_items)
+        
+        # Free memory
+        for item in reviewed_items + unreviewed_items:
+            item.unload_image()
+        
+        # Show summary if we processed anything
+        if reviewed_items or unreviewed_items:
+            self._show_hole_summary(len(reviewed_items), len(unreviewed_items), 
+                                   move_to_shared if unreviewed_items else False)
+    
+    def _process_shared_items(self, shared_items_by_hole: Dict[str, List[str]]):
+        """Move shared items to local one hole at a time and process."""
+        for hole_id, file_paths in shared_items_by_hole.items():
+            # Update status
+            if self.main_gui:
+                self.main_gui.direct_status_update(
+                    f"Moving {len(file_paths)} files for {hole_id} to local review...",
+                    status_type="info"
+                )
+            
+            # Move files to local temp_review
+            local_paths = self.processor.move_files_to_local(hole_id, file_paths)
+            
+            if local_paths:
+                # Now scan and process as local files
+                local_items = self.scanner.scan_specific_files(local_paths)
+                
+                # Process this hole
+                self._process_review_queue({hole_id: local_items})
+    
+    def _show_hole_summary(self, reviewed_count: int, unreviewed_count: int, moved_to_shared: bool):
+        """Show summary for a single hole."""
+        summary_message = []
+        if reviewed_count > 0:
+            summary_message.append(self.t(f"✓ Reviewed and saved: {reviewed_count} compartments"))
+        if unreviewed_count > 0 and moved_to_shared:
+            summary_message.append(self.t(f"↗ Moved to shared review: {unreviewed_count} compartments"))
+        elif unreviewed_count > 0:
+            summary_message.append(self.t(f"⚠ Left in local folder: {unreviewed_count} compartments"))
+        
+        DialogHelper.show_message(
+            self.root,
+            self.t("Hole Review Complete"),
+            "\n".join(summary_message),
+            message_type="info"
+        )
+    
+    def _show_nothing_to_review_message(self):
+        """Show message when there's nothing to review."""
+        DialogHelper.show_message(
+            self.root,
+            self.t("Review Complete"),
+            self.t("No images to review and all files are synchronized."),
+            message_type="info"
+        )
+    
+    def _show_final_summary(self):
+        """Show final processing summary and update main GUI."""
+        summary_message = self.processor.get_summary_message()
         
         # Update main GUI if available
-        if hasattr(self, 'main_gui') and self.main_gui:
+        if self.main_gui:
             self.main_gui.direct_status_update(summary_message, status_type="info")
-            
-            # Log summary
-            self.logger.info(summary_message)
+        
+        # Log summary
+        self.logger.info(summary_message)
+        
+        # Show dialog
+        DialogHelper.show_message(
+            self.root,
+            self.t("QAQC Complete"),
+            self.t(summary_message),
+            message_type="info"
+        )
+
+
+# Export main classes
+__all__ = [
+    'QAQCManager',
+    'ReviewItem',
+    'QAQCConstants'
+]

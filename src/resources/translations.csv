@@ -398,3 +398,56 @@ Unsaved Changes,Unsaved Changes,Modifications non enregistrées
 There are unsaved changes. Save before closing?,There are unsaved changes. Save before closing?,Des modifications n'ont pas été enregistrées. Enregistrer avant de fermer ?
 Save & Close,Save & Close,Enregistrer et fermer
 Close Without Saving,Close Without Saving,Fermer sans enregistrer
+En,En,Fr
+Current version,Current version,Version actuelle
+Latest version,Latest version,Dernière version
+For the update please contact:,For the update please contact:,Pour la mise à jour -  veuillez contacter :
+QAQC Review - SB0043,QAQC Review - SB0043,Révision QAQC - SB0043
+Existing Wet,Existing Wet,Humide existant
+Moisture,Moisture,Humidité
+Dry,Dry,Sec
+Quality Status,Quality Status,Statut de qualité
+Skip,Skip,Ignorer
+Existing Unclassified,Existing Unclassified,Non classé existant
+Remove,Remove,Supprimer
+Existing Dry,Existing Dry,Sec existant
+1: OK | 2: Blurry | 3: Damaged | 4: Missing,1: OK | 2: Blurry | 3: Damaged | 4: Missing,1 : OK | 2 : Flou | 3 : Endommagé | 4 : Manquant
+"W: Set Wet | D: Set Dry | ← → Navigate""","W: Set Wet | D: Set Dry | ← → Navigate""","W : Définir humide | D : Définir sec | ← → Navigation"""
+Save & Continue,Save & Continue,Enregistrer & Continuer
+Wet,Wet,Humide
+Reason for Rejection,Reason for Rejection,Motif de rejet
+Embedding Tool,Embedding Tool,Outil d'embedding
+Select Image Folder,Select Image Folder,Sélectionner le dossier d'images
+Select Input Columns,Select Input Columns,Sélectionner les colonnes d'entrée
+Generate Embeddings,Generate Embeddings,Générer des embeddings
+No wet image,No wet image,Pas d'image humide
+No current image,No current image,Pas d'image actuelle
+No dry image,No dry image,Pas d'image sèche
+Unreviewed Compartments,Unreviewed Compartments,Compartiments non révisés
+Move to Shared,Move to Shared,Déplacer vers partagé
+Keep Local,Keep Local,Conserver en local
+There are unreviewed compartments.,There are unreviewed compartments.,Il y a compartiments non révisés.
+Would you like to move them to the shared review folder for later processing?,Would you like to move them to the shared review folder for later processing?,Souhaitez-vous les déplacer vers le dossier de révision partagé pour un traitement ultérieur ?
+Yes - Move to shared folder for team review,Yes - Move to shared folder for team review,Oui - Déplacer vers le dossier partagé pour la revue d'équipe
+No - Keep in local folder (may be lost if not backed up),No - Keep in local folder (may be lost if not backed up),Non - Conserver dans le dossier local (peut être perdu s'il n'est pas sauvegardé)
+No image available,No image available,Aucune image disponible
+QAQC Review - SB9999,QAQC Review - SB9999,Révision QAQC - SB9999
+? Left in local folder: 162 compartments,? Left in local folder: 162 compartments,? Restés dans le dossier local : 162 compartiments
+? Left in local folder: 40 compartments,? Left in local folder: 40 compartments,? Restés dans le dossier local : 40 compartiments
+? Left in local folder: 1 compartments,? Left in local folder: 1 compartments,? Resté dans le dossier local : 1 compartiment
+? Left in local folder: 100 compartments,? Left in local folder: 100 compartments,? Restés dans le dossier local : 100 compartiments
+? Reviewed and saved: 1 compartments,? Reviewed and saved: 1 compartments,? Révisé et enregistré : 1 compartiment
+? Moved to shared review: 1 compartments,? Moved to shared review: 1 compartments,? Déplacé vers la revue partagée : 1 compartiment
+Select,Select,Sélectionner
+Wet Brush,Wet Brush,Pinceau humide
+Dry Brush,Dry Brush,Pinceau sec
+Delete,Delete,Supprimer
+Error,Error,Erreur
+An error occurred starting the review:,An error occurred starting the review:,Une erreur est survenue lors du démarrage de la révision :
+Placed compartment at depth 10m (x=1389),Placed compartment at depth 10m (x=1389),Compartiment placé à 10 m de profondeur (x=1389)
+Placed compartment at depth 24m (x=751),Placed compartment at depth 24m (x=751),Compartiment placé à 24 m de profondeur (x=751)
+Undid compartment at depth 24m. Please place it again.,Undid compartment at depth 24m. Please place it again.,Placement du compartiment à 24 m annulé. Veuillez le placer à nouveau .
+Placed compartment at depth 24m (x=752),Placed compartment at depth 24m (x=752),Compartiment placé à 24 m de profondeur (x=752)
+Bad Image,Bad Image,Mauvaise image
+Rotate,Rotate,Faire pivoter
+Grid Layout,Grid Layout,Disposition en grille

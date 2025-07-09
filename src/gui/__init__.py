@@ -3,7 +3,6 @@
 from gui.dialog_helper import DialogHelper
 from gui.duplicate_handler import DuplicateHandler
 from gui.gui_manager import GUIManager
-from gui.qaqc_manager import QAQCManager
 from gui.first_run_dialog import FirstRunDialog
 from gui.compartment_registration_dialog import CompartmentRegistrationDialog
 from gui.main_gui import MainGUI
@@ -20,6 +19,8 @@ from gui.drillhole_trace_designer import DrillholeTraceDesigner
 from gui.logging_review_dialog import LoggingReviewDialog
 from gui.progress_dialog import ProgressDialog
 from gui.widgets.modern_notebook import ModernNotebook
+from gui.embedding_training_dialog import EmbeddingTrainingDialog
+from gui.qaqc_manager import QAQCManager, ReviewItem, QAQCConstants
 
 
 # Optional: Define __all__ to control what gets imported with from gui import *
@@ -28,6 +29,8 @@ __all__ = [
     'DuplicateHandler',
     'GUIManager',
     'QAQCManager',
+    'ReviewItem', 
+    'QAQCConstants',
     'CompartmentRegistrationDialog',
     'MainGUI',
     'CollapsibleFrame',
@@ -39,6 +42,7 @@ __all__ = [
     'create_themed_combobox',
     'DrillholeTraceDesigner',
     'LoggingReviewDialog',
+    'EmbeddingTrainingDialog',
     'ProgressDialog',
     'ModernNotebook',
     'FirstRunDialog',
