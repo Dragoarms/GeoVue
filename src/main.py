@@ -2474,65 +2474,6 @@ class GeoVue:
         
         return compartments
 
-    # def get_processing_data(self, key: str = None):
-    #     """Get data from current processing cache."""
-    #     if not hasattr(self, 'visualization_cache') or 'current_processing' not in self.visualization_cache:
-    #         return None
-        
-    #     if key:
-    #         return self.visualization_cache['current_processing'].get(key)
-    #     return self.visualization_cache['current_processing']
-
-    # def update_processing_data(self, updates: Dict[str, Any]):
-    #     """Update the current processing cache."""
-    #     if not hasattr(self, 'visualization_cache'):
-    #         self.visualization_cache = {}
-    #     if 'current_processing' not in self.visualization_cache:
-    #         self.visualization_cache['current_processing'] = {}
-        
-    #     self.visualization_cache['current_processing'].update(updates)
-    #     self.logger.debug(f"Updated processing cache with keys: {list(updates.keys())}")
-
-
-    # def update_boundaries_from_dialog(self, new_boundaries: List[Tuple[int, int, int, int]], 
-    #                                 scale: str = 'working'):
-    #     """Update boundaries in the cache, maintaining scale information."""
-    #     self.logger.debug(f"update_boundaries_from_dialog called with scale='{scale}'")
-    #     self.logger.debug(f"Received {len(new_boundaries)} boundaries")
-        
-    #     # Log first few boundaries for inspection
-    #     for i, boundary in enumerate(new_boundaries[:3]):
-    #         self.logger.debug(f"  Boundary {i}: {boundary}")
-    #     if len(new_boundaries) > 3:
-    #         self.logger.debug(f"  ... and {len(new_boundaries) - 3} more boundaries")
-        
-    #     if scale == 'working':
-    #         self.logger.debug("Updating processing data with working scale boundaries")
-            
-    #         # Get current processing data to check what's there
-    #         current_data = self.get_processing_data()
-    #         if current_data:
-    #             self.logger.debug(f"Current boundaries_scale: {current_data.get('boundaries_scale', 'not set')}")
-    #             if 'compartment_boundaries' in current_data:
-    #                 self.logger.debug(f"Current boundaries count: {len(current_data['compartment_boundaries'])}")
-            
-    #         self.update_processing_data({
-    #             'compartment_boundaries': new_boundaries,
-    #             'boundaries_scale': 'working'
-    #         })
-            
-    #         # Verify the update
-    #         updated_data = self.get_processing_data()
-    #         self.logger.debug(f"After update - boundaries_scale: {updated_data.get('boundaries_scale', 'not set')}")
-    #         self.logger.debug(f"After update - boundaries count: {len(updated_data.get('compartment_boundaries', []))}")
-    #     else:
-    #         self.logger.debug(f"WARNING: Called with scale='{scale}' which is not handled!")
-        
-    #     # Re-calculate corners
-    #     self.logger.debug("Calling _update_corners_from_boundaries")
-    #     self._update_corners_from_boundaries(new_boundaries)
-    #     self.logger.debug("update_boundaries_from_dialog completed")
-    
     def handle_markers_and_boundaries(self, image, detected_boundaries, missing_marker_ids=None, 
                             metadata=None, vertical_constraints=None, 
                             rotation_angle=0.0, corner_markers=None, marker_to_compartment=None, 
@@ -2738,7 +2679,7 @@ class GeoVue:
             
             # Set the initial mode after creation
             dialog.current_mode = initial_mode
-            dialog._update_mode_indicator()  # Update UI to reflect the mode
+            dialog._update_mode_display()  # Update UI to reflect the mode
             
             self.logger.debug(f"CompartmentRegistrationDialog object created in mode {initial_mode}")
 

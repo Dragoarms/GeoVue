@@ -478,9 +478,6 @@ class DialogHelper:
         icon_label = ttk.Label(top_frame, text=icon_text, font=("Arial", 24))
         icon_label.pack(side=tk.LEFT, padx=(0, 10))
         
-        # translate all text        
-        text = DialogHelper.t(text)
-
         # Message with proper wraplength
         msg_label = ttk.Label(
             top_frame, 

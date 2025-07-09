@@ -1061,26 +1061,26 @@ class MetadataPanel:
         row = 0
         
         # Check if we should show increment button
-        # if self._has_valid_last_metadata():
+        if self._has_valid_last_metadata():
         # Determine button color based on validation
-        button_color = self._get_increment_button_color()
+            button_color = self._get_increment_button_color()
         
-        # Create increment button
-        if gui_manager:
-            self.increment_button = gui_manager.create_modern_button(
-                container,
-                text=DialogHelper.t("Increment From Last"),
-                color=button_color,
-                command=self._on_increment_from_last
-            )
-        else:
-            self.increment_button = tk.Button(
-                container,
-                text=DialogHelper.t("Increment From Last"),
-                command=self._on_increment_from_last
-            )
-        self.increment_button.grid(row=row, column=0, columnspan=4, pady=(0, 10), sticky=tk.EW)
-        row += 1
+            # Create increment button
+            if gui_manager:
+                self.increment_button = gui_manager.create_modern_button(
+                    container,
+                    text=DialogHelper.t("Increment From Last"),
+                    color=button_color,
+                    command=self._on_increment_from_last
+                )
+            else:
+                self.increment_button = tk.Button(
+                    container,
+                    text=DialogHelper.t("Increment From Last"),
+                    command=self._on_increment_from_last
+                )
+            self.increment_button.grid(row=row, column=0, columnspan=4, pady=(0, 10), sticky=tk.EW)
+            row += 1
         
         # Single row for all fields
         fields_frame = ttk.Frame(container, style='Content.TFrame')
@@ -2175,7 +2175,7 @@ class DialogCanvasRenderer:
                               canvas: tk.Canvas, 
                               boundary_state: BoundaryState) -> None:
         """Draw boundary adjustment guide lines on canvas."""
-        if not self.working_image:
+        if self.working_image is None:
             return
         
         img_width = self.working_image.shape[1]
@@ -2746,6 +2746,15 @@ class BoundaryAdjuster:
         # Per-compartment adjustments
         self.compartment_adjustments = {}  # compartment_index -> {'top_offset': 0, 'bottom_offset': 0}
         
+        # Button references (will be set in create_controls)
+        self.comp_top_up = None
+        self.comp_top_down = None
+        self.comp_bottom_up = None
+        self.comp_bottom_down = None
+        self.compartment_frame = None
+        self.selection_label = None
+
+
     def create_controls(self, parent_frame: tk.Widget, theme_colors: Dict, 
                        gui_manager=None) -> tk.Widget:
         """Create adjustment control UI."""
@@ -2953,6 +2962,9 @@ class BoundaryAdjuster:
     def handle_compartment_click(self, image_x: int, image_y: int, 
                                 working_image_shape: Tuple[int, int]) -> bool:
         """Handle click on compartment for selection."""
+        if not self.all_compartments:
+            return False
+            
         # Apply current boundary adjustments to get actual positions
         img_height, img_width = working_image_shape
         
@@ -3031,7 +3043,11 @@ class BoundaryAdjuster:
         
     def adjust_height(self, delta: int):
         """Adjust overall height for all compartments."""
-        img_height = 800  # Default, should be passed from working image
+        # Get image height from the first boundary or use default
+        if self.all_compartments and hasattr(self.all_compartments[0], 'y2'):
+            img_height = max(c.y2 for c in self.all_compartments) + 100
+        else:
+            img_height = 800  # Default fallback
         distance = self.boundary_state.bottom_y - self.boundary_state.top_y
         
         new_top = max(0, min(img_height - distance - 1, self.boundary_state.top_y + delta))

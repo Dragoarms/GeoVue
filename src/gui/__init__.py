@@ -21,6 +21,7 @@ from gui.progress_dialog import ProgressDialog
 from gui.widgets.modern_notebook import ModernNotebook
 from gui.embedding_training_dialog import EmbeddingTrainingDialog
 from gui.qaqc_manager import QAQCManager, ReviewItem, QAQCConstants
+from gui.splash_screen import SplashScreen
 
 
 # Optional: Define __all__ to control what gets imported with from gui import *
