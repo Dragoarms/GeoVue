@@ -13,6 +13,7 @@ import logging
 from typing import Dict, List, Optional, Tuple, Any
 import threading
 from PIL import Image, ImageTk
+import gc
 
 from gui.compartment_registration_dialog import CompartmentRegistrationDialog
 from gui.dialog_helper import DialogHelper
@@ -100,14 +101,17 @@ class ImageAlignmentDialog:
         self.cumulative_offset_y = 0.0  # Total vertical offset
         self.transform_center = None  # Will be calculated
 
-        # Store working copies
+        # Store working copies - avoid copying large images unnecessarily
         self.source_image = image.copy() if image is not None else None
         self.transformed_image = (
             self.source_image.copy() if self.source_image is not None else None
         )
-        self.high_res_image = (
-            original_image.copy() if original_image is not None else None
-        )
+        
+        # Store reference to original image but don't copy it yet (memory optimization)
+        # We'll copy it only when we need to transform it
+        self._original_image_ref = original_image
+        self.high_res_image = None  # Will be created when needed
+        self._using_reference_mode = False  # Track if we're using reference mode for large images
 
         # Calculate the center of rotation
         self._calculate_transform_center()
@@ -148,6 +152,67 @@ class ImageAlignmentDialog:
         self.logger.info(
             f"Transform center calculated at: ({center_x:.1f}, {center_y:.1f})"
         )
+
+    def _get_high_res_image(self):
+        """Get high-res image, creating copy only when needed (memory optimization)."""
+        if self.high_res_image is None and self._original_image_ref is not None:
+            try:
+                # Check available memory before copying large image
+                import psutil
+                available_memory_mb = psutil.virtual_memory().available / (1024 * 1024)
+                
+                # Estimate memory needed for image copy (height * width * channels * bytes_per_pixel)
+                if hasattr(self._original_image_ref, 'shape'):
+                    h, w = self._original_image_ref.shape[:2]
+                    channels = self._original_image_ref.shape[2] if len(self._original_image_ref.shape) > 2 else 1
+                    estimated_mb = (h * w * channels) / (1024 * 1024)
+                    
+                    self.logger.info(f"Creating high-res image copy: {w}x{h}x{channels} (~{estimated_mb:.1f} MB)")
+                    self.logger.info(f"Available memory: {available_memory_mb:.1f} MB")
+                    
+                    if estimated_mb > available_memory_mb * 0.5:  # Don't use more than 50% of available memory
+                        self.logger.warning(f"Large image ({estimated_mb:.1f} MB) may cause memory issues.")
+                        self.logger.warning(f"Available memory: {available_memory_mb:.1f} MB")
+                        
+                        # Instead of automatically resizing, use reference and warn user
+                        # This preserves full quality but uses minimal memory until transformation
+                        self.logger.info("Using memory-efficient reference mode to preserve image quality")
+                        self.high_res_image = self._original_image_ref  # Use reference, not copy
+                        self._using_reference_mode = True
+                    else:
+                        # Safe to copy - sufficient memory available
+                        self.high_res_image = self._original_image_ref.copy()
+                        self._using_reference_mode = False
+                else:
+                    # Fallback if shape is not available
+                    self.high_res_image = self._original_image_ref.copy()
+                    
+            except ImportError:
+                # psutil not available, proceed without memory check
+                self.logger.warning("psutil not available for memory checking")
+                self.high_res_image = self._original_image_ref.copy()
+            except Exception as e:
+                self.logger.error(f"Error creating high-res image copy: {e}")
+                self.high_res_image = self._original_image_ref.copy()
+        
+        return self.high_res_image
+    
+    def cleanup_memory(self):
+        """Clean up memory by releasing image references."""
+        try:
+            self.logger.debug("Cleaning up image alignment dialog memory")
+            
+            # Clear image references
+            self.source_image = None
+            self.transformed_image = None
+            self.high_res_image = None
+            self._original_image_ref = None
+            
+            # Force garbage collection
+            gc.collect()
+            
+        except Exception as e:
+            self.logger.error(f"Error during memory cleanup: {e}")
 
     def _create_wrapped_dialog(self):
         """Create the wrapped dialog with overridden adjustment methods."""
@@ -207,12 +272,13 @@ class ImageAlignmentDialog:
 
     def get_final_transformation_matrix(self):
         """Get the final transformation matrix for high-res image."""
-        if self.high_res_image is not None:
-            h, w = self.high_res_image.shape[:2]
+        high_res_image = self._get_high_res_image()
+        if high_res_image is not None:
+            h, w = high_res_image.shape[:2]
 
             # Scale the transform center to high-res coordinates
             scale_factor = 1.0
-            if self.source_image is not None and self.high_res_image is not None:
+            if self.source_image is not None and high_res_image is not None:
                 scale_factor = w / self.source_image.shape[1]
 
             cx_highres = self.transform_center[0] * scale_factor
@@ -239,22 +305,36 @@ class ImageAlignmentDialog:
             # Apply final transformation to high-res image if needed
             if self.cumulative_rotation != 0 or self.cumulative_offset_y != 0:
                 M, (w, h) = self.get_final_transformation_matrix()
+                high_res_image = self._get_high_res_image()
 
-                if M is not None and self.high_res_image is not None:
+                if M is not None and high_res_image is not None:
                     self.logger.info(
                         f"Applying final transformation to high-res image: "
                         f"rotation={self.cumulative_rotation:.2f}°, offset_y={self.cumulative_offset_y:.1f}px"
                     )
 
-                    # Transform high-res image
-                    transformed_highres = cv2.warpAffine(
-                        self.high_res_image,
-                        M,
-                        (w, h),
-                        flags=cv2.INTER_LANCZOS4,  # High quality for final
-                        borderMode=cv2.BORDER_CONSTANT,
-                        borderValue=(255, 255, 255),
-                    )
+                    # Check if we're in reference mode and need to handle memory carefully
+                    if hasattr(self, '_using_reference_mode') and self._using_reference_mode:
+                        self.logger.info("Applying transformation in memory-efficient mode")
+                        # Transform directly without additional copying
+                        transformed_highres = cv2.warpAffine(
+                            high_res_image,
+                            M,
+                            (w, h),
+                            flags=cv2.INTER_LANCZOS4,  # High quality for final
+                            borderMode=cv2.BORDER_CONSTANT,
+                            borderValue=(255, 255, 255),
+                        )
+                    else:
+                        # Normal transformation with copied image
+                        transformed_highres = cv2.warpAffine(
+                            high_res_image,
+                            M,
+                            (w, h),
+                            flags=cv2.INTER_LANCZOS4,  # High quality for final
+                            borderMode=cv2.BORDER_CONSTANT,
+                            borderValue=(255, 255, 255),
+                        )
 
                     # Update result with transformed image
                     result["transformed_image"] = transformed_highres
@@ -266,6 +346,9 @@ class ImageAlignmentDialog:
                     # Boundaries stay the same - no transformation needed!
                     result["boundaries_need_transformation"] = False
 
+        # Clean up memory before returning
+        self.cleanup_memory()
+        
         return result
 
 

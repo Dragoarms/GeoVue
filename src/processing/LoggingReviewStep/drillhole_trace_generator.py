@@ -97,8 +97,8 @@ class DrillholeTraceGenerator:
                     if col not in ['holeid', 'cutoffs1', 'cutoffs2']:  # Don't convert text columns
                         try:
                             csv_data[col] = pd.to_numeric(csv_data[col], errors='coerce')
-                        except:
-                            self.logger.warning(f"Could not convert column {col} to numeric")
+                        except Exception as e:
+                            self.logger.warning(f"Could not convert column {col} to numeric: {e}")
                 
                 self.logger.info(f"Loaded CSV with {len(csv_data)} rows and {len(csv_data.columns)} columns")
                 if selected_columns:
@@ -1815,8 +1815,8 @@ class DrillholeTraceGenerator:
                     if col not in ['holeid', 'cutoffs1', 'cutoffs2']:  # Don't convert text columns
                         try:
                             csv_data[col] = pd.to_numeric(csv_data[col], errors='coerce')
-                        except:
-                            self.logger.warning(f"Could not convert column {col} to numeric")
+                        except Exception as e:
+                            self.logger.warning(f"Could not convert column {col} to numeric: {e}")
                 
                 self.logger.info(f"Loaded CSV with {len(csv_data)} rows and {len(csv_data.columns)} columns")
                 

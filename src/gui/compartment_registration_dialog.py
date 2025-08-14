@@ -5772,28 +5772,44 @@ class CompartmentRegistrationDialog:
     def _get_monitor_size(self):
         """Get the size of the monitor containing this dialog."""
         try:
-            # Try to get actual monitor dimensions
-            dialog_x = self.dialog.winfo_x()
-            dialog_y = self.dialog.winfo_y()
+            # Try tkinter approach first (most reliable)
+            try:
+                if hasattr(self, 'root') and self.root:
+                    width = self.root.winfo_screenwidth()
+                    height = self.root.winfo_screenheight()
+                    if width > 0 and height > 0:
+                        return width, height
+                elif hasattr(self, 'dialog') and self.dialog:
+                    width = self.dialog.winfo_screenwidth()
+                    height = self.dialog.winfo_screenheight()
+                    if width > 0 and height > 0:
+                        return width, height
+            except Exception:
+                pass
 
-            # Default to conservative size
-            width, height = 1920, 1080
-
-            # Platform-specific monitor detection
+            # Platform-specific monitor detection as fallback
             import platform
-
             if platform.system() == "Windows":
                 try:
                     import ctypes
-                    from ctypes import wintypes
+                    from ctypes import wintypes, Structure
 
-                    # Get monitor info for the point where dialog is
+                    # Define MONITORINFO structure
+                    class MONITORINFO(Structure):
+                        _fields_ = [
+                            ("cbSize", wintypes.DWORD),
+                            ("rcMonitor", wintypes.RECT),
+                            ("rcWork", wintypes.RECT),
+                            ("dwFlags", wintypes.DWORD)
+                        ]
+
+                    # Get primary monitor info
                     monitor = ctypes.windll.user32.MonitorFromPoint(
-                        wintypes.POINT(dialog_x, dialog_y),
-                        2,  # MONITOR_DEFAULTTONEAREST
+                        wintypes.POINT(0, 0),  # Primary monitor
+                        1,  # MONITOR_DEFAULTTOPRIMARY
                     )
 
-                    info = wintypes.MONITORINFO()
+                    info = MONITORINFO()
                     info.cbSize = ctypes.sizeof(info)
                     if ctypes.windll.user32.GetMonitorInfoW(
                         monitor, ctypes.byref(info)
@@ -5802,14 +5818,16 @@ class CompartmentRegistrationDialog:
                         work_area = info.rcWork
                         width = work_area.right - work_area.left
                         height = work_area.bottom - work_area.top
-                except:
+                        return width, height
+                except Exception:
                     pass
 
-            return width, height
+            # Final fallback
+            return 1920, 1080
 
-        except Exception as e:
-            self.logger.warning(f"Could not detect monitor size: {e}")
-            return 1920, 1080  # Safe fallback
+        except Exception:
+            # Safe fallback without logging if logger not available
+            return 1920, 1080
 
     def show(self):
         """

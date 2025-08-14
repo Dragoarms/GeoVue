@@ -110,7 +110,8 @@ class DialogHelper:
                 dpi_scale = scaling_factor / 1.333333  # Convert to percentage
             else:
                 dpi_scale = 1.0
-        except:
+        except Exception as e:
+            logger.debug(f"Could not get DPI scaling: {e}")
             dpi_scale = 1.0
 
         logger.debug(f"DPI scaling factor: {dpi_scale:.2f}")

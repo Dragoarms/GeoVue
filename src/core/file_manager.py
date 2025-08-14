@@ -110,6 +110,7 @@ from pillow_heif import register_heif_opener
 
 register_heif_opener()
 from PIL import Image as PILImage
+from PIL.PngImagePlugin import PngInfo
 
 
 class FileManager:
@@ -415,7 +416,7 @@ class FileManager:
         try:
             # Show message if path missing
             if missing_message and (not current_path or not current_path.exists()):
-                result = DialogHelper.ask_yes_no(
+                result = DialogHelper.confirm_dialog(
                     root,
                     DialogHelper.t("Path Not Found"),
                     DialogHelper.t(missing_message),
@@ -1602,23 +1603,33 @@ class FileManager:
             upload_success = False
             if shared_upload_path and upload_attempted:
                 try:
-                    # Optional: Give shared folder a moment to sync
-                    # import time
-                    # time.sleep(1)  # 1 second delay
+                    # Give shared folder a moment to sync (helps with cloud/network drives)
+                    import time
+                    time.sleep(0.5)  # 500ms delay for sync
 
-                    # Verify the upload
-                    if (
-                        shared_upload_path.exists()
-                        and shared_upload_path.stat().st_size
-                        == os.path.getsize(target_path)
-                    ):
-                        upload_success = True
-                        self.logger.info(
-                            f"Shared folder upload verified: {shared_upload_path}"
-                        )
+                    # Verify the upload (more tolerant of small size differences)
+                    if shared_upload_path.exists():
+                        local_size = os.path.getsize(target_path)
+                        shared_size = shared_upload_path.stat().st_size
+                        
+                        # Allow small size differences (metadata, compression, etc.)
+                        size_diff = abs(shared_size - local_size)
+                        max_diff = max(1024, local_size * 0.01)  # 1KB or 1% of file size
+                        
+                        if size_diff <= max_diff:
+                            upload_success = True
+                            self.logger.info(
+                                f"Shared folder upload verified: {shared_upload_path} "
+                                f"(local: {local_size}, shared: {shared_size})"
+                            )
+                        else:
+                            self.logger.warning(
+                                f"Shared folder upload size mismatch: local={local_size}, "
+                                f"shared={shared_size}, diff={size_diff}"
+                            )
                     else:
                         self.logger.warning(
-                            f"Shared folder upload verification failed - file may still be syncing"
+                            f"Shared folder upload verification failed - file not found: {shared_upload_path}"
                         )
 
                 except Exception as e:
@@ -1686,8 +1697,8 @@ class FileManager:
                             self.logger.info(
                                 f"Renamed source file to .processed: {source_path}"
                             )
-                        except:
-                            pass
+                        except Exception as e:
+                            self.logger.debug(f"Could not rename source file: {e}")
                 else:
                     self.logger.warning(
                         f"Source file not deleted - no successful saves confirmed"
@@ -1820,8 +1831,8 @@ class FileManager:
                     if os.path.exists(target_path):
                         try:
                             os.remove(target_path)
-                        except:
-                            pass
+                        except Exception as e:
+                            self.logger.debug(f"Could not clean up failed copy: {e}")
                     return None
             else:
                 self.logger.error("Emergency copy_with_metadata failed")
@@ -1857,8 +1868,9 @@ class FileManager:
             # Load existing EXIF data
             try:
                 exif_dict = piexif.load(image_path)
-            except:
+            except Exception as e:
                 # Create new EXIF dict if none exists
+                self.logger.debug(f"No existing EXIF data in {image_path}: {e}")
                 exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
 
             # Embed the UID in the ImageUniqueID field (0xA420)
@@ -2031,7 +2043,8 @@ class FileManager:
                 # TIFF can use EXIF similar to JPEG
                 try:
                     exif_dict = piexif.load(image_path)
-                except:
+                except Exception as e:
+                    self.logger.debug(f"No existing EXIF data in TIFF {image_path}: {e}")
                     exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
 
                 # Embed UID in EXIF

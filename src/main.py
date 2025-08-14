@@ -69,19 +69,21 @@ from resources import get_logo_path
 from processing.ArucoMarkersAndBlurDetectionStep.blur_detector import BlurDetector
 from PIL import Image as PILImage
 
-# # Version detection
-# try:
-#     if sys.version_info >= (3, 11):
-#         import tomllib  # built-in in Python 3.11+
-#     else:
-#         import tomli as tomllib
-# except ImportError:
-#     tomllib = None
-#     print("⚠️ tomli not installed — version fallback to unknown.")
+# Version detection
+try:
+    if sys.version_info >= (3, 11):
+        import tomllib  # built-in in Python 3.11+
+    else:
+        import tomli as tomllib
+except ImportError:
+    tomllib = None
+    print("Warning: tomli not installed — version fallback to unknown.")
 
 
 def get_version_from_pyproject():
     try:
+        if tomllib is None:
+            return "unknown"
         pyproject_path = os.path.join(os.path.dirname(__file__), "..", "pyproject.toml")
         with open(pyproject_path, "rb") as f:
             pyproject_data = tomllib.load(f)
@@ -2409,6 +2411,37 @@ class GeoVue:
                 else:
                     self.logger.debug(f"  - current_scale_data: NOT SET")
 
+                # Pre-calculate scale values once per image to avoid repeated calculations
+                cached_scale_values = None
+                if current_scale_data:
+                    scale_px_per_cm = current_scale_data.get("scale_px_per_cm")
+                    if scale_px_per_cm and scale_px_per_cm > 0:
+                        # Pre-calculate adjusted scale with all fallback logic
+                        if scale_px_per_cm_original is not None:
+                            adjusted_scale_px_per_cm = scale_px_per_cm_original
+                            scale_source = "provided_original"
+                        elif "scale_px_per_cm_original" in current_scale_data:
+                            adjusted_scale_px_per_cm = current_scale_data["scale_px_per_cm_original"]
+                            scale_source = "pre_calculated_original"
+                        elif "scale_factor" in current_scale_data:
+                            adjusted_scale_px_per_cm = scale_px_per_cm * current_scale_data["scale_factor"]
+                            scale_source = "stored_scale_factor"
+                        elif hasattr(self, "image_scale_factor"):
+                            adjusted_scale_px_per_cm = scale_px_per_cm * self.image_scale_factor
+                            scale_source = "instance_scale_factor"
+                        else:
+                            adjusted_scale_px_per_cm = scale_px_per_cm
+                            scale_source = "no_adjustment"
+                        
+                        cached_scale_values = {
+                            "scale_px_per_cm": scale_px_per_cm,
+                            "adjusted_scale_px_per_cm": adjusted_scale_px_per_cm,
+                            "scale_source": scale_source
+                        }
+                        
+                        # Log once instead of per-compartment
+                        self.logger.debug(f"Pre-calculated scale values: {scale_source} = {adjusted_scale_px_per_cm:.2f} px/cm")
+
                 start_depth = int(final_metadata["depth_from"])
                 compartment_interval = int(final_metadata["compartment_interval"])
 
@@ -2507,108 +2540,58 @@ class GeoVue:
                         ),  # Changed from 'approved_by'
                         "source_image_uid": image_uid,
                     }
-                    # Calculate individual compartment width if we have scale data and corners
+                    # Calculate individual compartment width using cached scale values
                     if (
-                        current_scale_data
+                        cached_scale_values
                         and "corners_list" in result
                         and compartment_idx < len(result["corners_list"])
                     ):
+                        # Get the corners for this specific compartment
+                        corner_data = result["corners_list"][compartment_idx]
+                        if "corners" in corner_data:
+                            corners = corner_data["corners"]
+                            if isinstance(corners, list) and len(corners) >= 4:
+                                # Calculate width from corners (top-left to top-right)
+                                # corners format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                                x1 = corners[0][0]  # top_left x
+                                x2 = corners[1][0]  # top_right x
+                                width_px = abs(x2 - x1)
 
-                        scale_px_per_cm = current_scale_data.get("scale_px_per_cm")
-                        # ===================================================
-                        # Debug scale calculation
-                        # ===================================================
-                        self.logger.debug(
-                            f"  - scale_px_per_cm (from small image): {scale_px_per_cm}"
-                        )
-
-                        if scale_px_per_cm and scale_px_per_cm > 0:
-                            # Get the corners for this specific compartment
-                            corner_data = result["corners_list"][compartment_idx]
-                            if "corners" in corner_data:
-                                corners = corner_data["corners"]
-                                if isinstance(corners, list) and len(corners) >= 4:
-                                    # Calculate width from corners (top-left to top-right)
-                                    # corners format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                                    x1 = corners[0][0]  # top_left x
-                                    x2 = corners[1][0]  # top_right x
-                                    width_px = abs(x2 - x1)
-
-                                    # Use provided scale_px_per_cm_original or calculate it
-                                    if scale_px_per_cm_original is not None:
-                                        # Use the provided original scale
-                                        adjusted_scale_px_per_cm = (
-                                            scale_px_per_cm_original
-                                        )
-                                        self.logger.debug(
-                                            f"  - Using provided original scale: {adjusted_scale_px_per_cm:.2f}"
-                                        )
-                                    elif (
-                                        "scale_px_per_cm_original" in current_scale_data
-                                    ):
-                                        # Use the pre-calculated original image scale
-                                        adjusted_scale_px_per_cm = current_scale_data[
-                                            "scale_px_per_cm_original"
-                                        ]
-                                        self.logger.debug(
-                                            f"  - Using pre-calculated original scale: {adjusted_scale_px_per_cm:.2f}"
-                                        )
-                                    elif "scale_factor" in current_scale_data:
-                                        # Use the stored scale factor
-                                        adjusted_scale_px_per_cm = (
-                                            scale_px_per_cm
-                                            * current_scale_data["scale_factor"]
-                                        )
-                                        self.logger.debug(
-                                            f"  - Adjusting with stored scale factor: {current_scale_data['scale_factor']:.4f}"
-                                        )
-                                        self.logger.debug(
-                                            f"  - adjusted scale_px_per_cm: {adjusted_scale_px_per_cm:.2f}"
-                                        )
-                                    elif hasattr(self, "image_scale_factor"):
-                                        # Fall back to instance variable if available
-                                        adjusted_scale_px_per_cm = (
-                                            scale_px_per_cm * self.image_scale_factor
-                                        )
-                                        self.logger.debug(
-                                            f"  - Adjusting with instance scale factor: {self.image_scale_factor:.4f}"
-                                        )
-                                        self.logger.debug(
-                                            f"  - adjusted scale_px_per_cm: {adjusted_scale_px_per_cm:.2f}"
-                                        )
-                                    else:
-                                        # No adjustment available - scale might be wrong
-                                        adjusted_scale_px_per_cm = scale_px_per_cm
-                                        self.logger.debug(
-                                            f"  - WARNING: No scale adjustment available - width calculation may be incorrect!"
-                                        )
-
-                                    compartment_width_cm = round(
-                                        width_px / adjusted_scale_px_per_cm, 2
+                                # Use cached adjusted scale value
+                                adjusted_scale_px_per_cm = cached_scale_values["adjusted_scale_px_per_cm"]
+                                compartment_width_cm = round(width_px / adjusted_scale_px_per_cm, 2)
+                                update["image_width_cm"] = compartment_width_cm
+                                
+                                # Log only for first compartment to reduce logging volume
+                                if saved_idx == 0:
+                                    self.logger.debug(
+                                        f"Using cached scale ({cached_scale_values['scale_source']}): {adjusted_scale_px_per_cm:.2f} px/cm"
                                     )
-                                    update["image_width_cm"] = compartment_width_cm
-                                    # ===================================================
-                                    # Debug width calculation
-                                    # ===================================================
                                     self.logger.debug(
                                         f"  - compartment width: {width_px}px = {compartment_width_cm}cm"
                                     )
                     else:
-                        # ===================================================
-                        # Debug why scale not calculated
-                        # ===================================================
-                        self.logger.debug(f"  - Width calculation skipped:")
-                        self.logger.debug(
-                            f"    - current_scale_data available: {current_scale_data is not None}"
-                        )
-                        self.logger.debug(
-                            f"    - corners_list in result: {'corners_list' in result}"
-                        )
-                        self.logger.debug(
-                            f"    - compartment_idx < len(corners_list): {compartment_idx < len(result['corners_list']) if 'corners_list' in result else 'N/A'}"
-                        )
+                        # Debug why scale not calculated (reduced logging)
+                        if saved_idx == 0:  # Only log for first compartment
+                            self.logger.debug(f"  - Width calculation skipped:")
+                            self.logger.debug(
+                                f"    - cached_scale_values available: {cached_scale_values is not None}"
+                            )
+                            self.logger.debug(
+                                f"    - corners_list in result: {'corners_list' in result}"
+                            )
+                            self.logger.debug(
+                                f"    - compartment_idx < len(corners_list): {compartment_idx < len(result['corners_list']) if 'corners_list' in result else 'N/A'}"
+                            )
 
                     compartment_updates.append(update)
+
+            # Add summary logging for scale calculations
+            if cached_scale_values:
+                processed_widths = [u.get("image_width_cm") for u in compartment_updates if "image_width_cm" in u]
+                if processed_widths:
+                    avg_width = sum(processed_widths) / len(processed_widths)
+                    self.logger.debug(f"Processed {len(processed_widths)} compartments using cached scale, average width: {avg_width:.2f}cm")
 
             # ===================================================
             # SAVE ORIGINAL FILE
