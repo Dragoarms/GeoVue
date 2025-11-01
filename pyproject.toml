@@ -1,6 +1,6 @@
 [project]
 name = "GeoVue"
-version = "2.1.0"
+version = "2.5.0"
 description = "Chip Tray Photo Processor"
 requires-python = ">=3.7"
 
@@ -30,6 +30,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "resources" = ["*.png", "*.csv", "*.ico", "*.json", "color_presets/*.json", "Register Template File/*.xltx"]
+
 
 
 
