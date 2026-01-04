@@ -1,0 +1,2 @@
+[console_scripts]
+chiptray = main:main
