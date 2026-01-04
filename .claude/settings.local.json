@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(venvScriptsactivate.bat)",
+      "Bash(venv/Scripts/pip install:*)",
+      "Bash(venv/Scripts/python tests/test_png_uid_fix.py:*)",
+      "Bash(venv/Scripts/python:*)",
+      "Bash(grep:*)",
+      "Bash(pip install:*)"
+    ],
+    "deny": [],
+    "ask": [],
+    "defaultMode": "acceptEdits"
+  }
+}

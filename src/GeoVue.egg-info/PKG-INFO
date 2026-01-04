@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: GeoVue
+Version: 1.1.0
+Summary: Chip Tray Photo Processor
+Requires-Python: >=3.7
+License-File: LICENSE
+Requires-Dist: numpy
+Requires-Dist: opencv-python
+Requires-Dist: pillow
+Requires-Dist: pandas
+Requires-Dist: openpyxl
+Requires-Dist: piexif>=1.1.3
+Requires-Dist: requests
+Requires-Dist: pywin32
+Dynamic: license-file

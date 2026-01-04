@@ -1,0 +1,6 @@
+GeoVue_Capture
+core
+gui
+processing
+resources
+utils

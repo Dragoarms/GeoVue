@@ -1,0 +1,482 @@
+﻿key,en,fr
+A new version is available:,A new version is available:,Une nouvelle version est disponible:
+About,About,À propos
+About Chip Tray Extractor,About Chip Tray Extractor,À propos de l’extracteur de plateaux d’échantillons
+Activate OCR,Activate OCR,Activer l'OCR
+All compartments have been reviewed. You can now approve or reject all.,All compartments have been reviewed. You can now approve or reject all.,Tous les compartiments ont été examinés. Vous pouvez maintenant les approuver ou les rejeter.
+All files,All files,Tous les fichiers
+All holes already have trace images.,All holes already have trace images.,Toutes les forages disposent déjà d’images de trace.
+All missing compartments have been annotated. Click 'Done' to finish.,All missing compartments have been annotated. Click 'Done' to finish.,"Tous les compartiments manquants ont été annotés. Cliquez sur ""Terminé"" pour finir."
+All progress will be lost and remaining trays will be skipped.,All progress will be lost and remaining trays will be skipped.,Tout le progrès sera perdu et les plateaux restants seront ignorés.
+All trays have been reviewed.,All trays have been reviewed.,Tous les plateaux ont été examinés.
+Analyzing image sharpness...,Analyzing image sharpness...,Analyse de la netteté de l’image...
+Annotation complete. Click 'Done' to finish.,Annotation complete. Click 'Done' to finish.,"Annotation terminée. Cliquez sur ""Terminé"" pour finir."
+Application language has been changed to,Application language has been changed to,La langue de l'application a été changée en
+Apply Metadata Changes,Apply Metadata Changes,Appliquer les modifications de métadonnées
+Apply Path Settings,Apply Path Settings,Appliquer les paramètres de chemin
+Approved By,Approved By,Approuvé par
+Approved Compartment Images,Approved Compartment Images,Images de compartiment approuvées
+Approved Date,Approved Date,Date d’approbation
+Approved Folder:,Approved Folder:,Dossier approuvé:
+Are you sure you want to reject this tray? ,Are you sure you want to reject this tray? ,Êtes-vous sûr de vouloir rejeter ce plateau ? 
+ArUco Markers,ArUco Markers,Marqueurs ArUco
+Blur Analysis,Blur Analysis,Analyse de flou
+Blur Detection,Blur Detection,Détection de flou
+Blur Detection Help,Blur Detection Help,Aide à la détection de flou
+Blur Threshold:,Blur Threshold:,Seuil de flou:
+BLURRY,BLURRY,FLOU
+Blurry (Poor) Images,Blurry (Poor) Images,Images floues (mauvaises)
+Browse,Browse,Parcourir
+Calibrate,Calibrate,Calibrer
+Calibrate Blur Detection,Calibrate Blur Detection,Calibrer la détection de flou
+Calibration Results,Calibration Results,Résultats de la calibration
+Cancel,Cancel,Annuler
+Cannot add to review queue: missing or incomplete metadata,Cannot add to review queue: missing or incomplete metadata,Impossible d’ajouter à la file de révision: métadonnées manquantes ou incomplètes
+Cannot place compartment here - would overlap with existing compartment,Cannot place compartment here - would overlap with existing compartment,Impossible de placer un compartiment à cet endroit - il se superposerait à un compartiment existant
+Check for Updates,Check for Updates,Vérifier les mises à jour
+Checking for metadata...,Checking for metadata...,Vérification des métadonnées...
+Chip Compartments,Chip Compartments,Compartiments de puce
+Chip Tray Extraction Process,Chip Tray Extraction Process,Processus d’extraction du plateau
+Chip Tray Extractor,Chip Tray Extractor,Extracteur de plateau d’échantillons
+Chip Tray Photos,Chip Tray Photos,Photos de plateaux
+Click to place compartment #0,Click to place compartment #0,Cliquez pour placer le compartiment #0
+Click to place compartment #1,Click to place compartment #1,Cliquez pour placer le compartiment #1
+Click to place compartment #10,Click to place compartment #10,Cliquez pour placer le compartiment #10
+Click to place compartment #11,Click to place compartment #11,Cliquez pour placer le compartiment #11
+Click to place compartment #12,Click to place compartment #12,Cliquez pour placer le compartiment #12
+Click to place compartment #13,Click to place compartment #13,Cliquez pour placer le compartiment #13
+Click to place compartment #14,Click to place compartment #14,Cliquez pour placer le compartiment #14
+Click to place compartment #15,Click to place compartment #15,Cliquez pour placer le compartiment #15
+Click to place compartment #16,Click to place compartment #16,Cliquez pour placer le compartiment #16
+Click to place compartment #17,Click to place compartment #17,Cliquez pour placer le compartiment #17
+Click to place compartment #18,Click to place compartment #18,Cliquez pour placer le compartiment #18
+Click to place compartment #19,Click to place compartment #19,Cliquez pour placer le compartiment #19
+Click to place compartment #2,Click to place compartment #2,Cliquez pour placer le compartiment #2
+Click to place compartment #20,Click to place compartment #20,Cliquez pour placer le compartiment #20
+Click to place compartment #3,Click to place compartment #3,Cliquez pour placer le compartiment #3
+Click to place compartment #4,Click to place compartment #4,Cliquez pour placer le compartiment #4
+Click to place compartment #5,Click to place compartment #5,Cliquez pour placer le compartiment #5
+Click to place compartment #6,Click to place compartment #6,Cliquez pour placer le compartiment #6
+Click to place compartment #7,Click to place compartment #7,Cliquez pour placer le compartiment #7
+Click to place compartment #8,Click to place compartment #8,Cliquez pour placer le compartiment #8
+Click to place compartment #9,Click to place compartment #9,Cliquez pour placer le compartiment #9
+Close,Close,Fermer
+Close the application.,Close the application.,Fermer l’application.
+Compartment Boundaries,Compartment Boundaries,Limites du compartiment
+Compartment Comparison,Compartment Comparison,Comparaison des compartiments  
+Compartment Interval (m),Compartment Interval (m),Intervalle des compartiments (m):
+Compartment Interval (m):,Compartment Interval (m):,Intervalle du compartiment (m):
+Compartment Status,Compartment Status,État du compartiment
+Confirm,Confirm,Confirmer
+Confirm Cancellation,Confirm Cancellation,Confirmer l’annulation
+Confirm Exit,Confirm Exit,Confirmer la sortie
+Confirm Rejection,Confirm Rejection,Confirmer le rejet
+Continue without OCR,Continue without OCR,Continuer sans OCR
+Continuing with processing (replacing existing image)...,Continuing with processing (replacing existing image)...,Poursuite du traitement (remplacement de l’image existante)...
+Corrected Image,Corrected Image,Image corrigée
+Could not determine versions,Could not determine versions,Impossible de déterminer les versions
+Could not read columns from CSV.,Could not read columns from CSV.,Impossible de lire les colonnes depuis le CSV.
+Create the base directory structure.,Create the base directory structure.,Créer la structure de répertoires de base.
+CSV Error,CSV Error,Erreur CSV
+CSV Files,CSV Files,Fichiers CSV
+Current Image,Current Image,Image actuelle
+Current Image Compartments:,Current Image Compartments:,Compartiments de l'image actuelle:  
+DAMAGED,DAMAGED,ENDOMMAGÉ
+Debug Images,Debug Images,Images de débogage
+Depth From must be a number,Depth From must be a number,La profondeur de départ doit être un nombre
+Depth From must be a whole number,Depth From must be a whole number,La profondeur de départ doit être un entier
+Depth Range:,Depth Range:,Plage de profondeur:
+Depth range: None,Depth range: None,Plage de profondeur: aucune
+Depth To must be a number,Depth To must be a number,La profondeur d’arrivée doit être un nombre
+Depth To must be a whole number,Depth To must be a whole number,La profondeur d’arrivée doit être un entier
+Depth To must be greater than Depth From,Depth To must be greater than Depth From,La profondeur d’arrivée doit être supérieure à la profondeur de départ
+Depth:,Depth:,Profondeur:
+Detailed Status,Detailed Status,Statut détaillé
+Detecting ArUco markers...,Detecting ArUco markers...,Détection des marqueurs ArUco...
+Done,Done,Terminé
+Download and restart?,Download and restart?,Télécharger et redémarrer ?
+Drill Traces,Drill Traces,Traces de forage
+Drill Traces Folder:,Drill Traces Folder:,Dossier des traces de forage:
+Duplicate Compartments Found,Duplicate Compartments Found,Compartiments en double trouvés
+Duplicate Entry Detected,Duplicate Entry Detected,Entrée en double détectée
+Duplicate Handling Options,Duplicate Handling Options,Options de gestion des doublons
+Edit Metadata:,Edit Metadata:,Modifier les métadonnées:
+Enable Blur Detection,Enable Blur Detection,Activer la détection de flou
+Enable OCR,Enable OCR,Activer l'OCR
+English,English,Anglais
+Enter Chip Tray Metadata,Enter Chip Tray Metadata,Saisir les métadonnées du plateau
+Enter Metadata,Enter Metadata,Saisir les métadonnées
+Examine these images to verify hole ID and depth range,Examine these images to verify hole ID and depth range,Examinez ces images pour vérifier l'ID du trou et la plage de profondeur
+Excel Register:,Excel Register:,Registre Excel:
+Existing Compartments,Existing Compartments,Compartiments existants  
+existing compartments detected:,existing compartments detected:,20 compartiments existants détectés:
+Existing Compartments:,Existing Compartments:,Compartiments existants:
+Exit,Exit,Quitter
+Extracted Metadata Region,Extracted Metadata Region,Région des métadonnées extraites
+File,File,Fichier
+Flag Blurry Images,Flag Blurry Images,Marquer les images floues
+Format: 00-00,Format: 00-00,Format: 00-00
+Format: XX0000,Format: XX0000,Format: XX0000
+French,French,Français
+Français,Français,Français
+Full Current Image:,Full Current Image:,Image actuelle complète:
+Full Image with Compartment Boundaries,Full Image with Compartment Boundaries,Image complète avec les limites du compartiment
+Full Image with Detected Region,Full Image with Detected Region,Image complète avec région détectée
+Generate Drillhole Trace,Generate Drillhole Trace,Générer la trace de forage
+Help,Help,Aide
+Hide Metadata,Hide Metadata,Masquer les métadonnées
+Hole ID:,Hole ID:,ID du trou:
+Image Analysis,Image Analysis,Analyse d'image
+Image with Compartment Boundaries,Image with Compartment Boundaries,Image avec limites des compartiments
+Input Folder:,Input Folder:,Dossier d'entrée:
+Interval:,Interval:,Intervalle:
+Keep Original,Keep Original,Conserver l'original
+Language,Language,Langue
+Language Changed,Language Changed,Langue changée
+Local Output,Local Output,Sortie locale
+Local Output:,Local Output:,Sortie locale:
+Manual Compartment Annotation,Manual Compartment Annotation,Annotation manuelle des compartiments
+Metadata from filename:,Metadata from filename:,Métadonnées du nom de fichier:
+Metadata Input,Metadata Input,Saisie des métadonnées
+Meters per compartment,Meters per compartment,Mètres par compartiment
+Modify Metadata,Modify Metadata,Modifier les métadonnées
+No image,No image,Pas d'image  
+No trays to review,No trays to review,Aucun plateau à examiner
+OCR Settings,OCR Settings,Paramètres OCR
+OK,OK,OK
+OneDrive Path Settings,OneDrive Path Settings,Paramètres de chemin OneDrive
+OneDrive path settings have been updated.,OneDrive path settings have been updated.,Les paramètres du chemin OneDrive ont été mis à jour.
+OneDrive Paths Updated,OneDrive Paths Updated,Chemins OneDrive mis à jour
+Original size:,Original size:,Taille originale:
+Output Format,Output Format,Format de sortie
+Output Format:,Output Format:,Format de sortie:
+Output Settings,Output Settings,Paramètres de sortie
+Pixels,Pixels,Pixels
+Please select a folder,Please select a folder,Veuillez sélectionner un dossier
+Please select both sharp and blurry images,Please select both sharp and blurry images,Veuillez sélectionner à la fois des images nettes et floues
+Process Photos,Process Photos,Traiter les photos
+Processed Originals Folder:,Processed Originals Folder:,Dossier des originaux traités:
+Progress,Progress,Progression
+Quality Alert Threshold,Quality Alert Threshold,Seuil d'alerte qualité
+Quality Alert Threshold:,Quality Alert Threshold:,Seuil d'alerte qualité:
+Quit,Quit,Quitter
+Ready. Select a folder and click 'Process Photos'.,Ready. Select a folder and click 'Process Photos'.,Prêt. Sélectionnez un dossier et cliquez sur 'Traiter les photos'.
+Reject,Reject,Rejeter
+Review Complete,Review Complete,Révision terminée
+Review Extracted Images,Review Extracted Images,Examiner les images extraites
+ROI Ratio:,ROI Ratio:,Ratio ROI:
+Save Blur Analysis Visualizations,Save Blur Analysis Visualizations,Enregistrer les visualisations d'analyse de flou
+Save Debug Images,Save Debug Images,Enregistrer les images de débogage
+Select example sharp and blurry images to calibrate the blur detection threshold.,Select example sharp and blurry images to calibrate the blur detection threshold.,Sélectionnez des exemples d'images nettes et floues pour calibrer le seuil de détection de flou.
+Select Images,Select Images,Sélectionner des images
+Selective Replace,Selective Replace,Remplacement sélectif
+Sharp (Good) Images,Sharp (Good) Images,Images nettes (bonnes)
+Switch to Dark Theme,Switch to Dark Theme,Passer au thème sombre
+Switch to Light Theme,Switch to Light Theme,Passer au thème clair
+"The files have been saved locally, and to the OneDrive folder","The files have been saved locally, and to the OneDrive folder",Les fichiers ont été enregistrés localement et dans le dossier OneDrive
+Undo Last,Undo Last,Annuler le dernier
+Update Available,Update Available,Mise à jour disponible
+Valid Prefixes (comma separated):,Valid Prefixes (comma separated):,Préfixes valides (séparés par des virgules):
+Validate Hole ID Prefixes,Validate Hole ID Prefixes,Valider les préfixes d'ID de trou
+Full Image with Compartment Boundaries - Hold right click to flip the image to make reading the holeID easier on the lid,Full Image with Compartment Boundaries - Hold right click to flip the image to make reading the holeID easier on the lid,Image complète avec limites des compartiments - Maintenir le clic droit pour retourner l'image afin de faciliter la lecture du trouID sur le couvercle.
+Yes,Yes,Oui
+No,No,Non
+"Do you want to pause the review process?
+
+You can resume it later by clicking 'Review Extracted Images'.","Do you want to pause the review process?
+
+You can resume it later by clicking 'Review Extracted Images'.","Souhaitez-vous interrompre le processus d'examen ?
+
+Vous pourrez le reprendre plus tard en cliquant sur « Revoir les images extraites »."
+Application language has been changed to Français.,Application language has been changed to French.,La langue de l'application a été changée en français.
+Application language has been changed to English.,Application language has been changed to English.,La langue de l'application a été changée en anglaise.
+Click to place metadata marker (ID 24),Click to place metadata marker (ID 24),Cliquez pour placer un marqueur de métadonnées (ID 24)
+-,-,-
+All Markers Placed - Click Continue to Finish,All Markers Placed - Click Continue to Finish,Tous les marqueurs ont été placés - Cliquez sur Continuer pour terminer
+All missing markers have been annotated. Click Finish to continue.,All missing markers have been annotated. Click Finish to continue.,Tous les marqueurs manquants ont été annotés. Cliquez sur Terminer pour continuer.
+Boundary Adjustment,Boundary Adjustment,Ajustement des limites
+Click to place compartment,Click to place compartment,Cliquez pour placer le compartiment
+Click to place the metadata marker,Click to place the metadata marker,Cliquez pour placer le marqueur de métadonnées
+Continue,Continue,Continuer
+Drag the green lines to adjust boundaries or use the buttons for fine control,Drag the green lines to adjust boundaries or use the buttons for fine control,Faites glisser les lignes vertes pour ajuster les limites ou utilisez les boutons pour un réglage précis
+Finish,Finish,Terminer
+Height:,Height:,Hauteur :
+Hide Boundary Adjustment Controls,Hide Boundary Adjustment Controls,Masquer les contrôles d’ajustement des limites
+Left Side:,Left Side:,Côté gauche :
+Place Compartment #1,Place Compartment,Placer le compartiment
+Place Metadata Marker (ID 24),Place Metadata Marker (ID 24),Placer le marqueur de métadonnées (ID 24)
+Placed compartment,Placed compartment at,Compartiment placé à
+Placed metadata marker at,Placed metadata marker at,Marqueur de métadonnées placé à
+Right Side:,Right Side:,Côté droit :
+Show Boundary Adjustment Controls,Show Boundary Adjustment Controls,Afficher les contrôles d’ajustement des limites
+Adjustments applied successfully!,Adjustments applied successfully!,Ajustements appliqués avec succès !
+Apply Adjustments,Apply Adjustments,Appliquer les ajustements
+Move All,Move All,Déplacer tout
+Move Left Side,Move Left Side,Déplacer le côté gauche
+Move Right Side,Move Right Side,Déplacer le côté droit
+Review and Adjust Boundaries if Needed,Review and Adjust Boundaries if Needed,Vérifiez et ajustez les limites si nécessaire
+"Review and adjust boundaries if needed, then click Continue","Review and adjust boundaries if needed, then click Continue","Vérifiez et ajustez les limites si nécessaire, puis cliquez sur Continuer"
+Compartment Registration,Compartment Registration,Enregistrement de Compartiment
+Metadata Registration,Metadata Registration,Enregistrement de Métadonnées
+Add Missing Boundaries,Add Missing Boundaries,Ajouter les Limites Manquantes
+Adjust Boundaries,Adjust Boundaries,Ajuster les Limites
+Increment From Last,Increment From Last,Incrémenter Depuis le Dernier
+Continue to Boundaries,Continue to Boundaries,Continuer vers les Limites
+Enter hole ID and depth information then click Continue to Boundaries,Enter hole ID and depth information then click Continue to Boundaries,Entrez l'ID du trou et les informations de profondeur puis cliquez sur Continuer vers les Limites
+Trace Generation Method,Trace Generation Method,Méthode de génération de traces
+Use the new Trace Designer for customizable visualizations?\n\nYes - Open Trace Designer (recommended) \nNo - Use classic method,Use the new Trace Designer for customizable visualizations?\n\nYes - Open Trace Designer (recommended) \nNo - Use classic method,Utiliser le nouveau concepteur de traces pour des visualisations personnalisables?\n\nOui - Ouvrir le concepteur de traces (recommandé) \nNon - Utiliser la méthode classique
+Use Designer,Use Designer,Utiliser le concepteur
+Classic Method,Classic Method,Méthode classique
+Drillhole Trace Designer,Drillhole Trace Designer,Concepteur de traces de forage
+Data Sources,Data Sources,Sources de données
+Add CSV,Add CSV,Ajouter CSV
+Clear All,Clear All,Tout effacer
+No data sources loaded,No data sources loaded,Aucune source de données chargée
+Plot Configuration,Plot Configuration,Configuration du graphique
+Compartment Orientation:,Compartment Orientation:,Orientation des compartiments :
+Add Plot Column,Add Plot Column,Ajouter une colonne de graphique
+Preview,Preview,Aperçu
+Update Preview,Update Preview,Mettre à jour l'aperçu
+Using sample data for preview,Using sample data for preview,Utilisation de données d'exemple pour l'aperçu
+Save Configuration,Save Configuration,Enregistrer la configuration
+Load Configuration,Load Configuration,Charger la configuration
+Generate Traces,Generate Traces,Générer les traces
+Select CSV Files,Select CSV Files,Sélectionner les fichiers CSV
+"3 sources, 599 holes","3 sources, 599 holes","3 sources, 599 trous"
+Plot Column 1,Plot Column 1,Colonne de graphique 1
+Plot Type:,Plot Type:,Type de graphique :
+Width (pixels):,Width (pixels):,Largeur (pixels) :
+Color Map:,Color Map:,Carte de couleurs :
+Default,Default,Par défaut
+Data Columns:,Data Columns:,Colonnes de données :
+Configure,Configure,Configurer
+Add Column,Add Column,Ajouter une colonne
+Configure Color Map,Configure Color Map,Configurer la carte de couleurs
+Presets,Presets,Préréglages
+Select Preset:,Select Preset:,Sélectionner un préréglage :
+Load,Load,Charger
+Type:,Type:,Type :
+Category Colors:,Category Colors:,Couleurs des catégories :
+Choose Color,Choose Color,Choisir la couleur
+Add Category,Add Category,Ajouter une catégorie
+Default Color (unmatched values):,Default Color (unmatched values):,Couleur par défaut (valeurs non correspondantes) :
+Null/Missing Value Color:,Null/Missing Value Color:,Couleur pour valeurs nulles/manquantes :
+Save as Preset,Save as Preset,Enregistrer comme préréglage
+Existing Register Found,Existing Register Found,Registre Existant Trouvé
+A register already exists in this location with:,A register already exists in this location with:,Un registre existe déjà à cet emplacement avec :
+Excel file,Excel file,Fichier Excel
+compartment records,compartment records,enregistrements de compartiments
+original image records,original image records,enregistrements d'images originales
+Do you want to create a new register in a different location?,Do you want to create a new register in a different location?,Voulez-vous créer un nouveau registre dans un emplacement différent ?
+The following items already exist in this location:,The following items already exist in this location:,Les éléments suivants existent déjà à cet emplacement :
+Excel register file,Excel register file,Fichier de registre Excel
+Compartment data,Compartment data,Données de compartiments
+Original image data,Original image data,Données d'images originales
+Register data folder,Register data folder,Dossier de données du registre
+Creating a new register will overwrite these files.,Creating a new register will overwrite these files.,Créer un nouveau registre écrasera ces fichiers.
+Do you want to continue?,Do you want to continue?,Voulez-vous continuer ?
+Overwrite Existing Register?,Overwrite Existing Register?,Écraser le Registre Existant ?
+Overwrite,Overwrite,Écraser
+Create Backup?,Create Backup?,Créer une Sauvegarde ?
+Would you like to create a backup of the existing register before overwriting?,Would you like to create a backup of the existing register before overwriting?,Souhaitez-vous créer une sauvegarde du registre existant avant d'écraser ?
+Backup Complete,Backup Complete,Sauvegarde Terminée
+Register backup created in:,Register backup created in:,Sauvegarde du registre créée dans :
+Backup Error,Backup Error,Erreur de Sauvegarde
+Could not create backup:,Could not create backup:,Impossible de créer la sauvegarde :
+Welcome to GeoVue,Welcome to GeoVue,Bienvenue à GeoVue
+GeoVue,GeoVue,GeoVue
+Shared Folder Settings,Shared Folder Settings, Paramètres du dossier partagé
+Create New Register,Create New Register, Créer un nouveau registre
+Validate Register,Validate Register, Valider le registre
+Logging Review,Logging Review, Revue du journal
+No images to review and all files are synchronized.,No images to review and all files are synchronized., Aucune image à examiner -  tous les fichiers sont synchronisés.
+Sample Type: Dry,Sample Type: Dry, Type d’échantillon : Sec
+Sample Type: Wet,Sample Type: Wet, Type d’échantillon : Humide
+Validating Register,Validating Register, Validation du registre
+Initializing validation...,Initializing validation..., Initialisation de la validation...
+Validation Complete,Validation Complete, Validation terminée
+Files checked and register updated:,Files checked and register updated:, Fichiers vérifiés et registre mis à jour :
+Missing compartment images:,Missing compartment images:, Images de compartiments manquantes :
+Missing original images:,Missing original images:, Images originales manquantes :
+New compartments found:,New compartments found:, Nouveaux compartiments trouvés :
+Entries have been marked as MISSING_FILE in the register.,Entries have been marked as MISSING_FILE in the register., Des entrées ont été marquées comme MISSING_FILE dans le registre.
+These files may have been deleted from the shared folder.,These files may have been deleted from the shared folder., Ces fichiers peuvent avoir été supprimés du dossier partagé.
+Validation Results,Validation Results, Résultats de validation
+Status Required,Status Required, Statut requis
+Please select a status for this compartment before proceeding.,Please select a status for this compartment before proceeding., Veuillez sélectionner un statut pour ce compartiment avant de continuer.
+Welcome,Welcome,Bienvenue
+Chip Tray Photo Processor,Chip Tray Photo Processor,Processeur de Photos de Carottes
+This setup wizard will help you configure the application for first use.,This setup wizard will help you configure the application for first use.,Cet assistant vous aidera à configurer l'application pour la première utilisation.
+You'll need to:,You'll need to:,Vous devrez :
+Select a local folder where GeoVue will process images,Select a local folder where GeoVue will process images,Sélectionnez un dossier local où GeoVue traitera les images
+Select a backup/shared folder (OneDrive or network),Select a backup/shared folder (OneDrive or network),Sélectionnez un dossier de sauvegarde/partagé (OneDrive ou réseau)
+Confirm the folder structure creation,Confirm the folder structure creation,Confirmez la création de la structure de dossiers
+Click 'Next' to begin.,Click 'Next' to begin.,Cliquez sur 'Suivant' pour commencer.
+Local Storage,Local Storage,Stockage local
+Select Local Storage Location,Select Local Storage Location,Sélectionnez l'emplacement du stockage local
+Select where GeoVue should store and process images on this computer.,Select where GeoVue should store and process images on this computer.,Sélectionnez où GeoVue doit stocker et traiter les images sur cet ordinateur.
+The required folder structure will be created automatically.,The required folder structure will be created automatically.,La structure de dossiers requise sera créée automatiquement.
+Storage Location,Storage Location,Emplacement de stockage
+Local Folder Status,Local Folder Status,Statut du dossier local
+Select a folder to check its structure.,Select a folder to check its structure.,Sélectionnez un dossier pour vérifier sa structure.
+Backup Storage,Backup Storage,Stockage de sauvegarde
+Select Backup/Shared Storage,Select Backup/Shared Storage,Sélectionnez un stockage de sauvegarde/partagé
+Select a OneDrive or network folder for backup and sharing.,Select a OneDrive or network folder for backup and sharing.,Sélectionnez un dossier OneDrive ou réseau pour la sauvegarde et le partage.
+This allows team collaboration and automatic backup of processed files.,This allows team collaboration and automatic backup of processed files.,Cela permet une collaboration en équipe et une sauvegarde automatique des fichiers traités.
+Enable backup/shared storage,Enable backup/shared storage,Activer le stockage de sauvegarde/partagé
+Backup Location,Backup Location,Emplacement de sauvegarde
+Hint: Look for,Hint: Look for,Indice : Recherchez
+Backup Folder Status,Backup Folder Status,Statut du dossier de sauvegarde
+Summary,Summary,Résumé
+Back,Back,Retour
+Next,Next,Suivant
+Checking folder,Checking folder,Vérification du dossier
+Missing,Missing,Manquant
+Empty folder - new structure will be created.,Empty folder - new structure will be created.,Dossier vide - une nouvelle structure sera créée.
+Select OneDrive or Network Folder for Backup,Select OneDrive or Network Folder for Backup,Sélectionnez un dossier OneDrive ou réseau pour la sauvegarde
+Excel register not found,Excel register not found,Registre Excel introuvable
+Configuration Summary,Configuration Summary,Résumé de la configuration
+Selected Paths,Selected Paths,Chemins sélectionnés
+Backup/Shared Storage,Backup/Shared Storage,Stockage sauvegarde/partagé
+Setup Actions,Setup Actions,Actions de configuration
+Create local folder structure,Create local folder structure,Créer la structure de dossier local
+Create backup folder structure,Create backup folder structure,Créer la structure de dossier de sauvegarde
+"Enter hole ID and depth information, then click Continue to Boundaries","Enter hole ID and depth information, then click Continue to Boundaries","Entrez l'identifiant du trou et la profondeur, puis cliquez sur Continuer vers les limites"
+Stop Processing,Stop Processing,Arrêter le traitement
+"Are you sure you want to stop processing?
+
+No modifications will be made to the current image, and processing of remaining images will be canceled.","Are you sure you want to stop processing?
+
+No modifications will be made to the current image, and processing of remaining images will be canceled.","Êtes-vous sûr de vouloir arrêter le traitement ?
+
+Aucune modification ne sera apportée à l'image actuelle, et le traitement des images restantes sera annulé."
+Select a local folder where GeoVue will process images (use the default path!),Select a local folder where GeoVue will process images (use the default path!),Sélectionnez un dossier local où GeoVue traitera les images (utilisez le chemin par défaut !)
+Select a SYNCHRONISED shared folder (...Exploration Drilling\03 - Reverse Circulation\Chip Tray Photos),Select a SYNCHRONISED shared folder (...Exploration Drilling\03 - Reverse Circulation\Chip Tray Photos),Sélectionnez un dossier partagé SYNCHRONISÉ (...Exploration Drilling\03 - Circulation Inverse\Photos de Bac à Échantillons)
+Confirm. This will create the required folders locally and set the outputs for onedrive correctly.,Confirm. This will create the required folders locally and set the outputs for onedrive correctly.,Confirmez. Cela créera les dossiers requis localement et configurera correctement les sorties pour OneDrive.
+[?],[?],[?]
+Language changed successfully,Language changed successfully,Langue changée avec succès
+Found,Found,Trouvé
+Found Excel register,Found Excel register,Fichier Excel d'enregistrement trouvé
+Complete folder structure found!,Complete folder structure found!,Structure complète de dossiers trouvée !
+Will use existing structure.,Will use existing structure.,Utilisera la structure existante.
+Use existing backup folder structure,Use existing backup folder structure,Utiliser la structure de dossier de sauvegarde existante
+▲,▲,▲
+▼,▼,▼
+Place Markers,Place Markers,Placer les repères
+Click to place compartment at depth 1m (marker 4),Click to place compartment at depth 1m (marker 4),Cliquez pour placer un compartiment à 1m de profondeur (marqueur 4)
+All missing markers have been annotated. Click 'Continue to Adjustment' to proceed.,All missing markers have been annotated. Click 'Continue to Adjustment' to proceed.,Tous les marqueurs manquants ont été annotés. Cliquez sur 'Continuer vers Ajustement' pour continuer.
+All markers placed successfully. Click 'Continue to Adjustment' to proceed.,All markers placed successfully. Click 'Continue to Adjustment' to proceed.,Tous les marqueurs ont été placés avec succès. Cliquez sur 'Continuer vers Ajustement' pour continuer.
+"Adjust top and bottom boundaries or side heights, then click 'Finish'","Adjust top and bottom boundaries or side heights, then click 'Finish'","Ajustez les limites supérieure et inférieure ou les hauteurs latérales, puis cliquez sur 'Terminer'"
+Incomplete Annotations,Incomplete Annotations,Annotations incomplètes
+You have 1 compartments left to annotate. Do you want to proceed to boundary adjustment without placing all markers?,You have 1 compartments left to annotate. Do you want to proceed to boundary adjustment without placing all markers?,Il vous reste 1 compartiment à annoter. Voulez-vous continuer vers l'ajustement des limites sans placer tous les marqueurs ?
+Proceed,Proceed,Continuer
+Stay Here,Stay Here,Rester ici
+Full Image Comparison,Full Image Comparison,Comparaison d’image complète
+Show Current Image,Show Current Image,Afficher l'image actuelle
+Show Existing Original,Show Existing Original,Afficher l’original existant
+Metadata Editor,Metadata Editor,Éditeur de métadonnées
+Apply Changes,Apply Changes,Appliquer les modifications
+Choose an action:,Choose an action:,Choisissez une action :
+Replace All,Replace All,Tout remplacer
+Existing original image not found,Existing original image not found,Image originale existante non trouvée
+Are you sure you want to stop processing?,Are you sure you want to stop processing?,Êtes-vous sûr de vouloir arrêter le traitement ?
+QAQC - SB9999 0-20,QAQC - SB9999 0-20,QAQC - SB9999 0-20
+Compartment 1/40,Compartment 1/40,Compartiment 1/40
+Existing Image,Existing Image,Image existante
+New Image,New Image,Nouvelle image
+Sample Moisture,Sample Moisture,Humidité de l’échantillon
+Keyboard Shortcuts,Keyboard Shortcuts,Raccourcis clavier
+"1: Dry | 2: Wet
+← → Navigate (after status set)","1: Dry | 2: Wet
+← → Navigate (after status set)","1 : Sec | 2 : Humide
+← → Naviguer (après définition de l'état)"
+Register Data,Register Data,Enregistrer les données
+← Previous,← Previous,← Précédent
+Next →,Next →,Suivant →
+Depth: 0-1m,Depth: 0-1m,Profondeur : 0-1m
+Unsaved Changes,Unsaved Changes,Modifications non enregistrées
+There are unsaved changes. Save before closing?,There are unsaved changes. Save before closing?,Des modifications n'ont pas été enregistrées. Enregistrer avant de fermer ?
+Save & Close,Save & Close,Enregistrer et fermer
+Close Without Saving,Close Without Saving,Fermer sans enregistrer
+En,En,Fr
+Current version,Current version,Version actuelle
+Latest version,Latest version,Dernière version
+For the update please contact:,For the update please contact:,Pour la mise à jour -  veuillez contacter :
+QAQC Review - SB0043,QAQC Review - SB0043,Révision QAQC - SB0043
+Existing Wet,Existing Wet,Humide existant
+Moisture,Moisture,Humidité
+Dry,Dry,Sec
+Quality Status,Quality Status,Statut de qualité
+Skip,Skip,Ignorer
+Existing Unclassified,Existing Unclassified,Non classé existant
+Remove,Remove,Supprimer
+Existing Dry,Existing Dry,Sec existant
+1: OK | 2: Blurry | 3: Damaged | 4: Missing,1: OK | 2: Blurry | 3: Damaged | 4: Missing,1 : OK | 2 : Flou | 3 : Endommagé | 4 : Manquant
+"W: Set Wet | D: Set Dry | ← → Navigate""","W: Set Wet | D: Set Dry | ← → Navigate""","W : Définir humide | D : Définir sec | ← → Navigation"""
+Save & Continue,Save & Continue,Enregistrer & Continuer
+Wet,Wet,Humide
+Reason for Rejection,Reason for Rejection,Motif de rejet
+Embedding Tool,Embedding Tool,Outil d'embedding
+Select Image Folder,Select Image Folder,Sélectionner le dossier d'images
+Select Input Columns,Select Input Columns,Sélectionner les colonnes d'entrée
+Generate Embeddings,Generate Embeddings,Générer des embeddings
+No wet image,No wet image,Pas d'image humide
+No current image,No current image,Pas d'image actuelle
+No dry image,No dry image,Pas d'image sèche
+Unreviewed Compartments,Unreviewed Compartments,Compartiments non révisés
+Move to Shared,Move to Shared,Déplacer vers partagé
+Keep Local,Keep Local,Conserver en local
+There are unreviewed compartments.,There are unreviewed compartments.,Il y a compartiments non révisés.
+Would you like to move them to the shared review folder for later processing?,Would you like to move them to the shared review folder for later processing?,Souhaitez-vous les déplacer vers le dossier de révision partagé pour un traitement ultérieur ?
+Yes - Move to shared folder for team review,Yes - Move to shared folder for team review,Oui - Déplacer vers le dossier partagé pour la revue d'équipe
+No - Keep in local folder (may be lost if not backed up),No - Keep in local folder (may be lost if not backed up),Non - Conserver dans le dossier local (peut être perdu s'il n'est pas sauvegardé)
+No image available,No image available,Aucune image disponible
+QAQC Review - SB9999,QAQC Review - SB9999,Révision QAQC - SB9999
+? Left in local folder: 162 compartments,? Left in local folder: 162 compartments,? Restés dans le dossier local : 162 compartiments
+? Left in local folder: 40 compartments,? Left in local folder: 40 compartments,? Restés dans le dossier local : 40 compartiments
+? Left in local folder: 1 compartments,? Left in local folder: 1 compartments,? Resté dans le dossier local : 1 compartiment
+? Left in local folder: 100 compartments,? Left in local folder: 100 compartments,? Restés dans le dossier local : 100 compartiments
+? Reviewed and saved: 1 compartments,? Reviewed and saved: 1 compartments,? Révisé et enregistré : 1 compartiment
+? Moved to shared review: 1 compartments,? Moved to shared review: 1 compartments,? Déplacé vers la revue partagée : 1 compartiment
+Select,Select,Sélectionner
+Wet Brush,Wet Brush,Pinceau humide
+Dry Brush,Dry Brush,Pinceau sec
+Delete,Delete,Supprimer
+Error,Error,Erreur
+An error occurred starting the review:,An error occurred starting the review:,Une erreur est survenue lors du démarrage de la révision :
+Placed compartment at depth 10m (x=1389),Placed compartment at depth 10m (x=1389),Compartiment placé à 10 m de profondeur (x=1389)
+Placed compartment at depth 24m (x=751),Placed compartment at depth 24m (x=751),Compartiment placé à 24 m de profondeur (x=751)
+Undid compartment at depth 24m. Please place it again.,Undid compartment at depth 24m. Please place it again.,Placement du compartiment à 24 m annulé. Veuillez le placer à nouveau .
+Placed compartment at depth 24m (x=752),Placed compartment at depth 24m (x=752),Compartiment placé à 24 m de profondeur (x=752)
+Bad Image,Bad Image,Mauvaise image
+Rotate,Rotate,Faire pivoter
+Grid Layout,Grid Layout,Disposition en grille
+Key,Key,Clé
+?,?,?
+Depth Validation CSV:,Depth Validation CSV:,CSV de validation des profondeurs :
+Select Excel Register,Select Excel Register,Sélectionner le registre Excel
+Select shared folder,Select shared folder,Sélectionner le dossier partagé
+Drilling intervals CSV:,Drilling intervals CSV:,CSV des intervalles de forage :
+Cancel Registration,Cancel Registration,Annuler l'enregistrement
+Are you sure you want to cancel? All manual annotations will be lost.,Are you sure you want to cancel? All manual annotations will be lost.,Êtes-vous sûr de vouloir annuler ? Toutes les annotations manuelles seront perdues.
+m,m,m
+From:,From:,De :
+To:,To:,À :
+Depth Range Warning,Depth Range Warning,Avertissement sur la plage de profondeur
+"The expected depth range for {interval}m interval with {compartment_count} compartments is {expected_depth_range}m, but you entered {actual_depth_range}m.
+
+Do you want to continue with this non-standard depth range?","The expected depth range for {interval}m interval with {compartment_count} compartments is {expected_depth_range}m, but you entered {actual_depth_range}m.
+
+Do you want to continue with this non-standard depth range?","La plage de profondeur attendue pour un intervalle de {interval} m avec {compartment_count} compartiments est de {expected_depth_range} m, mais vous avez saisi {actual_depth_range} m.
+
+Souhaitez-vous continuer avec cette plage non standard ?"
+Click in the center of where compartments should be placed,Click in the center of where compartments should be placed,Cliquez au centre de l'endroit où les compartiments doivent être placés
+Click anywhere to set where the TOP edge of compartments should be,Click anywhere to set where the TOP edge of compartments should be,Cliquez n'importe où pour définir où se trouve le bord supérieur des compartiments
+Set TOP constraint at y=248,Set TOP constraint at y=248,Définir la contrainte supérieure à y=248
+Apply & Continue,Apply & Continue,Appliquer et continuer
+Column Layout,Column Layout,Disposition en colonnes
+Smaller,Smaller,Plus petit
+Bigger,Bigger,Plus grand
+Reset All,Reset All,Tout réinitialiser
+Cancel Review,Cancel Review,Annuler l'examen
+Are you sure you want to cancel? Unsaved changes will be lost.,Are you sure you want to cancel? Unsaved changes will be lost.,Êtes-vous sûr de vouloir annuler ? Les modifications non enregistrées seront perdues.

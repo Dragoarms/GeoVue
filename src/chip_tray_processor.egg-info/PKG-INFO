@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: chip-tray-processor
+Version: 1.5.1
+Summary: Chip Tray Photo Processor
+Requires-Python: >=3.7
