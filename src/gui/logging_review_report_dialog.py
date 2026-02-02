@@ -434,7 +434,7 @@ class LoggingReviewReportDialog:
         page_options = {key: var.get() for key, var in self.page_vars.items()}
 
         try:
-            generate_logger_reports(
+            output_files, skipped_loggers = generate_logger_reports(
                 data_coordinator=self.data_coordinator,
                 output_dir=self.output_path_var.get().strip(),
                 date_from=self.date_from_var.get().strip() or None,
@@ -446,12 +446,35 @@ class LoggingReviewReportDialog:
                 output_format="HTML",
                 prepped_data=self._prep_cache,
             )
-            DialogHelper.show_message(
-                self.dialog,
-                self.t("Report Generated"),
-                self.t("Reports generated successfully."),
-                message_type="info",
-            )
+            if not output_files and skipped_loggers:
+                DialogHelper.show_message(
+                    self.dialog,
+                    self.t("No Reports Generated"),
+                    self.t("None of the selected loggers have data in the selected date range.")
+                    + "\n\n"
+                    + self.t("Skipped:")
+                    + " "
+                    + ", ".join(str(s) for s in skipped_loggers),
+                    message_type="warning",
+                )
+            elif skipped_loggers:
+                DialogHelper.show_message(
+                    self.dialog,
+                    self.t("Report Generated"),
+                    self.t("Reports generated for {} logger(s).").format(len(output_files))
+                    + "\n\n"
+                    + self.t("The following had no data in the selected date range and were skipped:")
+                    + "\n"
+                    + ", ".join(str(s) for s in skipped_loggers),
+                    message_type="info",
+                )
+            else:
+                DialogHelper.show_message(
+                    self.dialog,
+                    self.t("Report Generated"),
+                    self.t("Reports generated successfully."),
+                    message_type="info",
+                )
         except Exception as e:
             logger.exception("Report generation failed")
             DialogHelper.show_message(

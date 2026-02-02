@@ -376,12 +376,14 @@ def filter_dataframe_by_logger_and_date(
 
     if date_col and (date_from or date_to):
         dates = pd.to_datetime(filtered[date_col], errors="coerce")
+        mask = pd.Series(True, index=filtered.index)
         if date_from:
             start = pd.to_datetime(date_from, errors="coerce")
-            filtered = filtered[dates >= start]
+            mask &= (dates >= start)
         if date_to:
             end = pd.to_datetime(date_to, errors="coerce")
-            filtered = filtered[dates <= end]
+            mask &= (dates <= end)
+        filtered = filtered.loc[mask]
 
     return filtered
 
@@ -919,19 +921,19 @@ def generate_logger_reports(
     logo_path: Optional[str] = None,
     output_format: str = "PDF",
     prepped_data: Optional[Dict[str, Any]] = None,
-) -> List[str]:
+) -> Tuple[List[str], List[str]]:
     """
     Generate per-logger PDF or HTML reports.
     If prepped_data is provided (from prepare_logging_review_data), only filtering and HTML generation run.
-    Returns list of file paths created.
+    Returns (list of file paths created, list of logger names skipped because they had 0 rows in the filtered date range).
     """
     os.makedirs(output_dir, exist_ok=True)
     start_time = time.perf_counter()
     geo_store = data_coordinator.geological_store if data_coordinator else None
 
     if prepped_data is not None:
-        # Keep full team data before filtering for team statistics
-        full_team_df = prepped_data["merged_df"].copy()
+        # Full team data for team statistics (read-only in HTML report; no copy needed)
+        full_team_df = prepped_data["merged_df"]
 
         merged_df = filter_dataframe_by_logger_and_date(
             df=prepped_data["merged_df"],
@@ -1144,6 +1146,24 @@ def generate_logger_reports(
                 .tolist()
             )
 
+    # Skip loggers with no data in the filtered date range; report them to the caller
+    loggers_with_data: Set[str] = set()
+    for v in logger_values:
+        sv = str(v)
+        if (merged_df[logger_col].astype(str) == sv).any() or (logging_df[logger_col].astype(str) == sv).any():
+            loggers_with_data.add(v)
+    skipped_loggers = [v for v in logger_values if v not in loggers_with_data]
+    logger_values = [v for v in logger_values if v in loggers_with_data]
+    if skipped_loggers:
+        logger.info(
+            "Skipping %d logger(s) with no data in selected date range: %s",
+            len(skipped_loggers),
+            ", ".join(str(s) for s in skipped_loggers),
+        )
+
+    if not logger_values:
+        return ([], skipped_loggers)
+
     if logo_path is None:
         default_logo = Path(__file__).resolve().parents[1] / "resources" / "full_logo.png"
         logo_path = str(default_logo) if default_logo.exists() else None
@@ -1153,7 +1173,7 @@ def generate_logger_reports(
             generate_logger_html_reports_from_prepped_data,
         )
 
-        return generate_logger_html_reports_from_prepped_data(
+        output_files = generate_logger_html_reports_from_prepped_data(
             data_coordinator=data_coordinator,
             output_dir=output_dir,
             merged_df=merged_df,
@@ -1175,6 +1195,7 @@ def generate_logger_reports(
             logo_path=logo_path,
             full_team_df=full_team_df,
         )
+        return (output_files, skipped_loggers)
 
     output_files = []
     for logger_value in logger_values:
@@ -1303,7 +1324,7 @@ def generate_logger_reports(
         c.save()
         output_files.append(output_path)
 
-    return output_files
+    return (output_files, skipped_loggers)
 
 
 def _summarize_fines_accuracy(df: pd.DataFrame, chem_cols: List[str]) -> List[str]:

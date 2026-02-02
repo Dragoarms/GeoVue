@@ -1,6 +1,7 @@
 import base64
 import html
 import io
+import json
 import logging
 import math
 import os
@@ -704,7 +705,11 @@ def _build_map_points(
             }
         )
     bounds = [min_y, min_x, max_y, max_x]
-    return {"points": points, "has_coords": True, "bounds": bounds}
+    # Heuristic: if coords look like projected (e.g. UTM) rather than WGS84, warn
+    warn_projected = (
+        min_x < -180 or max_x > 180 or min_y < -90 or max_y > 90
+    )
+    return {"points": points, "has_coords": True, "bounds": bounds, "warn_projected": warn_projected}
 
 
 def _compute_logger_median(
@@ -1056,6 +1061,74 @@ def _check_profile_zonation_and_analyze(
     return correct_counts, mismatch_counts, mismatch_attribution
 
 
+def _collect_zonation_mismatch_rows(
+    df: pd.DataFrame,
+    zonation_cols: Dict[str, Optional[str]],
+    hole_col: str,
+    depth_from_col: Optional[str],
+    depth_to_col: str,
+) -> List[Dict[str, Any]]:
+    """Collect row-level zonation mismatches for evidence table (errors only)."""
+    zonation_categories = ["Un", "Le", "De", "Hy", "Pr"]
+    z_col = zonation_cols.get("zonation")
+    g_col = zonation_cols.get("total_gangue")
+    de_col = zonation_cols.get("de_pct")
+    hy_col = zonation_cols.get("hy_pct")
+    pr_col = zonation_cols.get("pr_pct")
+    if not z_col or z_col not in df.columns:
+        return []
+    rules = {
+        "Un": (16, 100, None),
+        "Le": (11, 15, None),
+        "De": (0, 10, "De"),
+        "Hy": (0, 10, "Hy"),
+        "Pr": (0, 10, "Pr"),
+    }
+    rows_out = []
+    for _, row in df.iterrows():
+        zonation = row.get(z_col)
+        if pd.isna(zonation):
+            continue
+        zonation = str(zonation).strip()
+        if zonation not in zonation_categories:
+            continue
+        total_gangue = _safe_float(row.get(g_col)) if g_col else None
+        de_pct = _safe_float(row.get(de_col)) if de_col else 0
+        hy_pct = _safe_float(row.get(hy_col)) if hy_col else 0
+        pr_pct = _safe_float(row.get(pr_col)) if pr_col else 0
+        min_g, max_g, dominant = rules.get(zonation, (0, 100, None))
+        ok = True
+        if total_gangue is not None and not (min_g <= total_gangue < max_g):
+            ok = False
+        if ok and dominant:
+            minerals = {"De": de_pct or 0, "Hy": hy_pct or 0, "Pr": pr_pct or 0}
+            actual_dom = max(minerals, key=minerals.get)
+            if actual_dom != dominant:
+                ok = False
+        if not ok:
+            should_be = None
+            if total_gangue is not None:
+                if total_gangue > 15:
+                    should_be = "Un"
+                elif total_gangue > 10:
+                    should_be = "Le"
+                elif de_col or hy_col or pr_col:
+                    minerals = {"De": de_pct or 0, "Hy": hy_pct or 0, "Pr": pr_pct or 0}
+                    should_be = max(minerals, key=minerals.get)
+            rows_out.append({
+                "hole_id": _safe_str(row.get(hole_col)),
+                "depth_from": _safe_float(row.get(depth_from_col)) if depth_from_col else None,
+                "depth_to": _safe_float(row.get(depth_to_col)),
+                "logged_zonation": zonation,
+                "should_be": should_be or "-",
+                "total_gangue_pct": total_gangue,
+                "de_pct": de_pct,
+                "hy_pct": hy_pct,
+                "pr_pct": pr_pct,
+            })
+    return rows_out
+
+
 GROUPING_CV_ELEMENTS = ["fe_pct", "sio2_pct", "al2o3_pct", "mgo_pct", "cao_pct", "s_pct"]
 
 
@@ -1278,7 +1351,7 @@ def _build_html_report(
     )
     mineral_quarterly_user = _group_mineralisation_by_quarter(assay_with_accuracy, date_col)
 
-    # Collect mineralisation intervals for evidence table (all statuses, not just mismatches)
+    # Collect mineralisation intervals for evidence table (mismatches only)
     mineral_mismatch_intervals = []
     if "Logging_Accuracy" in assay_with_accuracy.columns:
         gangue_col = resolver_assay.get("total_gangue_pct")
@@ -1317,17 +1390,27 @@ def _build_html_report(
             logged_zonation = _safe_str(row.get(zonation_col)) if zonation_col else ""
             validation = row.get("Logging_Accuracy", "")
 
-            mineral_mismatch_intervals.append({
-                "hole_id": _safe_str(row.get(hole_col)),
-                "depth_from": _safe_float(row.get(depth_from_col)) if depth_from_col else None,
-                "depth_to": _safe_float(row.get(depth_to_col)),
-                "validation": validation,
-                "logged_as": logged_strat,
-                "logged_zonation": logged_zonation,
-                "assay_suggests": assay_suggests,
-                "gangue_pct": gangue_val,
-                "geochem": {"Fe": fe_val, "SiO2": sio2_val, "Al2O3": al2o3_val},
-            })
+            if validation == "Mismatch":
+                mineral_mismatch_intervals.append({
+                    "hole_id": _safe_str(row.get(hole_col)),
+                    "depth_from": _safe_float(row.get(depth_from_col)) if depth_from_col else None,
+                    "depth_to": _safe_float(row.get(depth_to_col)),
+                    "validation": validation,
+                    "logged_as": logged_strat,
+                    "logged_zonation": logged_zonation,
+                    "assay_suggests": assay_suggests,
+                    "gangue_pct": gangue_val,
+                    "geochem": {"Fe": fe_val, "SiO2": sio2_val, "Al2O3": al2o3_val},
+                })
+
+    # Add compartment images for mineralisation evidence table
+    if data_coordinator and include_images:
+        for item in mineral_mismatch_intervals:
+            item["image"] = _lookup_interval_image(
+                data_coordinator,
+                item.get("hole_id"),
+                item.get("depth_to"),
+            )
 
     project_with_accuracy = _add_mineralisation_accuracy_column(project_filtered_df, ColumnResolver(project_filtered_df))
     mineral_quarterly_team = _group_mineralisation_by_quarter(project_with_accuracy, date_col)
@@ -1340,6 +1423,16 @@ def _build_html_report(
     zonation_cols = _resolve_zonation_columns(assay_logger_df)
     assay_df_for_zonation, zonation_cols = _derive_dominant_zonation_column(assay_logger_df, zonation_cols)
     z_correct, z_mismatch, z_attribution = _check_profile_zonation_and_analyze(assay_df_for_zonation, zonation_cols)
+    zonation_mismatch_rows = _collect_zonation_mismatch_rows(
+        assay_df_for_zonation, zonation_cols, hole_col, depth_from_col, depth_to_col
+    )
+    if data_coordinator and include_images:
+        for item in zonation_mismatch_rows:
+            item["image"] = _lookup_interval_image(
+                data_coordinator,
+                item.get("hole_id"),
+                item.get("depth_to"),
+            )
     zonation_cols_team = _resolve_zonation_columns(project_filtered_df)
     team_df_for_zonation, zonation_cols_team = _derive_dominant_zonation_column(project_filtered_df, zonation_cols_team)
     z_correct_team, z_mismatch_team, z_attribution_team = _check_profile_zonation_and_analyze(team_df_for_zonation, zonation_cols_team)
@@ -1644,6 +1737,7 @@ def _build_html_report(
             "correct_counts": z_correct,
             "mismatch_counts": z_mismatch,
             "mismatch_attribution": z_attribution,
+            "mismatch_rows": zonation_mismatch_rows,
             "correct_counts_team": z_correct_team,
             "mismatch_counts_team": z_mismatch_team,
             "mismatch_attribution_team": z_attribution_team,
@@ -2115,6 +2209,13 @@ def _render_mineralisation_evidence_table(intervals: List[Dict[str, Any]], logge
         validation_class = get_validation_class(validation)
         logged_as = item.get("logged_as", "")
         logged_zonation = item.get("logged_zonation", "")
+        if item.get("image"):
+            image_html = (
+                f"<img src=\"{item['image']}\" alt=\"Interval\" class=\"rotated-image expandable-img img-small\" "
+                f"onclick=\"this.classList.toggle('expanded')\" title=\"Click to expand\" />"
+            )
+        else:
+            image_html = "<div class=\"image-placeholder-small\">-</div>"
 
         rows.append(
             "<tr>"
@@ -2128,6 +2229,7 @@ def _render_mineralisation_evidence_table(intervals: List[Dict[str, Any]], logge
             f"<td class=\"geochem-cell {assay_class}\" data-sort=\"{fe_val or 0}\">{fe_display}</td>"
             f"<td class=\"geochem-cell {assay_class}\" data-sort=\"{sio2_val or 0}\">{sio2_display}</td>"
             f"<td class=\"geochem-cell {assay_class}\" data-sort=\"{al2o3_val or 0}\">{al2o3_display}</td>"
+            f"<td class=\"image-cell-compact\">{image_html}</td>"
             "</tr>"
         )
     return (
@@ -2143,6 +2245,70 @@ def _render_mineralisation_evidence_table(intervals: List[Dict[str, Any]], logge
         "<th class=\"sortable\">Fe% ▼</th>"
         "<th class=\"sortable\">SiO2% ▼</th>"
         "<th class=\"sortable\">Al2O3% ▼</th>"
+        "<th data-i18n-fr=\"Image\" data-i18n-en=\"Image\">Image</th>"
+        "</tr></thead>"
+        "<tbody>"
+        + "".join(rows)
+        + "</tbody></table>"
+    )
+
+
+def _render_zonation_evidence_table(
+    intervals: List[Dict[str, Any]], logger_id: str
+) -> str:
+    """Evidence table for zonation mismatches: Hole, Depth, Logged zonation, Should be, Total gangue %, De/Hy/Pr %, Image."""
+    if not intervals:
+        return (
+            "<div class=\"empty\" data-i18n-fr=\"Aucune discordance de zonation.\" "
+            "data-i18n-en=\"No zonation mismatches.\">No zonation mismatches.</div>"
+        )
+    rows = []
+    for idx, item in enumerate(intervals):
+        checkbox_id = f"{logger_id}::zonation_evidence::{idx}"
+        depth = (
+            f"{item.get('depth_from', '')} - {item.get('depth_to', '')}"
+            if item.get("depth_from") is not None
+            else f"{item.get('depth_to', '')}"
+        )
+        total_g = item.get("total_gangue_pct")
+        total_g_display = f"{total_g:.1f}%" if total_g is not None else "-"
+        de_display = f"{item.get('de_pct', 0) or 0:.1f}%" if item.get("de_pct") is not None else "-"
+        hy_display = f"{item.get('hy_pct', 0) or 0:.1f}%" if item.get("hy_pct") is not None else "-"
+        pr_display = f"{item.get('pr_pct', 0) or 0:.1f}%" if item.get("pr_pct") is not None else "-"
+        if item.get("image"):
+            image_html = (
+                f"<img src=\"{item['image']}\" alt=\"Interval\" class=\"rotated-image expandable-img img-small\" "
+                f"onclick=\"this.classList.toggle('expanded')\" title=\"Click to expand\" />"
+            )
+        else:
+            image_html = "<div class=\"image-placeholder-small\">-</div>"
+        rows.append(
+            "<tr>"
+            f"<td><input type=\"checkbox\" data-review-id=\"{checkbox_id}\"></td>"
+            f"<td class=\"sortable\" data-sort=\"{html.escape(_safe_str(item.get('hole_id')))}\">{html.escape(_safe_str(item.get('hole_id')))}</td>"
+            f"<td class=\"sortable\" data-sort=\"{item.get('depth_from', 0) or 0}\">{html.escape(str(depth))}</td>"
+            f"<td data-sort=\"{html.escape(_safe_str(item.get('logged_zonation')))}\">{html.escape(_safe_str(item.get('logged_zonation')))}</td>"
+            f"<td data-sort=\"{html.escape(_safe_str(item.get('should_be')))}\">{html.escape(_safe_str(item.get('should_be')))}</td>"
+            f"<td class=\"sortable\" data-sort=\"{total_g or 0}\">{total_g_display}</td>"
+            f"<td class=\"sortable\" data-sort=\"{item.get('de_pct') or 0}\">{de_display}</td>"
+            f"<td class=\"sortable\" data-sort=\"{item.get('hy_pct') or 0}\">{hy_display}</td>"
+            f"<td class=\"sortable\" data-sort=\"{item.get('pr_pct') or 0}\">{pr_display}</td>"
+            f"<td class=\"image-cell-compact\">{image_html}</td>"
+            "</tr>"
+        )
+    return (
+        "<table class=\"interval-table evidence-table sortable-table\" id=\"zonation-evidence-table\">"
+        "<thead><tr>"
+        "<th></th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Trou\" data-i18n-en=\"Hole\">Hole</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Profondeur\" data-i18n-en=\"Depth\">Depth</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Zonation loggee\" data-i18n-en=\"Logged zonation\">Logged zonation</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Devrait etre\" data-i18n-en=\"Should be\">Should be</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Gangue totale %\" data-i18n-en=\"Total gangue %\">Total gangue %</th>"
+        "<th class=\"sortable\">De %</th>"
+        "<th class=\"sortable\">Hy %</th>"
+        "<th class=\"sortable\">Pr %</th>"
+        "<th data-i18n-fr=\"Image\" data-i18n-en=\"Image\">Image</th>"
         "</tr></thead>"
         "<tbody>"
         + "".join(rows)
@@ -2390,7 +2556,7 @@ def _plotly_stacked_bar_json(
         "margin": {"t": 40, "b": 60},
         "height": 280,
         "autosize": True,
-        "xaxis": {"tickangle": -45},
+        "xaxis": {"type": "category", "tickangle": -45},
     }
     return json.dumps(data), json.dumps(layout)
 
@@ -2414,6 +2580,34 @@ def _plotly_strat_grouped_bar_json(
         "height": 320,
         "autosize": True,
         "xaxis": {"tickangle": -45},
+    }
+    return json.dumps(data), json.dumps(layout)
+
+
+def _plotly_strat_grouped_bar_pct_json(
+    strat_codes: List[str],
+    logger_counts: List[int],
+    team_counts: List[int],
+    title: str,
+) -> Tuple[str, str]:
+    """Grouped bar: Logger vs Team strat code as % of intervals (relative distribution)."""
+    import json
+    total_logger = max(sum(logger_counts), 1)
+    total_team = max(sum(team_counts), 1)
+    logger_pct = [x / total_logger * 100 for x in logger_counts]
+    team_pct = [x / total_team * 100 for x in team_counts]
+    data = [
+        {"type": "bar", "x": strat_codes, "y": logger_pct, "name": "Logger", "marker": {"color": "#0d5b88"}},
+        {"type": "bar", "x": strat_codes, "y": team_pct, "name": "Team", "marker": {"color": "#94a3b8"}},
+    ]
+    layout = {
+        "title": {"text": title},
+        "barmode": "group",
+        "margin": {"t": 40, "b": 80},
+        "height": 320,
+        "autosize": True,
+        "xaxis": {"tickangle": -45},
+        "yaxis": {"title": {"text": "% of intervals"}},
     }
     return json.dumps(data), json.dumps(layout)
 
@@ -2452,6 +2646,15 @@ def _render_map(map_data: Dict[str, Any]) -> str:
             "<div class=\"empty\" data-i18n-fr=\"Aucune coordonnee de colliers disponible.\" "
             "data-i18n-en=\"No collar coordinates available for map.\">"
             "Aucune coordonnee de colliers disponible.</div>"
+        )
+
+    if map_data.get("warn_projected"):
+        return (
+            "<div class=\"warning-box\" data-i18n-fr=\"Les coordonnees des colliers semblent etre en CRS projete (ex. UTM). "
+            "La carte exige WGS84 (lat/lng). Utilisez des coordonnees en degres decimaux ou reprojetez les donnees.\" "
+            "data-i18n-en=\"Collar coordinates appear to be in a projected CRS (e.g. UTM). Map requires WGS84 (lat/lng). "
+            "Use decimal-degree coordinates or reproject the collar data.\">"
+            "Collar coordinates may be in a projected CRS (e.g. UTM). Map requires WGS84 (lat/lng).</div>"
         )
 
     points = map_data["points"]
@@ -2562,9 +2765,9 @@ def _render_html(
     logger_counts_list = [logger_counts_by_code.get(c, 0) for c in all_codes_sorted]
     team_counts_list = [team_counts_by_code.get(c, 0) for c in all_codes_sorted]
     if all_codes_sorted:
-        strat_grouped_data, strat_grouped_layout = _plotly_strat_grouped_bar_json(
+        strat_grouped_data, strat_grouped_layout = _plotly_strat_grouped_bar_pct_json(
             all_codes_sorted, logger_counts_list, team_counts_list,
-            "Strat codes: Logger vs Team"
+            "Strat codes: Logger vs Team (% of intervals)"
         )
     else:
         strat_grouped_data, strat_grouped_layout = "[]", "{}"
@@ -2692,7 +2895,15 @@ def _render_html(
     ) if (acc_labels or acc_values) else ("[]", "{}")
     q_user = min_acc.get("quarterly_user", pd.DataFrame())
     if not q_user.empty and "Quarter" in q_user.columns:
-        quarters_user = q_user["Quarter"].astype(str).tolist()
+        # Format as categorical labels (e.g. Q1 2025) so single-bin x-axis is readable
+        quarters_user = []
+        for p in q_user["Quarter"]:
+            try:
+                per = getattr(p, "quarter", None) or ((pd.Timestamp(p).month - 1) // 3 + 1)
+                yr = getattr(p, "year", None) or pd.Timestamp(p).year
+                quarters_user.append(f"Q{per} {yr}")
+            except Exception:
+                quarters_user.append(str(p))
         match_user = q_user.get("Match", pd.Series([0] * len(q_user))).fillna(0).tolist()
         mismatch_user = q_user.get("Mismatch", pd.Series([0] * len(q_user))).fillna(0).tolist()
         pending_user = q_user.get("Pending Assays", pd.Series([0] * len(q_user))).fillna(0).tolist()
@@ -2715,7 +2926,14 @@ def _render_html(
     ) if (acc_labels_t or acc_values_t) else ("[]", "{}")
     q_team = min_acc.get("quarterly_team", pd.DataFrame())
     if not q_team.empty and "Quarter" in q_team.columns:
-        quarters_team = q_team["Quarter"].astype(str).tolist()
+        quarters_team = []
+        for p in q_team["Quarter"]:
+            try:
+                per = getattr(p, "quarter", None) or ((pd.Timestamp(p).month - 1) // 3 + 1)
+                yr = getattr(p, "year", None) or pd.Timestamp(p).year
+                quarters_team.append(f"Q{per} {yr}")
+            except Exception:
+                quarters_team.append(str(p))
         match_team = q_team.get("Match", pd.Series([0] * len(q_team))).fillna(0).tolist()
         mismatch_team = q_team.get("Mismatch", pd.Series([0] * len(q_team))).fillna(0).tolist()
         pending_team = q_team.get("Pending Assays", pd.Series([0] * len(q_team))).fillna(0).tolist()
@@ -2796,20 +3014,12 @@ def _render_html(
         z_cats, z_correct, z_mismatch,
         "Profile Zonation Logging Accuracy by Category"
     )
-    z_attr = pz.get("mismatch_attribution", {})
-    attribution_rows = []
-    for cat in z_cats:
-        inc = z_attr.get(cat, {})
-        for should_be, count in sorted(inc.items(), key=lambda x: -x[1]):
-            attribution_rows.append((cat, should_be, count))
-    attribution_html = ""
-    if attribution_rows:
-        attribution_html = "<table class=\"attribution-table\"><thead><tr><th data-i18n-fr=\"Logue comme\" data-i18n-en=\"Logged as\">Logue comme</th><th data-i18n-fr=\"Devrait etre\" data-i18n-en=\"Should be\">Devrait etre</th><th data-i18n-fr=\"Nombre\" data-i18n-en=\"Count\">Nombre</th></tr></thead><tbody>"
-        for (logged, should_be, count) in attribution_rows[:15]:
-            attribution_html += f"<tr><td>{html.escape(logged)}</td><td>{html.escape(should_be)}</td><td>{count}</td></tr>"
-        attribution_html += "</tbody></table>"
-    else:
-        attribution_html = "<div class=\"empty\" data-i18n-fr=\"Aucune attribution de discordance.\" data-i18n-en=\"No mismatch attribution.\">Aucune attribution.</div>"
+    zonation_mismatch_rows = pz.get("mismatch_rows", [])
+    zonation_evidence_html = _render_zonation_evidence_table(zonation_mismatch_rows, logger_id)
+    zonation_based_on_note = (
+        "<p class=\"zonation-based-on-note\" data-i18n-en=\"Based on mineral logging codes only.\" "
+        "data-i18n-fr=\"Basé sur les codes de minéraux uniquement.\">Based on mineral logging codes only.</p>"
+    )
 
     # Show a warning if no zonation data found
     zonation_data_warning = ""
@@ -2828,28 +3038,17 @@ def _render_html(
                 <h2 data-i18n-fr="Zonation de profil" data-i18n-en="Profile zonation">Zonation de profil</h2>
             </div>
             {zonation_data_warning}
-            <div class="kpi-grid">
-                <div class="kpi-card">
-                    <div class="kpi-label" data-i18n-fr="Couverture strat (%)" data-i18n-en="Strat coverage (%)">Couverture strat (%)</div>
-                    <div class="kpi-value">{report["profile_zonation"]["strat_coverage_pct"]:.1f}%</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label" data-i18n-fr="Codes strat uniques" data-i18n-en="Unique strat codes">Codes strat uniques</div>
-                    <div class="kpi-value">{report["profile_zonation"]["unique_strats"]}</div>
-                </div>
-                <div class="kpi-card">
-                    <div class="kpi-label" data-i18n-fr="Total intervalles avec zonation" data-i18n-en="Total intervals with zonation">Total intervalles</div>
-                    <div class="kpi-value">{total_zonation_data}</div>
-                </div>
-            </div>
             <div class="two-panel">
                 <div class="panel-card">
                     <h3 data-i18n-fr="Precision par categorie (Correct vs Incorrect)" data-i18n-en="Accuracy by category">Precision par categorie</h3>
                     <div id="zonation-bar" class="plotly-chart" data-plotly-data="{html.escape(zonation_bar_data)}" data-plotly-layout="{html.escape(zonation_bar_layout)}"></div>
                 </div>
                 <div class="panel-card">
-                    <h3 data-i18n-fr="Attribution (devrait etre X)" data-i18n-en="Attribution (should be X)">Attribution</h3>
-                    {attribution_html}
+                    <h3 data-i18n-fr="Attribution (devrait etre X)" data-i18n-en="Attribution (should be X)">Attribution (should be X)</h3>
+                    {zonation_based_on_note}
+                    <div class="intervals-section">
+                        {zonation_evidence_html}
+                    </div>
                 </div>
             </div>
             <div class="info-box rules-box">
@@ -2865,15 +3064,12 @@ def _render_html(
                     <tbody>
                         <tr><td><strong>Un</strong> (Unmineralised)</td><td>16-100%</td><td>-</td></tr>
                         <tr><td><strong>Le</strong> (Leached)</td><td>11-15%</td><td>-</td></tr>
-                        <tr><td><strong>De</strong> (Detrital)</td><td>0-10%</td><td>De doit etre dominant</td></tr>
-                        <tr><td><strong>Hy</strong> (Hydrated)</td><td>0-10%</td><td>Hy doit etre dominant</td></tr>
-                        <tr><td><strong>Pr</strong> (Primary)</td><td>0-10%</td><td>Pr doit etre dominant</td></tr>
+                        <tr><td><strong>De</strong> (Detrital)</td><td>0-10%</td><td><span data-i18n-en="De minerals are dominant" data-i18n-fr="De doit etre dominant">De minerals are dominant</span></td></tr>
+                        <tr><td><strong>Hy</strong> (Hydrated)</td><td>0-10%</td><td><span data-i18n-en="Hy minerals are dominant" data-i18n-fr="Hy doit etre dominant">Hy minerals are dominant</span></td></tr>
+                        <tr><td><strong>Pr</strong> (Primary)</td><td>0-10%</td><td><span data-i18n-en="Pr minerals are dominant" data-i18n-fr="Pr doit etre dominant">Pr minerals are dominant</span></td></tr>
                     </tbody>
                 </table>
-                <p class="rules-note" data-i18n-fr="Colonnes requises: BestProfileZonation_D, Total Gangue Logged, De % Logged, Hy % Logged, Pr % Logged"
-                   data-i18n-en="Required columns: BestProfileZonation_D, Total Gangue Logged, De % Logged, Hy % Logged, Pr % Logged">
-                    Colonnes requises: BestProfileZonation_D, Total Gangue Logged, De % Logged, Hy % Logged, Pr % Logged
-                </p>
+                <p class="zonation-based-on-note" data-i18n-en="Based on mineral logging codes only." data-i18n-fr="Basé sur les codes de minéraux uniquement.">Based on mineral logging codes only.</p>
             </div>
             <div class="notes-box">
                 <label data-i18n-fr="Notes du reviseur" data-i18n-en="Reviewer notes">Notes du reviseur</label>
