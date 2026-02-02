@@ -1,0 +1,14 @@
+# GeoVue ML Detection - Requirements
+# For training (Windows/Linux with GPU)
+ultralytics>=8.3.0
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+numpy>=1.24.0
+
+# For Raspberry Pi 5 deployment - install these on the Pi:
+# pip install ultralytics opencv-python-headless picamera2
+#
+# Note: On Pi 5, use opencv-python-headless if you don't need GUI
+# The picamera2 package is pre-installed on Raspberry Pi OS

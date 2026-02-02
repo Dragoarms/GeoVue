@@ -1,0 +1,2459 @@
+"""
+DrillholeColumnWidget - Single column display for drillhole intervals.
+Displays images and data for one drillhole with continuous depth axis.
+"""
+
+import tkinter as tk
+from tkinter import ttk
+import logging
+from typing import Dict, List, Optional, Any, Tuple, Union
+from dataclasses import dataclass
+import os
+import numpy as np
+import cv2
+from PIL import Image, ImageTk
+
+# Import data models
+from gui.DrillholeCorrelation.correlation_models import (
+    DrillholeInterval,
+    DrillholeSegment,
+    DepthTransform,
+    StretchRegion,
+    StretchMode,
+    Discontinuity,
+    DiscontinuityType
+)
+
+# Import custom widgets
+from gui.widgets.modern_button import ModernButton
+
+logger = logging.getLogger(__name__)
+
+
+class DrillholeColumnWidget(tk.Frame):
+    """
+    Widget displaying a single drillhole as a continuous column.
+    
+    Features:
+    - Continuous depth axis with placeholder cells for gaps
+    - Wet/Dry image selection (prefer Dry)
+    - 0.1m depth resolution for data plotting
+    - Optional data visualization columns
+    - Stretch/compress transformation support
+    - Lazy loading for performance
+    """
+    
+    def __init__(
+        self,
+        parent: tk.Widget,
+        hole_id: str,
+        gui_manager: Any,  # GUIManager instance
+        data_manager: Any,  # DrillholeDataManager instance  
+        file_manager: Any,  # FileManager instance
+        config_manager: Any,  # ConfigManager instance
+        color_map_manager: Optional[Any] = None,  # ColorMapManager instance
+        data_visualizer: Optional[Any] = None,  # DrillholeDataVisualizer instance
+        width: int = 200,
+        show_depth_ruler: bool = True,
+        show_data_columns: bool = True,
+        viz_columns: Optional[List[Dict[str, Any]]] = None,
+        moisture_preference: str = "Dry",
+        **kwargs
+    ):
+        """
+        Initialize DrillholeColumnWidget.
+        
+        Args:
+            parent: Parent widget
+            hole_id: Drillhole identifier
+            gui_manager: REQUIRED - GUIManager for theming
+            data_manager: REQUIRED - DrillholeDataManager for data access
+            file_manager: REQUIRED - FileManager for path resolution
+            config_manager: REQUIRED - ConfigManager for settings
+            color_map_manager: Optional - ColorMapManager for data colors
+            data_visualizer: Optional - DrillholeDataVisualizer for plots
+            width: Column width in pixels
+            show_depth_ruler: Show depth scale on left
+            show_data_columns: Show data visualization columns
+            viz_columns: List of visualization column configs
+        """
+        logger.info(f"Initializing DrillholeColumnWidget for hole: {hole_id}")
+        logger.debug(f"  Width: {width}px, Depth ruler: {show_depth_ruler}, Data cols: {show_data_columns}")
+        
+        # Validate required managers
+        if not all([gui_manager, data_manager, file_manager, config_manager]):
+            logger.error("Missing required managers!")
+            logger.error(f"  gui_manager: {gui_manager is not None}")
+            logger.error(f"  data_manager: {data_manager is not None}")
+            logger.error(f"  file_manager: {file_manager is not None}")
+            logger.error(f"  config_manager: {config_manager is not None}")
+            raise ValueError("All managers (gui, data, file, config) are required!")
+        
+        # Initialize frame with theme colors
+        super().__init__(parent, bg=gui_manager.theme_colors["background"], **kwargs)
+        
+        # Store managers
+        self.gui_manager = gui_manager
+        self.data_manager = data_manager
+        self.file_manager = file_manager
+        self.config_manager = config_manager
+        self.color_map_manager = color_map_manager
+        self.data_visualizer = data_visualizer
+        
+        # Theme shortcuts
+        self.theme_colors = gui_manager.theme_colors
+        self.fonts = gui_manager.fonts
+        
+        # Core properties
+        self.hole_id = hole_id
+        self.width = width
+        self.show_depth_ruler = show_depth_ruler
+        self.show_data_columns = show_data_columns
+        
+        # Visualization columns
+        self.viz_columns = viz_columns or config_manager.get("correlation_viz_columns", [])
+        logger.debug(f"  Viz columns: {[v.get('column') for v in self.viz_columns]}")
+        
+        # Moisture preference for image display (Wet/Dry)
+        self.moisture_preference = moisture_preference
+        
+        # Cell settings for pure data visualization (NO IMAGES)
+        # Cell height = pixels per meter for continuous data display
+        self.cell_height = config_manager.get("correlation_data_viz_cell_height", 10)
+        
+        # Cell width = 0 because no images are displayed in this widget
+        # Only depth ruler + data columns
+        self.cell_width = 0
+        
+        # Header height for consistent alignment across all columns
+        self.header_height = 45  # Increased to accommodate axis labels
+        
+        # Depth ruler width - wide enough for 3-digit depths (100-999m)
+        self.ruler_width = 40
+        
+        # Alternating row colors for readability
+        self.row_color_even = self.theme_colors.get("field_bg", "#2d2d2d")
+        self.row_color_odd = self._darken_color(self.row_color_even, 0.1)
+        
+        logger.debug(f"  Cell dimensions: {self.cell_width}x{self.cell_height}px (data viz only, no images)")
+        
+        # Zoom window visible range (for indicators)
+        self.zoom_window_depth_range: Optional[Tuple[float, float]] = None
+        
+        # Data storage
+        self.intervals: List[DrillholeInterval] = []
+        self.depth_transforms: List[DepthTransform] = []
+        self.image_cache: Dict[str, ImageTk.PhotoImage] = {}
+        self.canvas_items: Dict[str, int] = {}  # canvas item IDs
+        
+        # Correlation data (will be populated by parent dialog)
+        self.segments = []  # List of DrillholeSegment
+        self.discontinuities = []  # List of Discontinuity
+        
+        # Callbacks for parent dialog
+        self.on_discontinuity_add_requested = None  # Callback(hole_id, depth, type)
+        self.on_discontinuity_remove_requested = None  # Callback(hole_id, depth)
+        self.on_warp_bar_requested = None  # Callback(segment)
+        
+        # Scrolling and viewport
+        self.visible_range: Tuple[float, float] = (0, 100)  # Visible depth range
+        self.loaded_intervals: set = set()  # Indices of loaded intervals
+        
+        # Data visualization settings (from config)
+        self.data_column_width = config_manager.get("correlation_data_column_width", 50)
+        self.data_column_min_width = config_manager.get("correlation_data_column_min_width", 20)
+        self.data_column_max_width = config_manager.get("correlation_data_column_max_width", 200)
+        self.show_data_viz = show_data_columns and viz_columns
+        
+        # Image display mode: 'none', 'color', 'thumbnail'
+        self.image_mode = config_manager.get("correlation_image_mode", "thumbnail")
+        self.thumbnail_width = config_manager.get("correlation_thumbnail_width", 60)
+        self.thumbnail_min_width = config_manager.get("correlation_thumbnail_min_width", 40)
+        self.thumbnail_max_width = config_manager.get("correlation_thumbnail_max_width", 150)
+        self.color_bar_width = config_manager.get("correlation_color_bar_width", 20)
+        
+        # Load average colors for color-bar mode
+        self.average_colors = {}  # {depth_to: hex_color}
+        self._load_average_colors()
+        
+        # Column resize tracking
+        self.resizing_column: Optional[int] = None  # Index of column being resized
+        self.resize_start_x: Optional[int] = None
+        
+        # Build UI
+        self._create_ui()
+        
+        # Load data
+        self.load_hole_data()
+    
+    def _truncate_text(self, text: str, max_chars: int) -> str:
+        """Truncate text with ellipsis if too long."""
+        if not text:
+            return ""
+        if len(text) <= max_chars:
+            return text
+        if max_chars <= 1:
+            return "…"
+        return text[:max_chars - 1] + "…"
+    
+    def _parse_column_with_source(self, column_spec: str) -> Tuple[str, Optional[str]]:
+        """
+        Parse a column specification that may include source name.
+        
+        Format: "column_name (source_name)" or just "column_name"
+        
+        Args:
+            column_spec: Column specification like "fe_pct (exassay)" or "fe_pct"
+            
+        Returns:
+            Tuple of (column_name, source_name or None)
+        """
+        import re
+        # Match pattern: column_name (source_name)
+        match = re.match(r'^(.+?)\s*\(([^)]+)\)$', column_spec)
+        if match:
+            return match.group(1).strip(), match.group(2).strip()
+        return column_spec, None
+    
+    def _get_value_for_interval(
+        self, 
+        interval: 'DrillholeInterval', 
+        column_spec: str
+    ) -> Optional[float]:
+        """
+        Get a numeric value for an interval, handling source-specific columns.
+        
+        Args:
+            interval: The interval to get data for
+            column_spec: Column specification like "fe_pct (exassay)" or "fe_pct"
+            
+        Returns:
+            Float value or None if not found/invalid
+        """
+        column_name, source_name = self._parse_column_with_source(column_spec)
+        
+        # Try source-specific lookup first if source is specified
+        if source_name and hasattr(self.data_manager, 'geological_store'):
+            try:
+                from processing.DataManager.keys import ImageKey
+                key = ImageKey(
+                    hole_id=self.hole_id,
+                    depth_to=interval.depth_to
+                )
+                value = self.data_manager.geological_store.get_value(key, column_name, source_name)
+                if value is not None:
+                    try:
+                        return float(value)
+                    except (ValueError, TypeError):
+                        pass
+            except Exception as e:
+                logger.debug(f"Source lookup failed for {column_spec}: {e}")
+        
+        # Fall back to interval's csv_data (case-insensitive)
+        column_lower = column_name.lower()
+        for col, val in interval.csv_data.items():
+            if col.lower() == column_lower:
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    pass
+        
+        return None
+
+    def _create_column_display_name(self, column_name: str) -> str:
+        """
+        Create a user-friendly display name from a raw column name.
+        
+        Examples:
+            fe_pct_best -> Fe %
+            sio2_pct_best -> SiO2 %
+            al2o3_pct -> Al2O3 %
+        """
+        if not column_name:
+            return ""
+        
+        alias = column_name
+        
+        # Common replacements
+        replacements = {
+            '_pct_': ' % ',
+            '_pct': ' %',
+            'pct_': '% ',
+            '_best': '',
+            '_BEST': '',
+            'logged_': '',
+            'Logged_': '',
+        }
+        
+        for old, new in replacements.items():
+            alias = alias.replace(old, new)
+        
+        # Replace underscores with spaces
+        alias = alias.replace('_', ' ')
+        
+        # Title case
+        alias = alias.strip().title()
+        
+        # Fix common chemical formulas
+        chemical_fixes = {
+            'Sio2': 'SiO2',
+            'Al2o3': 'Al2O3',
+            'Fe2o3': 'Fe2O3',
+            'Cao': 'CaO',
+            'Mgo': 'MgO',
+            'Tio2': 'TiO2',
+            'Loi': 'LOI',
+            'Mno': 'MnO',
+            'K2o': 'K2O',
+            'Na2o': 'Na2O',
+            'P2o5': 'P2O5',
+        }
+        
+        for old, new in chemical_fixes.items():
+            alias = alias.replace(old, new)
+        
+        return alias
+    
+    def _darken_color(self, hex_color: str, factor: float) -> str:
+        """Darken a hex color by a factor (0.0-1.0)."""
+        try:
+            # Remove # prefix
+            hex_color = hex_color.lstrip('#')
+            
+            # Parse RGB
+            r = int(hex_color[0:2], 16)
+            g = int(hex_color[2:4], 16)
+            b = int(hex_color[4:6], 16)
+            
+            # Darken
+            r = max(0, int(r * (1 - factor)))
+            g = max(0, int(g * (1 - factor)))
+            b = max(0, int(b * (1 - factor)))
+            
+            return f"#{r:02x}{g:02x}{b:02x}"
+        except Exception:
+            return hex_color
+    
+    def _create_ui(self) -> None:
+        """Create the widget UI components."""
+        logger.debug(f"Creating UI for {self.hole_id}")
+        
+        # Calculate total width for proper sizing
+        total_width = self.get_total_width()
+        
+        # Set widget width explicitly
+        self.configure(width=total_width)
+        
+        # Main container with explicit width
+        self.main_frame = tk.Frame(
+            self, 
+            bg=self.theme_colors["secondary_bg"],
+            width=total_width
+        )
+        self.main_frame.pack(fill="both", expand=True)
+        self.main_frame.pack_propagate(False)  # Maintain width
+        
+        # Header with hole ID
+        self._create_header()
+        
+        # Content area with canvas
+        self._create_canvas_area()
+        
+        # Footer with controls (optional)
+        self._create_footer()
+    
+    def _create_header(self) -> None:
+        """Create header with hole ID and controls."""
+        header_frame = tk.Frame(
+            self.main_frame, 
+            bg=self.theme_colors["secondary_bg"],
+            height=30
+        )
+        header_frame.pack(fill="x", padx=1, pady=1)
+        header_frame.pack_propagate(False)
+        
+        # Store header reference for parent access
+        self.header_frame = header_frame
+        
+        # Hole ID label
+        hole_label = tk.Label(
+            header_frame,
+            text=self.hole_id,
+            font=self.fonts["heading"],
+            bg=self.theme_colors["secondary_bg"],
+            fg=self.theme_colors["text"]
+        )
+        hole_label.pack(side="left", padx=5)
+        
+        # Lock button (small clickable label)
+        self.lock_btn = tk.Label(
+            header_frame,
+            text="🔓",
+            font=("Segoe UI", 10),
+            bg=self.theme_colors["secondary_bg"],
+            fg=self.theme_colors["text"],
+            cursor="hand2"
+        )
+        self.lock_btn.pack(side="right", padx=2)
+        self.lock_btn.bind("<Button-1>", lambda e: self._toggle_lock())
+        
+        # Settings button
+        settings_btn = ModernButton(
+            header_frame,
+            text="⚙",
+            command=self._show_settings,
+            color=self.theme_colors["accent_blue"],
+            theme_colors=self.theme_colors
+        )
+        settings_btn.pack(side="right", padx=2, expand=False, fill=None)
+        
+        logger.debug(f"Header created for {self.hole_id}")
+    
+    def _toggle_lock(self) -> None:
+        """Toggle lock state and notify parent dialog."""
+        # Call parent's toggle method if it exists
+        parent_widget = self.master
+        while parent_widget and not isinstance(parent_widget, tk.Canvas):
+            parent_widget = parent_widget.master
+        
+        # Find the CorrelationDialog
+        correlation_dialog = None
+        check_widget = parent_widget
+        while check_widget:
+            if hasattr(check_widget, 'toggle_column_lock'):
+                correlation_dialog = check_widget
+                break
+            check_widget = check_widget.master if hasattr(check_widget, 'master') else None
+        
+        if correlation_dialog:
+            correlation_dialog.toggle_column_lock(self.hole_id)
+        else:
+            logger.warning("Could not find parent CorrelationDialog to toggle lock")
+    
+    def update_lock_visual(self, is_locked: bool) -> None:
+        """Update lock button appearance based on state."""
+        if hasattr(self, 'lock_btn'):
+            self.lock_btn.config(
+                text="🔒" if is_locked else "🔓",
+                fg=self.theme_colors["accent_red"] if is_locked else self.theme_colors["text"]
+            )
+            
+        # Update border color
+        if hasattr(self, 'main_frame'):
+            border_color = self.theme_colors["accent_red"] if is_locked else self.theme_colors["border"]
+            self.main_frame.config(highlightbackground=border_color, highlightthickness=2)
+    
+    def _create_canvas_area(self) -> None:
+        """Create fixed-size canvas for intervals and data columns (no internal scrolling)."""
+        # Calculate total width FIRST using get_total_width()
+        total_width = self.get_total_width()
+        
+        # Canvas frame with explicit width
+        canvas_frame = tk.Frame(
+            self.main_frame,
+            bg=self.theme_colors["field_bg"],
+            highlightbackground=self.theme_colors["border"],
+            highlightthickness=1,
+            width=total_width
+        )
+        canvas_frame.pack(fill="both", expand=True, padx=0, pady=0)
+        canvas_frame.pack_propagate(False)  # Maintain explicit width
+        
+        # Create canvas without scrollbar - full display
+        self.canvas = tk.Canvas(
+            canvas_frame,
+            bg=self.theme_colors["field_bg"],
+            highlightthickness=0,
+            width=total_width
+        )
+        
+        # Pack canvas (no scrollbar)
+        self.canvas.pack(fill="both", expand=True)
+        
+        # Bind configure event
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        
+        # Bind column resize events
+        self._bind_column_resize()
+        
+        # Bind right-click for context menu
+        self.canvas.bind("<Button-3>", self._on_right_click)
+        
+        # Bind motion events to update cursor position in parent
+        self.canvas.bind("<Motion>", self._on_canvas_motion, add="+")
+        
+        # Context menu state
+        self.context_menu = None
+        self.context_click_depth = None
+        
+        logger.debug(f"Canvas created: {total_width}px wide (no internal scrolling)")
+    
+    def _create_footer(self) -> None:
+        """Create footer with status info."""
+        footer_frame = tk.Frame(
+            self.main_frame,
+            bg=self.theme_colors["secondary_bg"],
+            height=25
+        )
+        footer_frame.pack(fill="x", padx=1, pady=1)
+        footer_frame.pack_propagate(False)
+        
+        # Status label
+        self.status_label = tk.Label(
+            footer_frame,
+            text="Ready",
+            font=self.fonts["small"],
+            bg=self.theme_colors["secondary_bg"],
+            fg=self.theme_colors["text"]
+        )
+        self.status_label.pack(side="left", padx=5)
+        
+        # Interval count
+        self.count_label = tk.Label(
+            footer_frame,
+            text="0 intervals",
+            font=self.fonts["small"],
+            bg=self.theme_colors["secondary_bg"],
+            fg=self.theme_colors["text"]
+        )
+        self.count_label.pack(side="right", padx=5)
+    
+    def _load_average_colors(self) -> None:
+        """Load average colors from compartment_image_properties.json for color-bar mode."""
+        if self.image_mode != "color":
+            return
+        
+        logger.debug(f"Loading average colors for {self.hole_id}")
+        
+        try:
+            # Get path to compartment_image_properties.json
+            register_data_folder = self.config_manager.get("shared_register_data_folder", "")
+            if not register_data_folder:
+                logger.warning("No register data folder configured")
+                return
+            
+            properties_file = os.path.join(register_data_folder, "compartment_image_properties.json")
+            
+            if not os.path.exists(properties_file):
+                logger.warning(f"Properties file not found: {properties_file}")
+                return
+            
+            import json
+            with open(properties_file, 'r') as f:
+                all_properties = json.load(f)
+            
+            # Get properties for this hole
+            if self.hole_id in all_properties:
+                hole_props = all_properties[self.hole_id]
+                for depth_str, props in hole_props.items():
+                    if "avg_color" in props:
+                        depth = float(depth_str)
+                        self.average_colors[depth] = props["avg_color"]
+                
+                logger.info(f"Loaded {len(self.average_colors)} average colors for {self.hole_id}")
+            else:
+                logger.debug(f"No properties found for {self.hole_id}")
+                
+        except Exception as e:
+            logger.error(f"Error loading average colors: {e}", exc_info=True)
+    
+    def load_hole_data(self) -> None:
+        """Load drillhole data from data manager."""
+        logger.info(f"=" * 80)
+        logger.info(f"LOADING DATA FOR HOLE: {self.hole_id}")
+        logger.info(f"=" * 80)
+        
+        try:
+            # Get interval data directly from geological store (fast path)
+            # Prefer get_hole_intervals() for correlation display
+            if hasattr(self.data_manager, 'get_hole_intervals'):
+                hole_data = self.data_manager.get_hole_intervals(self.hole_id)
+            elif hasattr(self.data_manager, 'build_dataframe_for_hole'):
+                hole_data = self.data_manager.build_dataframe_for_hole(self.hole_id)
+            else:
+                # Legacy fallback
+                hole_data = self.data_manager.get_data_for_hole(self.hole_id)
+                if isinstance(hole_data, list):
+                    logger.warning(f"get_data_for_hole returned list - cannot process")
+                    hole_data = None
+            
+            if hole_data is None or (hasattr(hole_data, 'empty') and hole_data.empty):
+                logger.error(f"❌ NO DATA FOUND for {self.hole_id}")
+                self._create_placeholder_intervals(0, 100)  # Default 100m
+                # CRITICAL: Still need to call _update_canvas to set dimensions
+                self._update_canvas()
+                return
+            
+            logger.info(f"✔ Loaded {len(hole_data)} rows from data manager")
+            logger.info(f"  Available columns: {list(hole_data.columns)}")
+            logger.info(f"  Data shape: {hole_data.shape}")
+            
+            # Find min/max depths
+            depth_cols = self._find_depth_columns(hole_data)
+            if not depth_cols:
+                logger.error(f"No depth columns found for {self.hole_id}")
+                self._create_placeholder_intervals(0, 100)  # Default 100m
+                # CRITICAL: Still need to call _update_canvas to set dimensions
+                self._update_canvas()
+                return
+            
+            min_depth = hole_data[depth_cols["from"]].min()
+            max_depth = hole_data[depth_cols["to"]].max()
+            logger.info(f"Depth range for {self.hole_id}: {min_depth}m to {max_depth}m")
+            
+            # Create intervals
+            self._create_intervals(hole_data, min_depth, max_depth, depth_cols)
+            
+            # Update canvas
+            self._update_canvas()
+            
+            # Update status
+            self.count_label.config(text=f"{len(self.intervals)} intervals")
+            self.status_label.config(text=f"{min_depth:.1f}-{max_depth:.1f}m")
+            
+        except Exception as e:
+            logger.error(f"Error loading hole data: {e}", exc_info=True)
+            self.status_label.config(text="Error loading data")
+    
+    def _find_depth_columns(self, data: Any) -> Dict[str, str]:
+        """Find depth column names in data."""
+        logger.debug("Finding depth columns in data")
+        
+        # Common depth column patterns
+        from_patterns = ["from", "depth_from", "from_depth", "from_m", "depthfrom"]
+        to_patterns = ["to", "depth_to", "to_depth", "to_m", "depthto"]
+        
+        columns = data.columns.tolist()
+        columns_lower = [c.lower() for c in columns]
+        
+        depth_cols = {}
+        
+        # Find FROM column
+        for pattern in from_patterns:
+            for i, col_lower in enumerate(columns_lower):
+                if pattern in col_lower:
+                    depth_cols["from"] = columns[i]
+                    logger.debug(f"  Found FROM column: {columns[i]}")
+                    break
+            if "from" in depth_cols:
+                break
+        
+        # Find TO column
+        for pattern in to_patterns:
+            for i, col_lower in enumerate(columns_lower):
+                if pattern in col_lower:
+                    depth_cols["to"] = columns[i]
+                    logger.debug(f"  Found TO column: {columns[i]}")
+                    break
+            if "to" in depth_cols:
+                break
+        
+        if len(depth_cols) != 2:
+            logger.warning(f"Could not find depth columns. Found: {depth_cols}")
+        
+        return depth_cols
+    
+    def _create_intervals(
+        self, 
+        data: Any, 
+        min_depth: Union[float, int], 
+        max_depth: Union[float, int],
+        depth_cols: Dict[str, str]
+    ) -> None:
+        """Create DrillholeInterval objects from data."""
+        logger.info(f"")
+        logger.info(f"CREATING INTERVALS FOR {self.hole_id}")
+        logger.info(f"  Depth range: {min_depth}m to {max_depth}m")
+        logger.info(f"  Depth columns: FROM={depth_cols.get('from')}, TO={depth_cols.get('to')}")
+        logger.info(f"  Total intervals to create: {int(max_depth) - int(min_depth) + 1}")
+        
+        self.intervals = []
+        
+        # Build image lookup from data_manager's image index (O(1) lookups)
+        # This replaces file-by-file searching with pre-indexed access
+        image_lookup = self._build_image_lookup()
+        
+        # Round to integer meter boundaries
+        start_depth = int(min_depth)
+        end_depth = int(max_depth) + 1
+        
+        # Create 1m intervals
+        for depth in range(start_depth, end_depth):
+            depth_from = float(depth)
+            depth_to = float(depth + 1)
+            
+            # Find data for this interval
+            interval_data = data[
+                (data[depth_cols["from"]] <= depth_from) & 
+                (data[depth_cols["to"]] >= depth_to)
+            ]
+            
+            # Extract CSV data if available
+            csv_data = {}
+            if not interval_data.empty:
+                # Take first matching row and normalize keys to lowercase for consistent lookup
+                raw_data = interval_data.iloc[0].to_dict()
+                # Store both original and lowercase keys for flexibility
+                csv_data = {k.lower(): v for k, v in raw_data.items()}
+                # Also add original casing
+                csv_data.update(raw_data)
+                logger.debug(f"  [OK] Depth {depth_from}-{depth_to}m: Found data with {len(raw_data)} columns")
+            else:
+                logger.debug(f"  [WARN] Depth {depth_from}-{depth_to}m: NO DATA FOUND")
+            
+            # Get images from pre-built lookup (depth_to is the key)
+            image_paths = image_lookup.get(depth_to, {"wet": None, "dry": None, "generic": None})
+            
+            # Determine best paths (prefer dry, fall back to wet, then generic)
+            wet_path = image_paths.get("wet")
+            dry_path = image_paths.get("dry")
+            generic_path = image_paths.get("generic")
+            
+            # If no moisture-specific images, use generic for both
+            if not wet_path and not dry_path and generic_path:
+                dry_path = generic_path  # Prefer to show as "dry"
+            
+            # Create interval
+            interval = DrillholeInterval(
+                hole_id=self.hole_id,
+                depth_from=depth_from,
+                depth_to=depth_to,
+                image_path_wet=wet_path,
+                image_path_dry=dry_path,
+                csv_data=csv_data,
+                is_placeholder=not (wet_path or dry_path)
+            )
+            
+            self.intervals.append(interval)
+            
+            if wet_path or dry_path:
+                logger.debug(f"  [IMG] Interval {depth_from}-{depth_to}m: wet={bool(wet_path)}, dry={bool(dry_path)}")
+            else:
+                logger.debug(f"  [WARN] Interval {depth_from}-{depth_to}m: PLACEHOLDER (no images)")
+        
+        intervals_with_images = sum(1 for i in self.intervals if not i.is_placeholder)
+        intervals_with_data = sum(1 for i in self.intervals if i.csv_data)
+        logger.info(f"")
+        logger.info(f"INTERVAL CREATION COMPLETE:")
+        logger.info(f"  Total intervals: {len(self.intervals)}")
+        logger.info(f"  With images: {intervals_with_images}")
+        logger.info(f"  With CSV data: {intervals_with_data}")
+        logger.info(f"=" * 80)
+    
+    def _build_image_lookup(self) -> Dict[float, Dict[str, Optional[str]]]:
+        """
+        Build a depth-keyed lookup of image paths using the data_manager's image index.
+        
+        This provides O(1) access to images by depth instead of file-by-file searching.
+        Handles wet/dry variants and multiple images at same depth.
+        
+        Returns:
+            Dict mapping depth_to -> {"wet": path, "dry": path, "generic": path}
+        """
+        lookup: Dict[float, Dict[str, Optional[str]]] = {}
+        
+        # Check if data_manager has image index access
+        if not self.data_manager:
+            logger.warning("No data_manager available for image lookup")
+            return lookup
+        
+        try:
+            # Get all images for this hole from the image index
+            # This is a single call that returns all indexed images
+            if hasattr(self.data_manager, 'get_images_for_hole'):
+                images = self.data_manager.get_images_for_hole(self.hole_id)
+            elif hasattr(self.data_manager, 'image_index'):
+                images = self.data_manager.image_index.get_images_for_hole(self.hole_id)
+            else:
+                logger.warning("data_manager doesn't provide image access methods")
+                return lookup
+            
+            if not images:
+                logger.debug(f"No indexed images found for {self.hole_id}")
+                return lookup
+            
+            logger.info(f"Building image lookup from {len(images)} indexed images for {self.hole_id}")
+            
+            # Build lookup by depth
+            for img_info in images:
+                depth_to = float(img_info.depth_to)
+                moisture = img_info.moisture_status  # "Wet", "Dry", or None
+                
+                # Initialize entry for this depth if needed
+                if depth_to not in lookup:
+                    lookup[depth_to] = {"wet": None, "dry": None, "generic": None}
+                
+                # Assign path based on moisture status
+                if moisture == "Wet":
+                    # Only overwrite if not already set (prefer first found)
+                    if lookup[depth_to]["wet"] is None:
+                        lookup[depth_to]["wet"] = img_info.path
+                elif moisture == "Dry":
+                    if lookup[depth_to]["dry"] is None:
+                        lookup[depth_to]["dry"] = img_info.path
+                else:
+                    # No moisture status = generic
+                    if lookup[depth_to]["generic"] is None:
+                        lookup[depth_to]["generic"] = img_info.path
+            
+            # Log summary
+            depths_with_wet = sum(1 for v in lookup.values() if v["wet"])
+            depths_with_dry = sum(1 for v in lookup.values() if v["dry"])
+            depths_with_generic = sum(1 for v in lookup.values() if v["generic"])
+            logger.info(f"  Image lookup built: {len(lookup)} depths, wet={depths_with_wet}, dry={depths_with_dry}, generic={depths_with_generic}")
+            
+            return lookup
+            
+        except Exception as e:
+            logger.error(f"Error building image lookup: {e}", exc_info=True)
+            return lookup
+    
+    def _create_placeholder_intervals(
+        self, 
+        min_depth: Union[float, int], 
+        max_depth: Union[float, int]
+    ) -> None:
+        """Create placeholder intervals when no data available."""
+        logger.info(f"Creating placeholder intervals for {self.hole_id}: {min_depth}-{max_depth}m")
+        
+        self.intervals = []
+        
+        for depth in range(int(min_depth), int(max_depth)):
+            interval = DrillholeInterval(
+                hole_id=self.hole_id,
+                depth_from=float(depth),
+                depth_to=float(depth + 1),
+                is_placeholder=True
+            )
+            self.intervals.append(interval)
+        
+        logger.debug(f"Created {len(self.intervals)} placeholder intervals")
+    
+    def _update_canvas(self) -> None:
+        """Update canvas with intervals."""
+        logger.debug(f"Updating canvas for {self.hole_id}")
+        
+        # Clear existing items
+        self.canvas.delete("all")
+        self.canvas_items.clear()
+        self.image_cache.clear()
+        
+        if not self.intervals:
+            logger.warning("No intervals to display")
+            return
+        
+        # Calculate total height (header + intervals)
+        total_height = self.header_height + len(self.intervals) * self.cell_height
+        logger.debug(f"Total canvas height: {total_height}px (header={self.header_height}, {len(self.intervals)} intervals)")
+        
+        # Draw depth ruler if enabled
+        if self.show_depth_ruler:
+            self._draw_depth_ruler()
+        
+        # Draw image column based on mode
+        if self.image_mode != "none":
+            self._draw_image_column()
+        
+        # Draw data visualization columns
+        if self.show_data_viz:
+            self._draw_data_columns()
+        
+        # Set canvas height to display all content
+        self.canvas.configure(height=total_height)
+        
+        # CRITICAL: Set the outer widget frame height so canvas window displays correctly
+        # Without this, the widget collapses when placed in parent canvas via create_window()
+        self.configure(height=total_height)
+        self.main_frame.configure(height=total_height)
+        
+        # Load all intervals (no lazy loading)
+        self._load_all_intervals()
+        
+        # Draw segments and discontinuities on top
+        self._draw_segments_and_discontinuities()
+        
+        # Draw zoom window indicators if range is set
+        self._draw_zoom_indicators()
+    
+    def get_total_height(self) -> int:
+        """Get total height of the column in pixels."""
+        if not self.intervals:
+            return self.header_height
+        return self.header_height + len(self.intervals) * self.cell_height
+    
+    def set_moisture_preference(self, preference: str) -> None:
+        """
+        Set the moisture preference for image display.
+        
+        Args:
+            preference: "Wet" or "Dry"
+        """
+        if preference not in ("Wet", "Dry"):
+            logger.warning(f"Invalid moisture preference: {preference}, using 'Dry'")
+            preference = "Dry"
+        
+        if self.moisture_preference != preference:
+            self.moisture_preference = preference
+            logger.info(f"Moisture preference set to {preference} for {self.hole_id}")
+            
+            # Redraw to update images
+            self._update_canvas()
+    
+    def render_to_image(self, scale_factor: int = 1) -> Optional[Image.Image]:
+        """
+        Render the column widget to a PIL Image for export.
+        
+        Args:
+            scale_factor: Multiplier for resolution (1=normal, 4=high-res)
+            
+        Returns:
+            PIL Image of the rendered column, or None on error
+        """
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            
+            # Calculate dimensions
+            width = self.get_total_width() * scale_factor
+            height = self.get_total_height() * scale_factor
+            
+            if width <= 0 or height <= 0:
+                logger.warning(f"Invalid dimensions for export: {width}x{height}")
+                return None
+            
+            # Create image with background color
+            bg_color = self.theme_colors.get("field_bg", "#2d2d2d")
+            # Convert hex to RGB tuple
+            bg_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+            
+            img = Image.new("RGB", (width, height), color=bg_rgb)
+            draw = ImageDraw.Draw(img)
+            
+            # Scale factors for drawing
+            scaled_header_height = self.header_height * scale_factor
+            scaled_cell_height = self.cell_height * scale_factor
+            scaled_ruler_width = 30 * scale_factor if self.show_depth_ruler else 0
+            scaled_thumbnail_width = self.thumbnail_width * scale_factor if self.image_mode == "thumbnail" else 0
+            scaled_color_bar_width = self.color_bar_width * scale_factor if self.image_mode == "color" else 0
+            scaled_data_column_width = self.data_column_width * scale_factor
+            
+            # Colors
+            text_color = self.theme_colors.get("text", "#e0e0e0")
+            border_color = self.theme_colors.get("border", "#3f3f3f")
+            header_bg = self.theme_colors.get("secondary_bg", "#252526")
+            
+            # Convert hex colors to RGB
+            text_rgb = tuple(int(text_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+            border_rgb = tuple(int(border_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+            header_rgb = tuple(int(header_bg.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+            
+            # Try to load a font, fall back to default
+            try:
+                font_size = 10 * scale_factor
+                font = ImageFont.truetype("arial.ttf", font_size)
+                small_font = ImageFont.truetype("arial.ttf", 8 * scale_factor)
+            except Exception:
+                font = ImageFont.load_default()
+                small_font = font
+            
+            x_offset = 0
+            
+            # Draw depth ruler
+            if self.show_depth_ruler:
+                # Ruler header
+                draw.rectangle(
+                    [0, 0, scaled_ruler_width, scaled_header_height],
+                    fill=header_rgb,
+                    outline=border_rgb
+                )
+                draw.text(
+                    (scaled_ruler_width // 2, scaled_header_height // 2),
+                    "m",
+                    fill=text_rgb,
+                    font=small_font,
+                    anchor="mm"
+                )
+                
+                # Ruler body
+                draw.rectangle(
+                    [0, scaled_header_height, scaled_ruler_width, height],
+                    fill=header_rgb,
+                    outline=border_rgb
+                )
+                
+                # Depth labels
+                for i, interval in enumerate(self.intervals):
+                    if int(interval.depth_to) % 5 == 0:
+                        y_pos = scaled_header_height + (i + 1) * scaled_cell_height
+                        draw.line(
+                            [(scaled_ruler_width - 10 * scale_factor, y_pos), (scaled_ruler_width, y_pos)],
+                            fill=text_rgb,
+                            width=2 * scale_factor
+                        )
+                        draw.text(
+                            (scaled_ruler_width - 15 * scale_factor, y_pos),
+                            str(int(interval.depth_to)),
+                            fill=text_rgb,
+                            font=small_font,
+                            anchor="rm"
+                        )
+                
+                x_offset = scaled_ruler_width
+            
+            # Draw image column (thumbnails)
+            if self.image_mode == "thumbnail" and scaled_thumbnail_width > 0:
+                # Header
+                draw.rectangle(
+                    [x_offset, 0, x_offset + scaled_thumbnail_width, scaled_header_height],
+                    fill=header_rgb,
+                    outline=border_rgb
+                )
+                draw.text(
+                    (x_offset + scaled_thumbnail_width // 2, scaled_header_height // 2),
+                    "Image",
+                    fill=text_rgb,
+                    font=small_font,
+                    anchor="mm"
+                )
+                
+                # Draw thumbnails
+                for i, interval in enumerate(self.intervals):
+                    y_pos = scaled_header_height + i * scaled_cell_height
+                    
+                    # Get image based on moisture preference
+                    image_path = self._get_preferred_image_path(interval)
+                    
+                    if image_path and os.path.exists(image_path):
+                        try:
+                            thumb = cv2.imread(image_path)
+                            if thumb is not None:
+                                thumb = cv2.rotate(thumb, cv2.ROTATE_90_CLOCKWISE)
+                                thumb = cv2.cvtColor(thumb, cv2.COLOR_BGR2RGB)
+                                thumb_pil = Image.fromarray(thumb)
+                                
+                                # Scale to fit while maintaining aspect ratio
+                                orig_w, orig_h = thumb_pil.size
+                                scale_w = scaled_thumbnail_width / orig_w
+                                scale_h = scaled_cell_height / orig_h
+                                scale = min(scale_w, scale_h)
+                                
+                                new_w = int(orig_w * scale)
+                                new_h = int(orig_h * scale)
+                                
+                                thumb_pil = thumb_pil.resize(
+                                    (new_w, new_h),
+                                    Image.Resampling.LANCZOS
+                                )
+                                
+                                # Center the image in the cell
+                                paste_x = x_offset + (scaled_thumbnail_width - new_w) // 2
+                                paste_y = y_pos + (scaled_cell_height - new_h) // 2
+                                
+                                img.paste(thumb_pil, (paste_x, paste_y))
+                        except Exception as e:
+                            logger.debug(f"Error loading thumbnail for export: {e}")
+                    else:
+                        # Draw placeholder
+                        row_color = self.row_color_even if i % 2 == 0 else self.row_color_odd
+                        row_rgb = tuple(int(row_color.lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
+                        draw.rectangle(
+                            [x_offset, y_pos, x_offset + scaled_thumbnail_width, y_pos + scaled_cell_height],
+                            fill=row_rgb,
+                            outline=border_rgb
+                        )
+                
+                x_offset += scaled_thumbnail_width
+            
+            # Draw data columns
+            if self.show_data_viz and self.viz_columns:
+                for col_idx, viz_config in enumerate(self.viz_columns):
+                    column_name = viz_config.get("column", "")
+                    col_x = x_offset + col_idx * scaled_data_column_width
+                    
+                    # Header
+                    draw.rectangle(
+                        [col_x, 0, col_x + scaled_data_column_width, scaled_header_height],
+                        fill=header_rgb,
+                        outline=border_rgb
+                    )
+                    # Get display name for header
+                    display_name = viz_config.get("display_name") or viz_config.get("custom_label") or column_name
+                    if display_name == column_name:
+                        display_name = self._create_column_display_name(column_name)
+                    
+                    # Truncate for export
+                    max_export_chars = max(3, scaled_data_column_width // (8 * scale_factor))
+                    header_text = self._truncate_text(display_name, max_export_chars)
+                    
+                    draw.text(
+                        (col_x + scaled_data_column_width // 2, scaled_header_height // 2),
+                        header_text,
+                        fill=text_rgb,
+                        font=small_font,
+                        anchor="mm"
+                    )
+                    
+                    # Draw alternating row backgrounds and data
+                    for i, interval in enumerate(self.intervals):
+                        y_pos = scaled_header_height + i * scaled_cell_height
+                        
+                        # Row background
+                        row_color = self.row_color_even if i % 2 == 0 else self.row_color_odd
+                        row_rgb = tuple(int(row_color.lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
+                        draw.rectangle(
+                            [col_x, y_pos, col_x + scaled_data_column_width, y_pos + scaled_cell_height],
+                            fill=row_rgb
+                        )
+                        
+                        # Get data value and draw bar
+                        value = self._get_interval_value(interval, column_name)
+                        if value is not None:
+                            # Simple bar visualization
+                            bar_color = self.theme_colors.get("accent_blue", "#3a7ca5")
+                            bar_rgb = tuple(int(bar_color.lstrip('#')[j:j+2], 16) for j in (0, 2, 4))
+                            
+                            # Normalize value (assume 0-100 range for simplicity)
+                            normalized = min(1.0, max(0.0, value / 100.0))
+                            bar_width = int(normalized * (scaled_data_column_width - 10 * scale_factor))
+                            
+                            if bar_width > 0:
+                                draw.rectangle(
+                                    [col_x + 5 * scale_factor, y_pos + 2 * scale_factor,
+                                     col_x + 5 * scale_factor + bar_width, y_pos + scaled_cell_height - 2 * scale_factor],
+                                    fill=bar_rgb
+                                )
+            
+            logger.info(f"Rendered {self.hole_id} to image: {width}x{height}px (scale={scale_factor})")
+            return img
+            
+        except Exception as e:
+            logger.error(f"Error rendering column to image: {e}", exc_info=True)
+            return None
+    
+    def _get_interval_value(self, interval: DrillholeInterval, column_name: str) -> Optional[float]:
+        """Get numeric value from interval CSV data."""
+        if not interval.csv_data:
+            return None
+        
+        # Case-insensitive lookup
+        for key, value in interval.csv_data.items():
+            if key.lower() == column_name.lower():
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    return None
+        return None
+    
+    def _get_preferred_image_path(self, interval: DrillholeInterval) -> Optional[str]:
+        """
+        Get image path based on current moisture preference.
+        
+        Falls back to available image if preferred isn't available.
+        """
+        if self.moisture_preference == "Dry":
+            # Prefer dry, fall back to wet
+            if interval.image_path_dry:
+                return interval.image_path_dry
+            elif interval.image_path_wet:
+                return interval.image_path_wet
+        else:
+            # Prefer wet, fall back to dry
+            if interval.image_path_wet:
+                return interval.image_path_wet
+            elif interval.image_path_dry:
+                return interval.image_path_dry
+        
+        # Fall back to generic
+        return interval.image_path if hasattr(interval, 'image_path') else None
+    
+    def get_total_width(self) -> int:
+        """Get total width of the column in pixels."""
+        width = 0
+        
+        # Add depth ruler width
+        if self.show_depth_ruler:
+            width += self.ruler_width  # Use instance variable (40px)
+        
+        # Add image column width based on mode
+        if self.image_mode == "thumbnail":
+            width += self.thumbnail_width
+        elif self.image_mode == "color":
+            width += self.color_bar_width
+        # 'none' mode adds 0 width
+        
+        # Add data column widths
+        if self.show_data_viz and self.viz_columns:
+            width += len(self.viz_columns) * self.data_column_width
+        
+        return width
+
+
+
+    def _get_column_data_range(
+        self, 
+        column_name: str, 
+        viz_config: Optional[Dict[str, Any]] = None
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """
+        Get the min/max data range for a column.
+        
+        Args:
+            column_name: Name of the data column
+            viz_config: Optional visualization config with auto_scale, min_value, max_value
+            
+        Returns:
+            Tuple of (min_value, max_value) or (None, None) if no data
+        """
+        # Check if manual limits are set
+        if viz_config and not viz_config.get("auto_scale", True):
+            min_val = viz_config.get("min_value")
+            max_val = viz_config.get("max_value")
+            if min_val is not None and max_val is not None:
+                return min_val, max_val
+        
+        # Calculate from actual data
+        values = []
+        for interval in self.intervals:
+            value = self._get_value_for_interval(interval, column_name)
+            if value is not None and not np.isnan(value):
+                values.append(value)
+        
+        if not values:
+            return None, None
+        
+        return min(values), max(values)
+        """
+        Update visualization columns configuration.
+        
+        Args:
+            viz_columns: List of visualization column configs
+        """
+        logger.info(f"Updating viz columns for {self.hole_id}")
+        self.viz_columns = viz_columns
+        self.show_data_viz = self.show_data_columns and bool(viz_columns)
+        
+        # Re-read display settings from config (they may have changed)
+        self.cell_height = self.config_manager.get("correlation_data_viz_cell_height", 10)
+        self.thumbnail_width = self.config_manager.get("correlation_thumbnail_width", 60)
+        self.data_column_width = self.config_manager.get("correlation_data_column_width", 50)
+        
+        logger.debug(f"Updated display settings: cell_height={self.cell_height}, thumbnail_width={self.thumbnail_width}, data_col_width={self.data_column_width}")
+        
+        # Clear thumbnail cache since size may have changed
+        if hasattr(self, 'thumbnail_refs'):
+            self.thumbnail_refs.clear()
+        
+        # Recalculate total width using get_total_width()
+        total_width = self.get_total_width()
+        
+        logger.debug(f"Updated total width to {total_width}px for {len(viz_columns)} columns")
+        
+        self.canvas.configure(width=total_width)
+        
+        # Update frame size
+        self.configure(width=total_width)
+        
+        # Update canvas scroll region for new cell height
+        canvas_height = self.header_height + (len(self.intervals) * self.cell_height)
+        self.canvas.configure(scrollregion=(0, 0, total_width, canvas_height))
+        
+        # Redraw
+        self._update_canvas()
+
+    def _draw_interval_placeholder(self, interval: DrillholeInterval, y_pos: int) -> None:
+        """Draw placeholder for interval (only if showing images)."""
+        if not self.show_images:
+            return  # Don't draw image placeholders if not showing images
+        
+        x_offset = 30 if self.show_depth_ruler else 0
+        
+        # Draw border
+        self.canvas.create_rectangle(
+            x_offset, y_pos,
+            x_offset + self.cell_width, y_pos + self.cell_height,
+            outline=self.theme_colors["border"],
+            fill=self.theme_colors["field_bg"],
+            tags=f"interval_{interval.interval_id}"
+        )
+        # Draw rectangle
+        rect_id = self.canvas.create_rectangle(
+            x_offset, y_pos,
+            x_offset + self.cell_width, y_pos + self.cell_height,
+            fill=self.theme_colors["field_bg"] if not interval.is_placeholder else "#2a2a2a",
+            outline=self.theme_colors["border"],
+            width=1,
+            tags=(f"interval_{interval.interval_id}", "placeholder")
+        )
+        
+        # Add depth text
+        text_id = self.canvas.create_text(
+            x_offset + self.cell_width // 2,
+            y_pos + self.cell_height // 2,
+            text=f"{interval.depth_from:.0f}-{interval.depth_to:.0f}m",
+            fill=self.theme_colors["text"] if not interval.is_placeholder else "#666666",
+            font=self.fonts["small"],
+            tags=(f"interval_{interval.interval_id}", "depth_text")
+        )
+        
+        self.canvas_items[interval.interval_id] = {"rect": rect_id, "text": text_id}
+    
+    def _draw_depth_ruler(self) -> None:
+        """Draw depth scale on left side."""
+        if not self.intervals:
+            return
+        
+        logger.debug("Drawing depth ruler")
+        
+        # Draw ruler header (to align with data column headers)
+        self.canvas.create_rectangle(
+            0, 0, self.ruler_width, self.header_height,
+            fill=self.theme_colors["secondary_bg"],
+            outline=self.theme_colors["border"],
+            width=1,
+            tags="ruler_header"
+        )
+        
+        self.canvas.create_text(
+            self.ruler_width // 2, self.header_height // 2,
+            text="m",
+            fill=self.theme_colors["text"],
+            font=self.fonts["small"],
+            tags="ruler_header"
+        )
+        
+        # Draw ruler background (below header)
+        total_height = len(self.intervals) * self.cell_height
+        self.canvas.create_rectangle(
+            0, self.header_height, self.ruler_width, self.header_height + total_height,
+            fill=self.theme_colors["secondary_bg"],
+            outline=self.theme_colors["border"],
+            width=1,
+            tags="ruler"
+        )
+        
+        # Draw depth markers every 5m
+        for i, interval in enumerate(self.intervals):
+            y_pos = self.header_height + (i + 1) * self.cell_height  # Bottom of interval
+            
+            if int(interval.depth_to) % 5 == 0:
+                # Draw tick mark
+                self.canvas.create_line(
+                    self.ruler_width - 10, y_pos, self.ruler_width, y_pos,
+                    fill=self.theme_colors["text"],
+                    width=2,
+                    tags="ruler"
+                )
+                
+                # Draw depth label (positioned with padding from tick)
+                self.canvas.create_text(
+                    self.ruler_width - 12, y_pos,
+                    text=f"{int(interval.depth_to)}",
+                    fill=self.theme_colors["text"],
+                    font=self.fonts["small"],
+                    anchor="e",
+                    tags="ruler"
+                )
+    
+    def _draw_data_columns(self) -> None:
+        """Draw data visualization columns."""
+        if not self.show_data_viz or not self.viz_columns:
+            logger.debug(f"[WARN] Not drawing data columns: show_data_viz={self.show_data_viz}, viz_columns={len(self.viz_columns) if self.viz_columns else 0}")
+            return
+        
+        if not self.data_visualizer:
+            logger.warning("[ERROR] No data_visualizer available for drawing data columns")
+            return
+        
+        logger.info(f"")
+        logger.info(f"DRAWING {len(self.viz_columns)} DATA COLUMNS")
+        logger.info(f"  Intervals available: {len(self.intervals)}")
+        for idx, col in enumerate(self.viz_columns):
+            logger.info(f"  Column {idx}: {col}")
+        
+        # Starting X position (after ruler and image column)
+        x_start = 0
+        if self.show_depth_ruler:
+            x_start += self.ruler_width
+        if self.image_mode == "thumbnail":
+            x_start += self.thumbnail_width
+        elif self.image_mode == "color":
+            x_start += self.color_bar_width
+        
+        # Calculate total width for alternating backgrounds
+        total_data_width = len(self.viz_columns) * self.data_column_width
+        
+        # Draw alternating row backgrounds FIRST (behind data)
+        for i, interval in enumerate(self.intervals):
+            y_top = self.header_height + (i * self.cell_height)
+            y_bottom = y_top + self.cell_height
+            
+            # Alternate colors
+            row_color = self.row_color_even if i % 2 == 0 else self.row_color_odd
+            
+            self.canvas.create_rectangle(
+                x_start, y_top,
+                x_start + total_data_width, y_bottom,
+                fill=row_color,
+                outline="",  # No outline for subtle effect
+                tags="row_background"
+            )
+        
+        # Draw each data column
+        for col_idx, viz_config in enumerate(self.viz_columns):
+            column_name = viz_config.get("column")
+            color_map_name = viz_config.get("color_map", "")
+            viz_type = viz_config.get("type", "line")  # 'line' or 'bar'
+            
+            # Get display name (alias) for header - fall back to column name if not set
+            display_name = viz_config.get("display_name") or viz_config.get("custom_label") or column_name
+            # If no alias stored, try to create one
+            if display_name == column_name:
+                display_name = self._create_column_display_name(column_name)
+            
+            x_pos = x_start + (col_idx * self.data_column_width)
+            
+            # Draw column header
+            self.canvas.create_rectangle(
+                x_pos, 0,
+                x_pos + self.data_column_width, self.header_height,
+                fill=self.theme_colors["secondary_bg"],
+                outline=self.theme_colors["border"],
+                width=1,
+                tags="data_column_header"
+            )
+            
+            # Calculate max characters based on column width (approx 6px per char)
+            max_chars = max(3, (self.data_column_width - 4) // 6)
+            truncated_name = self._truncate_text(display_name, max_chars)
+            
+            # Draw column name in top portion of header
+            self.canvas.create_text(
+                x_pos + self.data_column_width // 2, 12,
+                text=truncated_name,
+                fill=self.theme_colors["text"],
+                font=self.fonts["tiny"] if "tiny" in self.fonts else self.fonts["small"],
+                width=0,  # Disable wrapping (0 = no wrap)
+                tags="data_column_header"
+            )
+            
+            # Calculate data range for axis labels
+            min_val, max_val = self._get_column_data_range(column_name, viz_config)
+            if min_val is not None and max_val is not None:
+                # Format axis range (compact format)
+                if abs(max_val) >= 100 or abs(min_val) >= 100:
+                    range_text = f"{min_val:.0f}-{max_val:.0f}"
+                elif abs(max_val) >= 10 or abs(min_val) >= 10:
+                    range_text = f"{min_val:.1f}-{max_val:.1f}"
+                else:
+                    range_text = f"{min_val:.2f}-{max_val:.2f}"
+                
+                # Draw axis range in bottom portion of header
+                self.canvas.create_text(
+                    x_pos + self.data_column_width // 2, self.header_height - 10,
+                    text=range_text,
+                    fill=self.theme_colors["subtext"],
+                    font=("Segoe UI", 7),
+                    width=0,
+                    tags="data_column_header"
+                )
+            
+            # Draw column border (vertical line between columns)
+            if col_idx > 0:
+                self.canvas.create_line(
+                    x_pos, self.header_height,
+                    x_pos, self.header_height + len(self.intervals) * self.cell_height,
+                    fill=self.theme_colors["border"],
+                    width=1,
+                    tags="column_divider"
+                )
+            
+            # Draw data for each interval
+            if viz_type == "line":
+                self._draw_line_graph(column_name, color_map_name, x_pos, self.data_column_width, viz_config)
+            elif viz_type == "bar":
+                self._draw_bar_chart(column_name, color_map_name, x_pos, self.data_column_width, viz_config)
+    
+    def _bind_column_resize(self) -> None:
+        """Bind mouse events for resizing data columns."""
+        if not self.show_data_viz:
+            return
+        
+        self.canvas.bind("<ButtonPress-1>", self._on_column_resize_start)
+        self.canvas.bind("<B1-Motion>", self._on_column_resize_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_column_resize_end)
+        self.canvas.bind("<Motion>", self._on_column_hover)
+    
+    def _on_column_hover(self, event: tk.Event) -> None:
+        """Change cursor when hovering over column dividers."""
+        if not self.show_data_viz:
+            return
+        
+        x = event.x
+        y = event.y
+        
+        # Check if near a column divider (after ruler, NO image area)
+        x_start = 30 if self.show_depth_ruler else 0
+        
+        for col_idx in range(len(self.viz_columns)):
+            col_x = x_start + (col_idx * self.data_column_width)
+            divider_x = col_x + self.data_column_width
+            
+            # Within 5 pixels of divider
+            if abs(x - divider_x) < 5 and y > 30:  # Below header
+                self.canvas.config(cursor="sb_h_double_arrow")
+                return
+        
+        self.canvas.config(cursor="")
+    
+    def _on_column_resize_start(self, event: tk.Event) -> None:
+        """Start resizing a data column."""
+        if not self.show_data_viz:
+            return
+        
+        x = event.x
+        y = event.y
+        
+        if y < 30:  # In header area
+            return
+        
+        # Check which column divider was clicked (after ruler, NO image area)
+        x_start = 30 if self.show_depth_ruler else 0
+        
+        for col_idx in range(len(self.viz_columns)):
+            col_x = x_start + (col_idx * self.data_column_width)
+            divider_x = col_x + self.data_column_width
+            
+            if abs(x - divider_x) < 5:
+                self.resizing_column = col_idx
+                self.resize_start_x = x
+                logger.debug(f"Started resizing column {col_idx}")
+                return
+    
+    def _on_column_resize_drag(self, event: tk.Event) -> None:
+        """Handle column resize dragging."""
+        if self.resizing_column is None:
+            return
+        
+        delta_x = event.x - self.resize_start_x
+        new_width = self.data_column_width + delta_x
+        
+        # Clamp to min/max
+        new_width = max(self.data_column_min_width, min(self.data_column_max_width, new_width))
+        
+        if new_width != self.data_column_width:
+            self.data_column_width = int(new_width)
+            self.resize_start_x = event.x
+            
+            # Redraw
+            self._update_canvas()
+            
+            logger.debug(f"Resized column to {self.data_column_width}px")
+    
+    def _on_column_resize_end(self, event: tk.Event) -> None:
+        """End column resizing."""
+        if self.resizing_column is not None:
+            logger.info(f"Finished resizing column {self.resizing_column} to {self.data_column_width}px")
+            self.resizing_column = None
+            self.resize_start_x = None
+            
+            # Update config
+            self.config_manager.set("correlation_data_column_width", self.data_column_width)
+
+    def _draw_line_graph(
+        self, 
+        column_name: str, 
+        color_map_name: str, 
+        x_pos: int, 
+        width: int,
+        viz_config: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Draw line graph for a data column.
+        
+        Args:
+            column_name: Name of data column to visualize
+            color_map_name: Name of color map to apply
+            x_pos: X position to start drawing
+            width: Width of the column
+        """
+        logger.info(f"")
+        logger.info(f"DRAWING LINE GRAPH: {column_name}")
+        logger.info(f"  X position: {x_pos}, Width: {width}")
+        logger.info(f"  Color map: {color_map_name}")
+        
+        if not self.intervals:
+            logger.warning(f"  ❌ No intervals available")
+            return
+        
+        # Collect data points
+        data_points = []
+        missing_count = 0
+        invalid_count = 0
+        
+        for i, interval in enumerate(self.intervals):
+            value = self._get_value_for_interval(interval, column_name)
+            
+            if value is None:
+                missing_count += 1
+                continue
+            
+            if np.isnan(value):
+                invalid_count += 1
+                continue
+            
+            # Calculate Y position (center of cell, offset by header)
+            y_pos = self.header_height + (i * self.cell_height) + (self.cell_height / 2)
+            data_points.append((value, y_pos))
+        
+        logger.info(f"  Data point collection:")
+        logger.info(f"    Valid points: {len(data_points)}")
+        logger.info(f"    Missing column: {missing_count}")
+        logger.info(f"    Invalid/NaN values: {invalid_count}")
+        
+        if not data_points:
+            logger.warning(f"  ❌ NO VALID DATA POINTS for column {column_name}")
+            return
+        
+        logger.info(f"  ✓ Drawing {len(data_points)} data points")
+        
+        # Find min/max for scaling
+        values = [v for v, _ in data_points]
+        
+        # Use config limits or auto-scale
+        if viz_config and not viz_config.get("auto_scale", True):
+            min_val = viz_config.get("min_value", min(values))
+            max_val = viz_config.get("max_value", max(values))
+        else:
+            min_val = min(values)
+            max_val = max(values)
+        
+        value_range = max_val - min_val if max_val != min_val else 1.0
+        
+        # Draw line segments
+        for i in range(len(data_points) - 1):
+            value1, y1 = data_points[i]
+            value2, y2 = data_points[i + 1]
+            
+            # Scale to column width
+            x1 = x_pos + int(((value1 - min_val) / value_range) * (width - 10)) + 5
+            x2 = x_pos + int(((value2 - min_val) / value_range) * (width - 10)) + 5
+            
+            # Get color from color map
+            color = self._get_color_for_value(value1, column_name, color_map_name, min_val, max_val)
+            
+            self.canvas.create_line(
+                x1, y1, x2, y2,
+                fill=color,
+                width=2,
+                tags=f"data_line_{column_name}"
+            )
+    
+    def _draw_bar_chart(
+        self, 
+        column_name: str, 
+        color_map_name: str, 
+        x_pos: int, 
+        width: int,
+        viz_config: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """
+        Draw bar chart for a data column.
+        
+        Args:
+            column_name: Name of data column to visualize
+            color_map_name: Name of color map to apply
+            x_pos: X position to start drawing
+            width: Width of the column
+            viz_config: Optional visualization configuration with auto_scale, min_value, max_value
+        """
+        logger.info(f"")
+        logger.info(f"DRAWING BAR CHART: {column_name}")
+        logger.info(f"  X position: {x_pos}, Width: {width}")
+        logger.info(f"  Color map: {color_map_name}")
+        
+        if not self.intervals:
+            logger.warning(f"  ❌ No intervals available")
+            return
+        
+        # Collect all values for scaling
+        values = []
+        missing_count = 0
+        invalid_count = 0
+        
+        for interval in self.intervals:
+            value = self._get_value_for_interval(interval, column_name)
+            
+            if value is None:
+                missing_count += 1
+                continue
+            
+            if np.isnan(value):
+                invalid_count += 1
+                continue
+            
+            values.append(value)
+        
+        logger.info(f"  Data collection:")
+        logger.info(f"    Valid values: {len(values)}")
+        logger.info(f"    Missing column: {missing_count}")
+        logger.info(f"    Invalid/NaN values: {invalid_count}")
+        
+        if not values:
+            logger.warning(f"  ❌ NO VALID DATA for column {column_name}")
+            return
+        
+        logger.info(f"  ✓ Drawing {len(values)} bars")
+        logger.info(f"  Value range: {min(values):.2f} to {max(values):.2f}")
+        
+        # Use config limits or auto-scale
+        if viz_config and not viz_config.get("auto_scale", True):
+            min_val = viz_config.get("min_value", min(values))
+            max_val = viz_config.get("max_value", max(values))
+        else:
+            min_val = min(values)
+            max_val = max(values)
+        
+        value_range = max_val - min_val if max_val != min_val else 1.0
+        
+        # Draw bars for each interval
+        for i, interval in enumerate(self.intervals):
+            value = self._get_value_for_interval(interval, column_name)
+            
+            if value is None or np.isnan(value):
+                continue
+            
+            try:
+                
+                # Calculate bar dimensions (account for header offset)
+                y_top = self.header_height + i * self.cell_height
+                y_bottom = y_top + self.cell_height
+                
+                bar_width = int(((value - min_val) / value_range) * (width - 10))
+                
+                # Get color from color map
+                color = self._get_color_for_value(value, column_name, color_map_name, min_val, max_val)
+                
+                # Draw bar
+                self.canvas.create_rectangle(
+                    x_pos + 5, y_top + 2,
+                    x_pos + 5 + bar_width, y_bottom - 2,
+                    fill=color,
+                    outline=self.theme_colors["border"],
+                    width=1,
+                    tags=f"data_bar_{column_name}"
+                )
+                
+            except (ValueError, TypeError):
+                pass
+    
+    def _draw_image_column(self) -> None:
+        """Draw image column (thumbnails or color bars based on mode)."""
+        if self.image_mode == "none" or not self.intervals:
+            return
+        
+        logger.debug(f"Drawing image column in '{self.image_mode}' mode")
+        
+        # Starting X position (after ruler)
+        x_start = 30 if self.show_depth_ruler else 0
+        
+        if self.image_mode == "color":
+            self._draw_color_bars(x_start)
+        elif self.image_mode == "thumbnail":
+            self._draw_thumbnails(x_start)
+    
+    def _draw_color_bars(self, x_start: int) -> None:
+        """Draw color bars showing average image colors."""
+        logger.debug(f"Drawing {len(self.intervals)} color bars")
+        
+        # Draw header for image column
+        self.canvas.create_rectangle(
+            x_start, 0,
+            x_start + self.color_bar_width, self.header_height,
+            fill=self.theme_colors["secondary_bg"],
+            outline=self.theme_colors["border"],
+            width=1,
+            tags="image_column_header"
+        )
+        
+        self.canvas.create_text(
+            x_start + self.color_bar_width // 2, self.header_height // 2,
+            text="Color",
+            fill=self.theme_colors["text"],
+            font=self.fonts["small"],
+            tags="image_column_header"
+        )
+        
+        for i, interval in enumerate(self.intervals):
+            y_pos = self.header_height + (i * self.cell_height)
+            
+            # Get average color for this depth
+            avg_color = self.average_colors.get(interval.depth_to, "#3a3a3a")
+            
+            # Alternating row background
+            row_color = self.row_color_even if i % 2 == 0 else self.row_color_odd
+            
+            # Draw background first
+            self.canvas.create_rectangle(
+                x_start, y_pos,
+                x_start + self.color_bar_width, y_pos + self.cell_height,
+                fill=row_color,
+                outline="",
+                tags=f"color_bar_bg_{interval.interval_id}"
+            )
+            
+            # Draw color rectangle (slightly inset for visual clarity)
+            self.canvas.create_rectangle(
+                x_start + 2, y_pos + 1,
+                x_start + self.color_bar_width - 2, y_pos + self.cell_height - 1,
+                fill=avg_color,
+                outline=self.theme_colors["border"],
+                width=1,
+                tags=f"color_bar_{interval.interval_id}"
+            )
+        
+        logger.debug(f"Drew {len(self.intervals)} color bars")
+    
+    def _draw_thumbnails(self, x_start: int) -> None:
+        """Draw thumbnail images rotated to landscape."""
+        logger.debug(f"Drawing {len(self.intervals)} thumbnail images")
+        
+        # Draw header for image column
+        self.canvas.create_rectangle(
+            x_start, 0,
+            x_start + self.thumbnail_width, self.header_height,
+            fill=self.theme_colors["secondary_bg"],
+            outline=self.theme_colors["border"],
+            width=1,
+            tags="image_column_header"
+        )
+        
+        self.canvas.create_text(
+            x_start + self.thumbnail_width // 2, self.header_height // 2,
+            text="Image",
+            fill=self.theme_colors["text"],
+            font=self.fonts["small"],
+            tags="image_column_header"
+        )
+        
+        loaded_count = 0
+        missing_count = 0
+        
+        for i, interval in enumerate(self.intervals):
+            y_pos = self.header_height + (i * self.cell_height)
+            
+            # Alternating row background
+            row_color = self.row_color_even if i % 2 == 0 else self.row_color_odd
+            
+            # Draw background first
+            self.canvas.create_rectangle(
+                x_start, y_pos,
+                x_start + self.thumbnail_width, y_pos + self.cell_height,
+                fill=row_color,
+                outline="",
+                tags=f"thumbnail_bg_{interval.interval_id}"
+            )
+            
+            # Get image path based on moisture preference
+            image_path = self._get_preferred_image_path(interval)
+            
+            if not image_path or not os.path.exists(image_path):
+                # Draw placeholder with average color if available
+                avg_color = self.average_colors.get(interval.depth_to, "#2a2a2a")
+                self.canvas.create_rectangle(
+                    x_start + 2, y_pos + 1,
+                    x_start + self.thumbnail_width - 2, y_pos + self.cell_height - 1,
+                    fill=avg_color,
+                    outline=self.theme_colors["border"],
+                    width=1,
+                    tags=f"thumbnail_{interval.interval_id}"
+                )
+                missing_count += 1
+                continue
+            
+            try:
+                # Load and prepare thumbnail
+                img = cv2.imread(image_path)
+                if img is None:
+                    missing_count += 1
+                    continue
+                
+                # Rotate 90 degrees to landscape
+                img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+                h, w = img.shape[:2]
+                
+                # Scale to fit thumbnail width while maintaining aspect ratio
+                scale = self.thumbnail_width / w
+                new_w = self.thumbnail_width
+                new_h = int(h * scale)
+                
+                # Crop to cell height if taller
+                if new_h > self.cell_height:
+                    new_h = self.cell_height
+                    new_w = int(w * (self.cell_height / h))
+                
+                resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                
+                # Convert to PhotoImage
+                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(rgb)
+                photo = ImageTk.PhotoImage(pil_img)
+                
+                # Store reference to prevent garbage collection
+                if not hasattr(self, 'thumbnail_refs'):
+                    self.thumbnail_refs = {}
+                self.thumbnail_refs[interval.interval_id] = photo
+                
+                # Center image in thumbnail area
+                img_x = x_start + (self.thumbnail_width - new_w) // 2
+                img_y = y_pos + (self.cell_height - new_h) // 2
+                
+                self.canvas.create_image(
+                    img_x, img_y,
+                    image=photo,
+                    anchor="nw",
+                    tags=f"thumbnail_{interval.interval_id}"
+                )
+                
+                loaded_count += 1
+                
+            except Exception as e:
+                logger.debug(f"Error loading thumbnail for {interval.depth_to}m: {e}")
+                missing_count += 1
+        
+        logger.info(f"Thumbnails: {loaded_count} loaded, {missing_count} missing/placeholder")
+
+    def _get_color_for_value(
+        self, 
+        value: float, 
+        column_name: str, 
+        color_map_name: str, 
+        min_val: float, 
+        max_val: float
+    ) -> str:
+        """
+        Get color for a value using color map.
+        
+        Args:
+            value: Data value
+            column_name: Column name
+            color_map_name: Color map preset name
+            min_val: Minimum value in dataset
+            max_val: Maximum value in dataset
+            
+        Returns:
+            Hex color string
+        """
+        if not self.color_map_manager or not color_map_name:
+            # Default color
+            return self.theme_colors["accent_blue"]
+        
+        try:
+            # Get color map preset
+            color_map = self.color_map_manager.get_preset(color_map_name)
+            
+            if not color_map:
+                return self.theme_colors["accent_blue"]
+            
+            # Normalize value to 0-1 range
+            normalized = (value - min_val) / (max_val - min_val) if max_val != min_val else 0.5
+            
+            # Get color from map (returns BGR tuple)
+            bgr_color = color_map.get_color(value)
+            
+            # Convert BGR to hex
+            hex_color = f"#{bgr_color[2]:02x}{bgr_color[1]:02x}{bgr_color[0]:02x}"
+            
+            return hex_color
+            
+        except Exception as e:
+            logger.debug(f"Error getting color for value: {e}")
+            return self.theme_colors["accent_blue"]
+
+    def _load_all_intervals(self) -> None:
+        """No longer used - images are drawn directly in _draw_image_column."""
+        # This method is kept for backward compatibility but does nothing
+        # Images are now drawn in _draw_thumbnails() or _draw_color_bars()
+        pass
+    
+    def _load_interval_image(self, index: int) -> None:
+        """No longer used - images are drawn directly in _draw_image_column."""
+        # This method is kept for backward compatibility but does nothing
+        pass
+        
+        if index >= len(self.intervals):
+            return
+        
+        interval = self.intervals[index]
+        image_path = interval.get_best_image_path()
+        
+        if not image_path or not os.path.exists(image_path):
+            return
+        
+        logger.debug(f"Loading image for interval {index}: {os.path.basename(image_path)}")
+        
+        try:
+            # Load and resize image
+            img = cv2.imread(image_path)
+            if img is None:
+                logger.warning(f"Failed to load image: {image_path}")
+                return
+            
+            # Resize to fit cell
+            x_offset = 30 if self.show_depth_ruler else 0
+            target_width = self.cell_width
+            target_height = self.cell_height
+            
+            h, w = img.shape[:2]
+            scale = min(target_width/w, target_height/h)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            
+            resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            
+            # Convert to PhotoImage
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(rgb)
+            photo = ImageTk.PhotoImage(pil_img)
+            
+            # Cache the photo
+            cache_key = f"{interval.interval_id}_{index}"
+            self.image_cache[cache_key] = photo
+            
+            # Update canvas
+            y_pos = index * self.cell_height
+            
+            # Delete placeholder text
+            if interval.interval_id in self.canvas_items:
+                if "text" in self.canvas_items[interval.interval_id]:
+                    self.canvas.delete(self.canvas_items[interval.interval_id]["text"])
+            
+            # Add image
+            img_id = self.canvas.create_image(
+                x_offset + target_width // 2,
+                y_pos + target_height // 2,
+                image=photo,
+                tags=(f"interval_{interval.interval_id}", "image")
+            )
+            
+            if interval.interval_id not in self.canvas_items:
+                self.canvas_items[interval.interval_id] = {}
+            self.canvas_items[interval.interval_id]["image"] = img_id
+            
+            # Add moisture indicator
+            if interval.moisture_status:
+                moisture_id = self.canvas.create_text(
+                    x_offset + target_width - 5,
+                    y_pos + 5,
+                    text=interval.moisture_status[0],  # W or D
+                    fill="cyan" if interval.moisture_status == "Wet" else "orange",
+                    font=("Arial", 8, "bold"),
+                    anchor="ne",
+                    tags=(f"interval_{interval.interval_id}", "moisture")
+                )
+                self.canvas_items[interval.interval_id]["moisture"] = moisture_id
+            
+        except Exception as e:
+            logger.error(f"Error loading image for interval {index}: {e}")
+    
+    def _unload_interval_image(self, index: int) -> None:
+        """Unload image to save memory."""
+        if index >= len(self.intervals):
+            return
+        
+        interval = self.intervals[index]
+        cache_key = f"{interval.interval_id}_{index}"
+        
+        # Remove from cache
+        if cache_key in self.image_cache:
+            del self.image_cache[cache_key]
+        
+        # Remove from canvas and restore placeholder
+        if interval.interval_id in self.canvas_items:
+            items = self.canvas_items[interval.interval_id]
+            if "image" in items:
+                self.canvas.delete(items["image"])
+                del items["image"]
+            if "moisture" in items:
+                self.canvas.delete(items["moisture"])
+                del items["moisture"]
+            
+            # Restore depth text
+            y_pos = index * self.cell_height
+            x_offset = 30 if self.show_depth_ruler else 0
+            
+            text_id = self.canvas.create_text(
+                x_offset + self.cell_width // 2,
+                y_pos + self.cell_height // 2,
+                text=f"{interval.depth_from:.0f}-{interval.depth_to:.0f}m",
+                fill="#666666",
+                font=self.fonts["small"],
+                tags=(f"interval_{interval.interval_id}", "depth_text")
+            )
+            items["text"] = text_id
+    
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        """Handle canvas resize."""
+        # Update canvas size to match content
+        if self.intervals:
+            total_height = len(self.intervals) * self.cell_height
+            self.canvas.configure(height=total_height)
+    
+    def _show_settings(self) -> None:
+        """Show settings dialog for this column."""
+        logger.info(f"Opening settings for {self.hole_id}")
+        # TODO: Implement settings dialog
+    
+    def apply_depth_transform(self, transform: DepthTransform) -> None:
+        """Apply a depth transformation to the display."""
+        logger.info(f"Applying depth transform to {self.hole_id}: {transform.from_depth}-{transform.to_depth}m, factor={transform.stretch_factor}")
+        
+        # Store transform
+        self.depth_transforms.append(transform)
+        
+        # Recalculate positions and redraw
+        self._update_canvas()
+    
+    def get_depth_at_y(self, y_pos: int) -> Optional[float]:
+        """Get depth value at a Y pixel position."""
+        interval_idx = int(y_pos // self.cell_height)
+        if 0 <= interval_idx < len(self.intervals):
+            interval = self.intervals[interval_idx]
+            # Calculate sub-interval position (0.1m resolution)
+            offset_in_interval = (y_pos % self.cell_height) / self.cell_height
+            depth = interval.depth_from + offset_in_interval * (interval.depth_to - interval.depth_from)
+            return depth
+        return None
+    
+    def get_y_for_depth(self, depth: Union[float, int]) -> Optional[int]:
+        """Get Y pixel position for a depth value."""
+        depth = float(depth)
+        
+        # Find containing interval
+        for i, interval in enumerate(self.intervals):
+            if interval.depth_from <= depth <= interval.depth_to:
+                # Calculate pixel position
+                interval_fraction = (depth - interval.depth_from) / (interval.depth_to - interval.depth_from)
+                y_pos = i * self.cell_height + interval_fraction * self.cell_height
+                return int(y_pos)
+        
+        return None
+
+    def _draw_segments_and_discontinuities(self):
+        """Draw segment boundaries and discontinuity markers on canvas"""
+        if not hasattr(self, 'segments') or not self.segments:
+            return
+        
+        canvas_width = self.canvas.winfo_width()
+        if canvas_width <= 0:
+            canvas_width = self.width
+        
+        # Delete existing segment/discontinuity items
+        self.canvas.delete("segment_boundary")
+        self.canvas.delete("discontinuity_marker")
+        self.canvas.delete("segment_label")
+        
+        logger.debug(f"Drawing {len(self.segments)} segments and {len(self.discontinuities)} discontinuities")
+        
+        # Draw segments
+        for segment in self.segments:
+            y_top = self._depth_to_canvas_y(segment.depth_from_original)
+            y_bottom = self._depth_to_canvas_y(segment.depth_to_original)
+            
+            if y_top is None or y_bottom is None:
+                continue
+            
+            # Draw segment boundary rectangle (subtle)
+            self.canvas.create_rectangle(
+                0, y_top,
+                canvas_width, y_bottom,
+                outline="#1976d2",
+                width=2,
+                dash=(5, 3),
+                tags="segment_boundary"
+            )
+            
+            # Draw segment label
+            mid_y = (y_top + y_bottom) / 2
+            label_text = f"Seg {segment.order_index + 1}"
+            if segment.is_detrital:
+                label_text += " (Det)"
+            elif segment.is_lens:
+                label_text += " (Lens)"
+            
+            self.canvas.create_text(
+                canvas_width - 5, mid_y,
+                text=label_text,
+                anchor="e",
+                font=("Segoe UI", 8),
+                fill="#1976d2",
+                tags="segment_label"
+            )
+        
+        # Draw discontinuities
+        for disc in self.discontinuities:
+            y = self._depth_to_canvas_y(disc.depth_at_boundary)
+            
+            if y is None:
+                continue
+            
+            # Draw discontinuity line
+            line_width = disc.line_width
+            if disc.is_lens:
+                # Dashed line for lenses
+                self.canvas.create_line(
+                    -10, y,
+                    canvas_width + 10, y,
+                    fill=disc.color,
+                    width=line_width,
+                    dash=(8, 4),
+                    tags="discontinuity_marker"
+                )
+            else:
+                # Solid line for faults/intrusives
+                self.canvas.create_line(
+                    -10, y,
+                    canvas_width + 10, y,
+                    fill=disc.color,
+                    width=line_width,
+                    tags="discontinuity_marker"
+                )
+            
+            # Draw discontinuity label
+            label = disc.discontinuity_type.value[:4].upper()
+    
+    def set_zoom_window_range(self, depth_from: Optional[float], depth_to: Optional[float]) -> None:
+        """
+        Set the visible range in the zoom window for indicator display.
+        
+        Args:
+            depth_from: Start depth of visible range (None to clear)
+            depth_to: End depth of visible range (None to clear)
+        """
+        if depth_from is None or depth_to is None:
+            self.zoom_window_depth_range = None
+        else:
+            self.zoom_window_depth_range = (depth_from, depth_to)
+        
+        # Redraw indicators
+        self._draw_zoom_indicators()
+    
+    def _draw_zoom_indicators(self) -> None:
+        """Draw subtle indicators showing which range is visible in zoom window."""
+        # Clear existing indicators
+        self.canvas.delete("zoom_indicator")
+        
+        if not self.zoom_window_depth_range or not self.intervals:
+            return
+        
+        depth_from, depth_to = self.zoom_window_depth_range
+        
+        # Get Y positions for the range
+        y_from = self._depth_to_canvas_y(depth_from)
+        y_to = self._depth_to_canvas_y(depth_to)
+        
+        if y_from is None or y_to is None:
+            return
+        
+        # Add header offset
+        y_from += self.header_height
+        y_to += self.header_height
+        
+        # Get canvas width
+        canvas_width = self.canvas.winfo_width() or self.get_total_width()
+        
+        # Draw subtle highlight bar on the right edge
+        indicator_width = 4
+        indicator_color = self.theme_colors.get("accent_yellow", "#e5c07b")
+        
+        # Right edge indicator bar
+        self.canvas.create_rectangle(
+            canvas_width - indicator_width, y_from,
+            canvas_width, y_to,
+            fill=indicator_color,
+            outline="",
+            stipple="gray50",  # Semi-transparent
+            tags="zoom_indicator"
+        )
+        
+        # Top bracket
+        self.canvas.create_line(
+            canvas_width - 8, y_from,
+            canvas_width, y_from,
+            fill=indicator_color,
+            width=2,
+            tags="zoom_indicator"
+        )
+        
+        # Bottom bracket
+        self.canvas.create_line(
+            canvas_width - 8, y_to,
+            canvas_width, y_to,
+            fill=indicator_color,
+            width=2,
+            tags="zoom_indicator"
+        )
+    
+    def _depth_to_canvas_y(self, depth: float) -> Optional[float]:
+        """Convert depth in meters to canvas Y coordinate"""
+        if not self.intervals:
+            return None
+        
+        # Find which interval contains this depth
+        for i, interval in enumerate(self.intervals):
+            if interval.depth_from <= depth <= interval.depth_to:
+                # Calculate Y position within the interval
+                interval_fraction = (depth - interval.depth_from) / (interval.depth_to - interval.depth_from)
+                y_pos = i * self.cell_height + interval_fraction * self.cell_height
+                return y_pos
+        
+        # If depth is outside intervals, extrapolate
+        if depth < self.intervals[0].depth_from:
+            # Before first interval
+            return 0
+        elif depth > self.intervals[-1].depth_to:
+            # After last interval
+            return len(self.intervals) * self.cell_height
+        
+        return None
+    
+    def update_segments_and_discontinuities(self, segments: List[DrillholeSegment], discontinuities: List[Discontinuity]):
+        """Update segments and discontinuities from parent dialog"""
+        self.segments = segments
+        self.discontinuities = discontinuities
+        
+        # Redraw to show changes
+        self._draw_segments_and_discontinuities()
+        
+        logger.info(f"Updated {self.hole_id}: {len(segments)} segments, {len(discontinuities)} discontinuities")
+
+    def _on_right_click(self, event):
+        """Handle right-click to show context menu"""
+        # Get depth at click position
+        canvas_y = self.canvas.canvasy(event.y)
+        depth = self._canvas_y_to_depth(canvas_y)
+        
+        if depth is not None:
+            self._show_context_menu(event.x_root, event.y_root, depth)
+    
+    def _on_canvas_motion(self, event):
+        """Handle mouse motion to update cursor position in parent dialog"""
+        # Get canvas Y coordinate
+        canvas_y = self.canvas.canvasy(event.y)
+        
+        # Find the parent CorrelationDialog
+        parent_widget = self.master
+        while parent_widget:
+            if hasattr(parent_widget, 'update_cursor_position'):
+                parent_widget.update_cursor_position(canvas_y, self.hole_id)
+                break
+            parent_widget = parent_widget.master if hasattr(parent_widget, 'master') else None
+    
+    def _canvas_y_to_depth(self, canvas_y: float) -> Optional[float]:
+        """Convert canvas Y coordinate to depth in meters"""
+        # Get canvas height
+        canvas_height = self.canvas.winfo_height()
+        if canvas_height <= 0:
+            return None
+        
+        # If we have intervals, use their depth range
+        if self.intervals:
+            depth_min = min(interval.depth_from for interval in self.intervals)
+            depth_max = max(interval.depth_to for interval in self.intervals)
+        else:
+            # Default range
+            depth_min = 0.0
+            depth_max = 300.0
+        
+        # Calculate depth
+        depth_range = depth_max - depth_min
+        relative_y = canvas_y / canvas_height
+        depth = depth_min + (relative_y * depth_range)
+        
+        return depth
+    
+    def _show_context_menu(self, x: int, y: int, depth: float):
+        """Show context menu for adding discontinuities"""
+        from gui.DrillholeCorrelation.correlation_models import DiscontinuityType
+        
+        if self.context_menu:
+            self.context_menu.destroy()
+        
+        self.context_menu = tk.Menu(self, tearoff=0)
+        self.context_click_depth = depth
+        
+        # Add Discontinuity submenu
+        disc_menu = tk.Menu(self.context_menu, tearoff=0)
+        
+        discontinuity_types = [
+            ("Fault", DiscontinuityType.FAULT),
+            ("Intrusive Contact", DiscontinuityType.INTRUSIVE_CONTACT),
+            ("Unconformity", DiscontinuityType.UNCONFORMITY),
+            ("Detrital Sequence", DiscontinuityType.DETRITAL_SEQUENCE),
+            ("Lens", DiscontinuityType.LENS),
+            ("Core Loss", DiscontinuityType.CORE_LOSS),
+            ("Weathering", DiscontinuityType.WEATHERING),
+        ]
+        
+        for label, dtype in discontinuity_types:
+            disc_menu.add_command(
+                label=label,
+                command=lambda d=depth, dt=dtype: self._request_add_discontinuity(d, dt)
+            )
+        
+        self.context_menu.add_cascade(label="Add Discontinuity", menu=disc_menu)
+        self.context_menu.add_separator()
+        
+        # Check if there's a discontinuity at this depth
+        can_remove = self._has_discontinuity_near(depth)
+        self.context_menu.add_command(
+            label="Remove Discontinuity",
+            command=lambda: self._request_remove_discontinuity(depth),
+            state=tk.NORMAL if can_remove else tk.DISABLED
+        )
+        
+        self.context_menu.add_separator()
+        
+        # Stretch/compress option
+        segment = self._find_segment_at_depth(depth)
+        self.context_menu.add_command(
+            label="Edit Stretch Regions...",
+            command=lambda: self._request_warp_bar(segment),
+            state=tk.NORMAL if segment else tk.DISABLED
+        )
+        
+        # Show menu
+        self.context_menu.post(x, y)
+    
+    def _request_add_discontinuity(self, depth: float, discontinuity_type):
+        """Request parent dialog to add discontinuity"""
+        logger.info(f"Requesting to add {discontinuity_type.value} at {depth:.1f}m in {self.hole_id}")
+        
+        if self.on_discontinuity_add_requested:
+            self.on_discontinuity_add_requested(self.hole_id, depth, discontinuity_type)
+        else:
+            logger.warning("No handler for on_discontinuity_add_requested")
+    
+    def _request_remove_discontinuity(self, depth: float):
+        """Request parent dialog to remove discontinuity"""
+        logger.info(f"Requesting to remove discontinuity at {depth:.1f}m in {self.hole_id}")
+        
+        if self.on_discontinuity_remove_requested:
+            self.on_discontinuity_remove_requested(self.hole_id, depth)
+    
+    def _request_warp_bar(self, segment):
+        """Request parent dialog to show warp bar"""
+        if segment and self.on_warp_bar_requested:
+            self.on_warp_bar_requested(segment)
+    
+    def _has_discontinuity_near(self, depth: float, tolerance: float = 1.0) -> bool:
+        """Check if there's a discontinuity near this depth"""
+        for disc in self.discontinuities:
+            if abs(disc.depth_at_boundary - depth) <= tolerance:
+                return True
+        return False
+    
+    def _find_segment_at_depth(self, depth: float):
+        """Find segment containing this depth"""
+        for segment in self.segments:
+            if segment.contains_depth(depth):
+                return segment
+        return None

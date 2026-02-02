@@ -1,0 +1,466 @@
+import logging
+import queue
+import threading
+import tkinter as tk
+from tkinter import ttk, filedialog
+from typing import Any, Dict, List, Optional, Tuple
+
+import pandas as pd
+
+from gui.dialog_helper import DialogHelper
+from gui.widgets.themed_date_entry import create_themed_date_entry
+from processing.logging_review_report import (
+    filter_dataframe_by_logger_and_date,
+    generate_logger_reports,
+    prepare_logging_review_data,
+    resolve_drilldate_column,
+    resolve_logger_column,
+)
+
+logger = logging.getLogger(__name__)
+
+
+DEFAULT_PAGES = {
+    "cover": "Cover Page",
+    "summary_stats": "Summary Statistics",
+    "comment_stats": "Comment Statistics",
+    "fines_accuracy": "Fines Accuracy",
+    "grouping_accuracy": "Grouping Accuracy",
+    "outliers": "Top Outliers",
+}
+
+
+class LoggingReviewReportDialog:
+    def __init__(
+        self,
+        parent: tk.Widget,
+        gui_manager: Any,
+        data_coordinator: Any,
+        translator: Optional[Any] = None,
+    ):
+        self.parent = parent
+        self.gui_manager = gui_manager
+        self.data_coordinator = data_coordinator
+        self.t = translator if translator else (lambda x: x)
+
+        self.dialog = DialogHelper.create_dialog(
+            parent, "Logging Review Report", modal=True, topmost=True
+        )
+        self.dialog.resizable(True, True)
+        if self.gui_manager:
+            self.gui_manager.configure_ttk_styles(self.dialog)
+            self.gui_manager.apply_theme(self.dialog)
+
+        self.output_path_var = tk.StringVar()
+        self.top_n_var = tk.IntVar(value=50)
+
+        self.date_from_var = tk.StringVar()
+        self.date_to_var = tk.StringVar()
+
+        self.page_vars: Dict[str, tk.BooleanVar] = {
+            key: tk.BooleanVar(value=True) for key in DEFAULT_PAGES.keys()
+        }
+        self._prep_cache: Optional[Dict[str, Any]] = None
+        self._prep_queue: queue.Queue = queue.Queue()
+        self._logger_counts: Dict[str, Tuple[int, int, int]] = {}  # logger -> (assays, logging, holes)
+        self._tooltip_window: Optional[tk.Toplevel] = None
+
+        self._build_ui()
+        self._load_defaults_from_data()
+        self._start_prep()
+        self.dialog.update_idletasks()
+        DialogHelper.center_dialog(
+            self.dialog,
+            self.parent,
+            min_width=780,
+            min_height=580,
+        )
+
+    def _build_ui(self) -> None:
+        container = ttk.Frame(self.dialog, padding=10)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        theme_colors = self.gui_manager.theme_colors if self.gui_manager else None
+        fonts = self.gui_manager.fonts if self.gui_manager else None
+        normal_font = ("TkDefaultFont", 10)
+        if fonts:
+            normal_font = fonts.get("normal") or fonts.get("entry") or normal_font
+
+        # Progress (shown while loading data)
+        self.progress_frame = ttk.Frame(container)
+        self.progress_frame.pack(fill=tk.X, pady=(0, 8))
+        self.progress_label = ttk.Label(self.progress_frame, text=self.t("Loading data..."))
+        self.progress_label.pack(anchor=tk.W)
+        self.progress_bar = ttk.Progressbar(
+            self.progress_frame, mode="indeterminate", length=300
+        )
+        self.progress_bar.pack(fill=tk.X, pady=(4, 0))
+
+        # Date range
+        date_frame = ttk.LabelFrame(container, text=self.t("Date Range"))
+        date_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(date_frame, text=self.t("From")).grid(row=0, column=0, padx=5, pady=5)
+        if self.gui_manager and theme_colors and normal_font:
+            date_from_entry = create_themed_date_entry(
+                date_frame,
+                self.date_from_var,
+                theme_colors,
+                normal_font,
+                width=18,
+            )
+        else:
+            date_from_entry = ttk.Entry(
+                date_frame, textvariable=self.date_from_var, width=18
+            )
+        date_from_entry.grid(row=0, column=1, padx=5, pady=5)
+        ttk.Label(date_frame, text=self.t("To")).grid(row=0, column=2, padx=5, pady=5)
+        if self.gui_manager and theme_colors and normal_font:
+            date_to_entry = create_themed_date_entry(
+                date_frame,
+                self.date_to_var,
+                theme_colors,
+                normal_font,
+                width=18,
+            )
+        else:
+            date_to_entry = ttk.Entry(
+                date_frame, textvariable=self.date_to_var, width=18
+            )
+        date_to_entry.grid(row=0, column=3, padx=5, pady=5)
+
+        # Logger selection
+        logger_frame = ttk.LabelFrame(container, text=self.t("Logger"))
+        logger_frame.pack(fill=tk.X, pady=(0, 8))
+        logger_btn_frame = ttk.Frame(logger_frame)
+        logger_btn_frame.pack(fill=tk.X, padx=5, pady=(5, 0))
+        if self.gui_manager and theme_colors:
+            select_all_btn = self.gui_manager.create_modern_button(
+                logger_btn_frame,
+                text=self.t("Select all"),
+                color=theme_colors["accent_blue"],
+                command=self._on_select_all_loggers,
+            )
+        else:
+            select_all_btn = ttk.Button(
+                logger_btn_frame,
+                text=self.t("Select all"),
+                command=self._on_select_all_loggers,
+            )
+        select_all_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self.logger_listbox = tk.Listbox(
+            logger_frame, selectmode=tk.EXTENDED, height=6, exportselection=False
+        )
+        if theme_colors:
+            self.logger_listbox.configure(
+                background=theme_colors["field_bg"],
+                foreground=theme_colors["text"],
+                selectbackground=theme_colors.get(
+                    "accent_blue", theme_colors["field_border"]
+                ),
+                selectforeground="#ffffff",
+                highlightbackground=theme_colors["field_border"],
+                highlightcolor=theme_colors["field_border"],
+                relief=tk.FLAT,
+                bd=1,
+            )
+        self.logger_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+        self.logger_listbox.bind("<Motion>", self._on_logger_motion)
+        self.logger_listbox.bind("<Leave>", self._on_logger_leave)
+
+        # Top N
+        topn_frame = ttk.LabelFrame(container, text=self.t("Outlier Count"))
+        topn_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(topn_frame, text=self.t("Top N")).pack(side=tk.LEFT, padx=5)
+        ttk.Spinbox(topn_frame, from_=10, to=100, textvariable=self.top_n_var, width=8).pack(
+            side=tk.LEFT, padx=5, pady=5
+        )
+
+        # Page selection
+        page_frame = ttk.LabelFrame(container, text=self.t("Report Pages"))
+        page_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        row = 0
+        for key, label in DEFAULT_PAGES.items():
+            if self.gui_manager:
+                checkbox = self.gui_manager.create_custom_checkbox(
+                    page_frame, self.t(label), self.page_vars[key]
+                )
+                checkbox.grid(
+                    row=row // 2, column=row % 2, sticky=tk.W, padx=8, pady=4
+                )
+            else:
+                ttk.Checkbutton(
+                    page_frame, text=self.t(label), variable=self.page_vars[key]
+                ).grid(row=row // 2, column=row % 2, sticky=tk.W, padx=8, pady=4)
+            row += 1
+
+        # Output folder
+        output_frame = ttk.LabelFrame(container, text=self.t("Output Folder"))
+        output_frame.pack(fill=tk.X, pady=(0, 8))
+        if self.gui_manager:
+            output_entry = self.gui_manager.create_entry_with_validation(
+                output_frame, self.output_path_var
+            )
+        else:
+            output_entry = ttk.Entry(output_frame, textvariable=self.output_path_var)
+        output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+        if self.gui_manager and theme_colors:
+            browse_button = self.gui_manager.create_modern_button(
+                output_frame,
+                text=self.t("Browse"),
+                color=theme_colors["accent_blue"],
+                command=self._pick_output_folder,
+            )
+        else:
+            browse_button = ttk.Button(
+                output_frame,
+                text=self.t("Browse"),
+                command=self._pick_output_folder,
+            )
+        browse_button.pack(side=tk.LEFT, padx=5, pady=5)
+
+        # Action buttons
+        buttons = ttk.Frame(container)
+        buttons.pack(fill=tk.X, pady=(8, 0))
+        if self.gui_manager and theme_colors:
+            generate_button = self.gui_manager.create_modern_button(
+                buttons,
+                text=self.t("Generate"),
+                color=theme_colors["accent_green"],
+                command=self._on_generate,
+            )
+            generate_button.pack(side=tk.RIGHT, padx=5)
+            close_button = self.gui_manager.create_modern_button(
+                buttons,
+                text=self.t("Close"),
+                color=theme_colors["accent_red"],
+                command=self._on_close,
+            )
+            close_button.pack(side=tk.RIGHT, padx=5)
+        else:
+            ttk.Button(buttons, text=self.t("Generate"), command=self._on_generate).pack(
+                side=tk.RIGHT, padx=5
+            )
+            ttk.Button(buttons, text=self.t("Close"), command=self._on_close).pack(
+                side=tk.RIGHT, padx=5
+            )
+
+    def _pick_output_folder(self) -> None:
+        selected = filedialog.askdirectory(parent=self.dialog)
+        if selected:
+            self.output_path_var.set(selected)
+
+    def _on_select_all_loggers(self) -> None:
+        """Select all loggers in the list (generates one report per logger in chosen period)."""
+        self.logger_listbox.selection_set(0, tk.END)
+
+    def _load_defaults_from_data(self) -> None:
+        """Set default date range and logger list. Logger list is replaced after prep."""
+        if not self.data_coordinator:
+            return
+        geo_store = self.data_coordinator.geological_store
+        if not geo_store:
+            return
+        # Logger list from sources (used if prep is skipped or until prep completes)
+        logger_values = []
+        for source_name in geo_store.list_sources():
+            src = geo_store.get_source(source_name)
+            if not src or src.df is None or src.df.empty:
+                continue
+            logger_col = resolve_logger_column(src.df)
+            if logger_col:
+                logger_values.extend(src.df[logger_col].dropna().astype(str).unique().tolist())
+        logger_values = sorted({v for v in logger_values if v.strip()})
+        if logger_values:
+            for value in logger_values:
+                self.logger_listbox.insert(tk.END, value)
+            self.logger_listbox.selection_set(0)
+        # Date range from collar
+        collar_df = None
+        for source_name in ["excollar", "collar", "collars"]:
+            if source_name in geo_store.list_sources():
+                src = geo_store.get_source(source_name)
+                if src and src.df is not None and not src.df.empty:
+                    collar_df = src.df.copy()
+                    break
+        if collar_df is not None:
+            date_col = resolve_drilldate_column(collar_df)
+            if date_col:
+                dates = pd.to_datetime(collar_df[date_col], errors="coerce").dropna()
+                if not dates.empty:
+                    self.date_from_var.set(dates.min().date().isoformat())
+                    self.date_to_var.set(dates.max().date().isoformat())
+
+    def _start_prep(self) -> None:
+        """Start background data prep; poll queue to update progress."""
+        if not self.data_coordinator or not self.data_coordinator.is_initialized:
+            self.progress_frame.pack_forget()
+            return
+
+        def run_prep() -> None:
+            try:
+                def progress_cb(msg: str, pct: float) -> None:
+                    self._prep_queue.put(("progress", msg, pct))
+
+                data = prepare_logging_review_data(
+                    self.data_coordinator, progress_callback=progress_cb
+                )
+                self._prep_queue.put(("done", data))
+            except Exception as e:
+                self._prep_queue.put(("error", str(e)))
+
+        self.progress_bar.start(10)
+        threading.Thread(target=run_prep, daemon=True).start()
+        self._poll_prep()
+
+    def _poll_prep(self) -> None:
+        """Process prep queue and update UI."""
+        try:
+            while True:
+                item = self._prep_queue.get_nowait()
+                if item[0] == "progress":
+                    _, msg, pct = item
+                    self.progress_label.config(text=msg)
+                elif item[0] == "done":
+                    self._prep_cache = item[1]
+                    self.progress_bar.stop()
+                    self.progress_frame.pack_forget()
+                    self._refresh_logger_list_from_cache()
+                    return
+                elif item[0] == "error":
+                    self.progress_bar.stop()
+                    self.progress_label.config(text=self.t("Load failed"))
+                    logger.exception("Prep failed: %s", item[1])
+                    return
+        except queue.Empty:
+            pass
+        self.dialog.after(200, self._poll_prep)
+
+    def _refresh_logger_list_from_cache(self) -> None:
+        """Populate logger list from cache and compute per-logger counts for tooltip."""
+        if not self._prep_cache:
+            return
+        self.logger_listbox.delete(0, tk.END)
+        logger_values = self._prep_cache.get("logger_values") or []
+        date_from = self.date_from_var.get().strip() or None
+        date_to = self.date_to_var.get().strip() or None
+        drilldate_col = self._prep_cache.get("drilldate_col") or ""
+        logger_col = self._prep_cache["logger_col"]
+        hole_col = self._prep_cache["hole_col"]
+        merged_df = filter_dataframe_by_logger_and_date(
+            self._prep_cache["merged_df"],
+            logger_col=logger_col,
+            date_col=drilldate_col,
+            logger_values=None,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        logging_df = filter_dataframe_by_logger_and_date(
+            self._prep_cache["logging_df"],
+            logger_col=logger_col,
+            date_col=drilldate_col,
+            logger_values=None,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        self._logger_counts = {}
+        for lv in logger_values:
+            m = merged_df[merged_df[logger_col].astype(str) == str(lv)]
+            lg = logging_df[logging_df[logger_col].astype(str) == str(lv)]
+            holes = m[hole_col].nunique() if hole_col in m.columns else 0
+            self._logger_counts[lv] = (len(m), len(lg), int(holes))
+        for value in logger_values:
+            self.logger_listbox.insert(tk.END, value)
+        if logger_values:
+            self.logger_listbox.selection_set(0)
+
+    def _on_logger_motion(self, event: tk.Event) -> None:
+        """Show tooltip with assays / logging / holes for hovered logger."""
+        if not self._logger_counts:
+            return
+        idx = self.logger_listbox.nearest(event.y)
+        if idx < 0 or idx >= self.logger_listbox.size():
+            self._hide_tooltip()
+            return
+        logger_val = self.logger_listbox.get(idx)
+        counts = self._logger_counts.get(logger_val)
+        if not counts:
+            self._hide_tooltip()
+            return
+        assays, logging, holes = counts
+        text = self.t("Assays: {}  Logging intervals: {}  Holes: {}").format(
+            assays, logging, holes
+        )
+        self._show_tooltip(event.x_root, event.y_root, text)
+
+    def _on_logger_leave(self, event: tk.Event) -> None:
+        self._hide_tooltip()
+
+    def _show_tooltip(self, x: int, y: int, text: str) -> None:
+        self._hide_tooltip()
+        self._tooltip_window = tk.Toplevel(self.dialog)
+        self._tooltip_window.wm_overrideredirect(True)
+        self._tooltip_window.wm_geometry(f"+{x + 12}+{y + 12}")
+        label = ttk.Label(self._tooltip_window, text=text, padding=6)
+        label.pack()
+
+    def _hide_tooltip(self) -> None:
+        if self._tooltip_window:
+            try:
+                self._tooltip_window.destroy()
+            except tk.TclError:
+                pass
+            self._tooltip_window = None
+
+    def _on_generate(self) -> None:
+        if not self.output_path_var.get().strip():
+            DialogHelper.show_message(
+                self.dialog,
+                self.t("Missing Output Folder"),
+                self.t("Please select an output folder before generating reports."),
+                message_type="warning",
+            )
+            return
+
+        selected_indices = self.logger_listbox.curselection()
+        logger_values = [self.logger_listbox.get(i) for i in selected_indices]
+        if not logger_values:
+            DialogHelper.show_message(
+                self.dialog,
+                self.t("No Loggers Selected"),
+                self.t("Please select at least one logger before generating reports."),
+                message_type="warning",
+            )
+            return
+        page_options = {key: var.get() for key, var in self.page_vars.items()}
+
+        try:
+            generate_logger_reports(
+                data_coordinator=self.data_coordinator,
+                output_dir=self.output_path_var.get().strip(),
+                date_from=self.date_from_var.get().strip() or None,
+                date_to=self.date_to_var.get().strip() or None,
+                logger_values=logger_values,
+                top_n=int(self.top_n_var.get()),
+                page_options=page_options,
+                include_images=True,
+                output_format="HTML",
+                prepped_data=self._prep_cache,
+            )
+            DialogHelper.show_message(
+                self.dialog,
+                self.t("Report Generated"),
+                self.t("Reports generated successfully."),
+                message_type="info",
+            )
+        except Exception as e:
+            logger.exception("Report generation failed")
+            DialogHelper.show_message(
+                self.dialog,
+                self.t("Report Error"),
+                self.t("Failed to generate reports.") + f"\n{str(e)}",
+                message_type="error",
+            )
+
+    def _on_close(self) -> None:
+        self.dialog.destroy()
+

@@ -1,0 +1,60 @@
+# Byte-compiled / cached
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Distribution / packaging
+*.egg
+*.egg-info/
+*.egg-info
+dist/
+build/
+eggs/
+*.manifest
+*.spec.bak
+
+# PyInstaller
+*.spec.bak
+
+# Unit test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# GeoVue / ML artifacts (large or generated)
+ml_detection/classifier_images/
+ml_detection/classifier_output/
+ml_detection/runs/
+ml_detection/yolo_dataset/
+ml_detection/*.pt
+ml_output/
+*.pt
+
+# Local backups (keep repo clean)
+*.backup_*
+
+# Large or temporary data
+*.1334742934144
+*.14448
