@@ -22,6 +22,12 @@ try:
 except ImportError:
     WORDCLOUD_AVAILABLE = False
 
+try:
+    import pyproj
+    PYPROJ_AVAILABLE = True
+except ImportError:
+    PYPROJ_AVAILABLE = False
+
 from processing.DataManager.column_aliases import ColumnResolver
 from processing.DataManager.keys import ImageKey
 from processing.logging_review_report import (
@@ -99,32 +105,36 @@ def generate_logger_html_reports_from_prepped_data(
     include_images: bool = True,
     logo_path: Optional[str] = None,
     full_team_df: Optional[pd.DataFrame] = None,
+    skip_csv_export: bool = False,
 ) -> List[str]:
     """
     Generate per-logger HTML reports from already-prepped data.
     No merges or heavy data prep are done here; use when the caller has
     already run the full prep in generate_logger_reports().
+    If skip_csv_export is True, do not write CSVs to output_dir/_datasets (e.g. when
+    regenerating from existing _datasets in a read-only or preview flow).
     """
     os.makedirs(output_dir, exist_ok=True)
     if logo_path is None:
         default_logo = Path(__file__).resolve().parents[1] / "resources" / "full_logo.png"
         logo_path = str(default_logo) if default_logo.exists() else None
 
-    # Export CSV datasets for debugging
-    datasets_dir = os.path.join(output_dir, "_datasets")
-    os.makedirs(datasets_dir, exist_ok=True)
-    logging_csv_path = os.path.join(datasets_dir, "01_logging_intervals.csv")
-    logging_df.to_csv(logging_csv_path, index=False)
-    logger.info(f"Exported logging intervals: {logging_csv_path} ({len(logging_df):,} rows)")
+    if not skip_csv_export:
+        # Export CSV datasets for debugging
+        datasets_dir = os.path.join(output_dir, "_datasets")
+        os.makedirs(datasets_dir, exist_ok=True)
+        logging_csv_path = os.path.join(datasets_dir, "01_logging_intervals.csv")
+        logging_df.to_csv(logging_csv_path, index=False)
+        logger.info(f"Exported logging intervals: {logging_csv_path} ({len(logging_df):,} rows)")
 
-    merged_csv_path = os.path.join(datasets_dir, "02_merged_assay_intervals.csv")
-    merged_df.to_csv(merged_csv_path, index=False)
-    logger.info(f"Exported merged assay intervals: {merged_csv_path} ({len(merged_df):,} rows)")
+        merged_csv_path = os.path.join(datasets_dir, "02_merged_assay_intervals.csv")
+        merged_df.to_csv(merged_csv_path, index=False)
+        logger.info(f"Exported merged assay intervals: {merged_csv_path} ({len(merged_df):,} rows)")
 
-    if full_team_df is not None:
-        team_csv_path = os.path.join(datasets_dir, "03_full_team_data.csv")
-        full_team_df.to_csv(team_csv_path, index=False)
-        logger.info(f"Exported full team data: {team_csv_path} ({len(full_team_df):,} rows)")
+        if full_team_df is not None:
+            team_csv_path = os.path.join(datasets_dir, "03_full_team_data.csv")
+            full_team_df.to_csv(team_csv_path, index=False)
+            logger.info(f"Exported full team data: {team_csv_path} ({len(full_team_df):,} rows)")
 
     output_files = []
     for logger_value in logger_values:
@@ -657,11 +667,18 @@ def _build_grouping_issue_intervals(
     return intervals
 
 
+# Default UTM zone for collar reprojection (e.g. 33N = Gabon/Belinga). Override via config if needed.
+DEFAULT_UTM_ZONE = 33
+DEFAULT_UTM_NORTH = True
+
+
 def _build_map_points(
     collar_df: pd.DataFrame,
     hole_col: str,
     logger_holes: set,
     all_holes: set,
+    utm_zone: Optional[int] = None,
+    utm_north: bool = True,
 ) -> Dict[str, Any]:
     if collar_df.empty:
         return {"points": [], "has_coords": False}
@@ -678,15 +695,85 @@ def _build_map_points(
 
     df = df[df[collar_hole_col].astype(str).str.upper().str.strip().isin(all_holes)]
     if df.empty:
+        # No overlap between collar holes and report holes: show all collar points so map still displays
+        df = collar_df[[collar_hole_col, east_col, north_col]].copy()
+        df = df.dropna(subset=[east_col, north_col])
+    if df.empty:
         return {"points": [], "has_coords": False}
 
     xs = df[east_col].astype(float)
     ys = df[north_col].astype(float)
     min_x, max_x = xs.min(), xs.max()
     min_y, max_y = ys.min(), ys.max()
+    # Heuristic: coords look like projected (e.g. UTM) if outside WGS84 or in typical UTM range
+    outside_wgs84 = min_x < -180 or max_x > 180 or min_y < -90 or max_y > 90
+    # Typical UTM: easting 10k–999k, northing 0–10M (or southern hemisphere negative)
+    looks_like_utm = (10000 <= min_x <= 999000 and 0 <= min_y <= 10000000) or (
+        10000 <= min_x <= 999000 and -10000000 <= max_y <= 0
+    )
+    looks_projected = outside_wgs84 or looks_like_utm
+
+    # Reproject UTM (easting, northing) to WGS84 (lng, lat) when coords look projected
+    if looks_projected and PYPROJ_AVAILABLE:
+
+        def try_reproject(zone: int, north: bool):
+            epsg_utm = 32600 + zone if north else 32700 + zone
+            transformer = pyproj.Transformer.from_crs(
+                f"EPSG:{epsg_utm}", "EPSG:4326", always_xy=True
+            )
+            rows_ll = []
+            for _, row in df.iterrows():
+                hole = str(row[collar_hole_col]).upper().strip()
+                east_val = float(row[east_col])
+                north_val = float(row[north_col])
+                lng, lat = transformer.transform(east_val, north_val)
+                rows_ll.append((hole, lng, lat))
+            lngs = [r[1] for r in rows_ll]
+            lats = [r[2] for r in rows_ll]
+            min_lat, max_lat = min(lats), max(lats)
+            min_lng, max_lng = min(lngs), max(lngs)
+            span_lat = max(max_lat - min_lat, 1e-6)
+            span_lng = max(max_lng - min_lng, 1e-6)
+            points = []
+            for hole, lng, lat in rows_ll:
+                points.append(
+                    {
+                        "x": (lat - min_lat) / span_lat,
+                        "y": (lng - min_lng) / span_lng,
+                        "hole_id": hole,
+                        "is_logger": hole in logger_holes,
+                        "lat": lat,
+                        "lng": lng,
+                    }
+                )
+            return {"points": points, "has_coords": True, "bounds": [min_lat, min_lng, max_lat, max_lng], "warn_projected": False}
+
+        # Infer hemisphere from northing: positive => north (326xx), negative => south (327xx)
+        inferred_north = min_y >= 0 and max_y <= 10000000
+        primary_zones = [utm_zone, DEFAULT_UTM_ZONE, 32, 31, 34] if utm_zone is None else [utm_zone, 32, 31, 34]
+        primary_zones = [z for z in primary_zones if z is not None]
+        primary_zones = list(dict.fromkeys(primary_zones))
+        last_error = None
+        # 1) Try primary zones with configured hemisphere, then inferred
+        for zone in primary_zones:
+            for north in (utm_north, inferred_north):
+                try:
+                    return try_reproject(zone, north)
+                except Exception as e:
+                    last_error = e
+        # 2) Try all UTM zones 1-60 for inferred hemisphere, then the other
+        for north in (inferred_north, not inferred_north):
+            for zone in range(1, 61):
+                try:
+                    return try_reproject(zone, north)
+                except Exception as e:
+                    last_error = e
+        if last_error is not None:
+            logger.warning("UTM reprojection failed for all zones (%s), map may show projected coords warning", last_error)
+
+    # No reprojection: pass through as-is (or already WGS84)
     span_x = max(max_x - min_x, 1.0)
     span_y = max(max_y - min_y, 1.0)
-
     points = []
     for _, row in df.iterrows():
         hole = str(row[collar_hole_col]).upper().strip()
@@ -705,10 +792,7 @@ def _build_map_points(
             }
         )
     bounds = [min_y, min_x, max_y, max_x]
-    # Heuristic: if coords look like projected (e.g. UTM) rather than WGS84, warn
-    warn_projected = (
-        min_x < -180 or max_x > 180 or min_y < -90 or max_y > 90
-    )
+    warn_projected = looks_projected
     return {"points": points, "has_coords": True, "bounds": bounds, "warn_projected": warn_projected}
 
 
@@ -1115,17 +1199,20 @@ def _collect_zonation_mismatch_rows(
                 elif de_col or hy_col or pr_col:
                     minerals = {"De": de_pct or 0, "Hy": hy_pct or 0, "Pr": pr_pct or 0}
                     should_be = max(minerals, key=minerals.get)
-            rows_out.append({
-                "hole_id": _safe_str(row.get(hole_col)),
-                "depth_from": _safe_float(row.get(depth_from_col)) if depth_from_col else None,
-                "depth_to": _safe_float(row.get(depth_to_col)),
-                "logged_zonation": zonation,
-                "should_be": should_be or "-",
-                "total_gangue_pct": total_gangue,
-                "de_pct": de_pct,
-                "hy_pct": hy_pct,
-                "pr_pct": pr_pct,
-            })
+            # Only include rows where logged zonation differs from what it should be
+            # (skip rows where classification is actually correct)
+            if should_be and should_be != zonation:
+                rows_out.append({
+                    "hole_id": _safe_str(row.get(hole_col)),
+                    "depth_from": _safe_float(row.get(depth_from_col)) if depth_from_col else None,
+                    "depth_to": _safe_float(row.get(depth_to_col)),
+                    "logged_zonation": zonation,
+                    "should_be": should_be,
+                    "total_gangue_pct": total_gangue,
+                    "de_pct": de_pct,
+                    "hy_pct": hy_pct,
+                    "pr_pct": pr_pct,
+                })
     return rows_out
 
 
@@ -1358,9 +1445,14 @@ def _build_html_report(
         fe_col_min = resolver_assay.get("fe_pct")
         sio2_col_min = resolver_assay.get("sio2_pct")
         al2o3_col_min = resolver_assay.get("al2o3_pct")
-        zonation_col = resolver_assay.get("zonation") or resolver_assay.get("profile_zonation")
+        # Use same zonation resolution as Zonation tab (BestProfileZonation_D / profile_zonation or derived dominant)
+        zonation_cols_min = _resolve_zonation_columns(assay_with_accuracy)
+        assay_for_mineral_zonation, zonation_cols_derived = _derive_dominant_zonation_column(
+            assay_with_accuracy, zonation_cols_min
+        )
+        zonation_col = zonation_cols_derived.get("zonation")
 
-        for _, row in assay_with_accuracy.iterrows():
+        for _, row in assay_for_mineral_zonation.iterrows():
             fe_val = _safe_float(row.get(fe_col_min)) if fe_col_min else None
             sio2_val = _safe_float(row.get(sio2_col_min)) if sio2_col_min else None
             al2o3_val = _safe_float(row.get(al2o3_col_min)) if al2o3_col_min else None
@@ -1385,12 +1477,14 @@ def _build_html_report(
             else:
                 assay_suggests = "Unmineralised"
 
-            # Get the strat code as logged
+            # Get the strat code and zonation as logged (zonation from resolved or derived column)
             logged_strat = _safe_str(row.get(strat_col)) if strat_col else ""
             logged_zonation = _safe_str(row.get(zonation_col)) if zonation_col else ""
             validation = row.get("Logging_Accuracy", "")
 
             if validation == "Mismatch":
+                # Low significance = borderline (assay suggests Leached); High = clear mismatch
+                significance = "Low" if assay_suggests == "Leached" else "High"
                 mineral_mismatch_intervals.append({
                     "hole_id": _safe_str(row.get(hole_col)),
                     "depth_from": _safe_float(row.get(depth_from_col)) if depth_from_col else None,
@@ -1399,6 +1493,7 @@ def _build_html_report(
                     "logged_as": logged_strat,
                     "logged_zonation": logged_zonation,
                     "assay_suggests": assay_suggests,
+                    "significance": significance,
                     "gangue_pct": gangue_val,
                     "geochem": {"Fe": fe_val, "SiO2": sio2_val, "Al2O3": al2o3_val},
                 })
@@ -1730,6 +1825,8 @@ def _build_html_report(
             "accuracy_counts_team": mineral_accuracy_counts_team,
             "quarterly_team": mineral_quarterly_team,
             "mismatch_intervals": mineral_mismatch_intervals,  # Evidence for review
+            "mismatch_low_count": sum(1 for m in mineral_mismatch_intervals if m.get("significance") == "Low"),
+            "mismatch_high_count": sum(1 for m in mineral_mismatch_intervals if m.get("significance") == "High"),
         },
         "profile_zonation": {
             "strat_coverage_pct": profile_coverage,
@@ -2207,12 +2304,13 @@ def _render_mineralisation_evidence_table(intervals: List[Dict[str, Any]], logge
         assay_class = get_assay_class(assay_suggests)
         validation = item.get("validation", "")
         validation_class = get_validation_class(validation)
+        significance = item.get("significance", "High")
         logged_as = item.get("logged_as", "")
         logged_zonation = item.get("logged_zonation", "")
         if item.get("image"):
             image_html = (
                 f"<img src=\"{item['image']}\" alt=\"Interval\" class=\"rotated-image expandable-img img-small\" "
-                f"onclick=\"this.classList.toggle('expanded')\" title=\"Click to expand\" />"
+                f"onclick=\"handleImageExpand(this)\" title=\"Click to expand\" />"
             )
         else:
             image_html = "<div class=\"image-placeholder-small\">-</div>"
@@ -2223,6 +2321,7 @@ def _render_mineralisation_evidence_table(intervals: List[Dict[str, Any]], logge
             f"<td data-sort=\"{html.escape(_safe_str(item.get('hole_id')))}\">{html.escape(_safe_str(item.get('hole_id')))}</td>"
             f"<td data-sort=\"{item.get('depth_from', 0) or 0}\">{html.escape(depth)}</td>"
             f"<td class=\"{validation_class}\" data-sort=\"{validation}\">{html.escape(validation)}</td>"
+            f"<td class=\"significance-{significance.lower()}\" data-sort=\"{significance}\">{html.escape(significance)}</td>"
             f"<td data-sort=\"{logged_as}\">{html.escape(logged_as)}</td>"
             f"<td data-sort=\"{logged_zonation}\">{html.escape(logged_zonation)}</td>"
             f"<td class=\"{assay_class}\" data-sort=\"{assay_suggests}\">{html.escape(assay_suggests)}</td>"
@@ -2239,6 +2338,7 @@ def _render_mineralisation_evidence_table(intervals: List[Dict[str, Any]], logge
         "<th class=\"sortable\" data-i18n-fr=\"Trou\" data-i18n-en=\"Hole\">Hole ▼</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Profondeur\" data-i18n-en=\"Depth\">Depth ▼</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Validation\" data-i18n-en=\"Validation\">Validation ▼</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Significance\" data-i18n-en=\"Significance\">Significance ▼</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Logue comme\" data-i18n-en=\"Logged as\">Logged as ▼</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Zonation loggee\" data-i18n-en=\"Logged Zonation\">Logged Zonation ▼</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Essai suggere\" data-i18n-en=\"Assay suggests\">Assay suggests ▼</th>"
@@ -2278,7 +2378,7 @@ def _render_zonation_evidence_table(
         if item.get("image"):
             image_html = (
                 f"<img src=\"{item['image']}\" alt=\"Interval\" class=\"rotated-image expandable-img img-small\" "
-                f"onclick=\"this.classList.toggle('expanded')\" title=\"Click to expand\" />"
+                f"onclick=\"handleImageExpand(this)\" title=\"Click to expand\" />"
             )
         else:
             image_html = "<div class=\"image-placeholder-small\">-</div>"
@@ -2332,7 +2432,7 @@ def _render_logging_detail_evidence_table(
         if item.get("image"):
             image_html = (
                 f"<img src=\"{item['image']}\" alt=\"Interval\" class=\"rotated-image expandable-img img-small\" "
-                f"onclick=\"this.classList.toggle('expanded')\" title=\"Click to expand\" />"
+                f"onclick=\"handleImageExpand(this)\" title=\"Click to expand\" />"
             )
         else:
             image_html = "<div class=\"image-placeholder-small\">-</div>"
@@ -2503,7 +2603,7 @@ def _render_grouping_groups(groups: List[Dict[str, Any]], logger_id: str) -> str
 
             # Expandable image
             if it.get("image"):
-                img = f'<img src="{it["image"]}" alt="" class="rotated-image expandable-img" onclick="this.classList.toggle(\'expanded\')" />'
+                img = f'<img src="{it["image"]}" alt="" class="rotated-image expandable-img" onclick="handleImageExpand(this)" />'
             else:
                 img = '<div class="image-placeholder">-</div>'
 
@@ -2543,7 +2643,7 @@ def _plotly_pie_json(labels: List[str], values: List[float], title: str) -> Tupl
 def _plotly_stacked_bar_json(
     quarters: List[str], match: List[float], mismatch: List[float], pending: List[float], title: str
 ) -> Tuple[str, str]:
-    """Return (data_json, layout_json) for stacked bar by quarter."""
+    """Return (data_json, layout_json) for stacked bar by quarter (absolute counts)."""
     import json
     data = [
         {"type": "bar", "x": quarters, "y": pending, "name": "Pending Assays", "marker": {"color": "#5d6672"}},
@@ -2557,6 +2657,42 @@ def _plotly_stacked_bar_json(
         "height": 280,
         "autosize": True,
         "xaxis": {"type": "category", "tickangle": -45},
+    }
+    return json.dumps(data), json.dumps(layout)
+
+
+def _plotly_stacked_bar_pct_json(
+    quarters: List[str],
+    match: List[float],
+    mismatch: List[float],
+    pending: List[float],
+    title: str,
+) -> Tuple[str, str]:
+    """Stacked bar by quarter as % of quarter (volume-neutral). Each bar sums to 100%."""
+    import json
+    n = len(quarters)
+    match_pct = [0.0] * n
+    mismatch_pct = [0.0] * n
+    pending_pct = [0.0] * n
+    for i in range(n):
+        total = (match[i] if i < len(match) else 0) + (mismatch[i] if i < len(mismatch) else 0) + (pending[i] if i < len(pending) else 0)
+        if total > 0:
+            match_pct[i] = 100.0 * (match[i] if i < len(match) else 0) / total
+            mismatch_pct[i] = 100.0 * (mismatch[i] if i < len(mismatch) else 0) / total
+            pending_pct[i] = 100.0 * (pending[i] if i < len(pending) else 0) / total
+    data = [
+        {"type": "bar", "x": quarters, "y": pending_pct, "name": "Pending Assays", "marker": {"color": "#5d6672"}},
+        {"type": "bar", "x": quarters, "y": mismatch_pct, "name": "Mismatch", "marker": {"color": "#c9382a"}},
+        {"type": "bar", "x": quarters, "y": match_pct, "name": "Match", "marker": {"color": "#2f7d61"}},
+    ]
+    layout = {
+        "title": {"text": title},
+        "barmode": "stack",
+        "margin": {"t": 40, "b": 60},
+        "height": 280,
+        "autosize": True,
+        "xaxis": {"type": "category", "tickangle": -45},
+        "yaxis": {"title": {"text": "% of quarter"}, "range": [0, 100], "ticksuffix": "%"},
     }
     return json.dumps(data), json.dumps(layout)
 
@@ -2772,15 +2908,15 @@ def _render_html(
     else:
         strat_grouped_data, strat_grouped_layout = "[]", "{}"
 
+    date_from_str = report["meta"].get("date_from") or ""
+    date_to_str = report["meta"].get("date_to") or ""
+    overview_hero_date = f"From: {date_from_str or '-'} To: {date_to_str or '-'}"
     overview_section = f"""
         <section class="tab-panel" data-tab="overview">
-            <div class="panel-header">
-                <h2 data-i18n-fr="Vue d'ensemble" data-i18n-en="Overview">Vue d'ensemble</h2>
-                <div class="header-meta">
-                    <span>{html.escape(report["meta"]["logger"])}</span>
-                    <span>{html.escape(report["meta"].get("date_from") or "")} - {html.escape(report["meta"].get("date_to") or "")}</span>
-                    <span>{html.escape(report["meta"]["generated"])}</span>
-                </div>
+            <div class="overview-hero">
+                <h1 class="overview-hero-title" data-i18n-fr="Revue de logging" data-i18n-en="Logging Review">Logging Review</h1>
+                <p class="overview-hero-logger">{html.escape(report["meta"]["logger"])}</p>
+                <p class="overview-hero-date">{html.escape(overview_hero_date)}</p>
             </div>
             <div class="kpi-grid">
                 <div class="kpi-card">
@@ -2812,22 +2948,15 @@ def _render_html(
                     <div class="kpi-value">{comment_ratio_str}</div>
                 </div>
             </div>
-            <div class="panel-card full-width">
-                <h3 data-i18n-fr="Carte des colliers" data-i18n-en="Collar map">Carte des colliers</h3>
-                {_render_map(report["map"])}
-            </div>
-            <div class="panel-card full-width">
-                <h3 data-i18n-fr="Codes strat: vous vs equipe" data-i18n-en="Strat codes: you vs team">Codes strat: vous vs equipe</h3>
-                <div id="strat-grouped-bar" class="plotly-chart" data-plotly-data="{html.escape(strat_grouped_data)}" data-plotly-layout="{html.escape(strat_grouped_layout)}"></div>
-            </div>
-            <div class="info-box">
-                <h4 data-i18n-fr="Regle de comparaison" data-i18n-en="Comparison rule">Regle de comparaison</h4>
-                <ul>
-                    <li data-i18n-fr="Une valeur est consideree comme acceptable si elle est a +/-20% de la mediane de l'equipe."
-                        data-i18n-en="A value is considered acceptable if it is within +/-20% of the team median.">
-                        Une valeur est consideree comme acceptable si elle est a +/-20% de la mediane de l'equipe.
-                    </li>
-                </ul>
+            <div class="two-panel overview-two-panel">
+                <div class="panel-card">
+                    <h3 data-i18n-fr="Carte des colliers" data-i18n-en="Collar map">Carte des colliers</h3>
+                    {_render_map(report["map"])}
+                </div>
+                <div class="panel-card">
+                    <h3 data-i18n-fr="Codes strat: vous vs equipe" data-i18n-en="Strat codes: you vs team">Codes strat: vous vs equipe</h3>
+                    <div id="strat-grouped-bar" class="plotly-chart" data-plotly-data="{html.escape(strat_grouped_data)}" data-plotly-layout="{html.escape(strat_grouped_layout)}"></div>
+                </div>
             </div>
         </section>
     """
@@ -2907,9 +3036,9 @@ def _render_html(
         match_user = q_user.get("Match", pd.Series([0] * len(q_user))).fillna(0).tolist()
         mismatch_user = q_user.get("Mismatch", pd.Series([0] * len(q_user))).fillna(0).tolist()
         pending_user = q_user.get("Pending Assays", pd.Series([0] * len(q_user))).fillna(0).tolist()
-        mineral_bar_user_data, mineral_bar_user_layout = _plotly_stacked_bar_json(
+        mineral_bar_user_data, mineral_bar_user_layout = _plotly_stacked_bar_pct_json(
             quarters_user, match_user, mismatch_user, pending_user,
-            "Votre precision par trimestre"
+            "Votre precision par trimestre (% of quarter)"
         )
     else:
         mineral_bar_user_data, mineral_bar_user_layout = "[]", "{}"
@@ -2937,9 +3066,9 @@ def _render_html(
         match_team = q_team.get("Match", pd.Series([0] * len(q_team))).fillna(0).tolist()
         mismatch_team = q_team.get("Mismatch", pd.Series([0] * len(q_team))).fillna(0).tolist()
         pending_team = q_team.get("Pending Assays", pd.Series([0] * len(q_team))).fillna(0).tolist()
-        mineral_bar_team_data, mineral_bar_team_layout = _plotly_stacked_bar_json(
+        mineral_bar_team_data, mineral_bar_team_layout = _plotly_stacked_bar_pct_json(
             quarters_team, match_team, mismatch_team, pending_team,
-            "Equipe par trimestre"
+            "Equipe par trimestre (% of quarter)"
         )
     else:
         mineral_bar_team_data, mineral_bar_team_layout = "[]", "{}"
@@ -2988,11 +3117,23 @@ def _render_html(
                         data-i18n-html-en="<strong>Unmineralised (assay)</strong> = Does not meet mineralisation criteria">
                         <strong>Unmineralised (assay)</strong> = Does not meet mineralisation criteria
                     </li>
+                    <li data-i18n-html-fr="<strong>Graphiques par trimestre</strong> = Chaque barre represente 100% du trimestre (Match + Mismatch + Pending). Volume neutre."
+                        data-i18n-html-en="<strong>Quarterly charts</strong> = Each bar is 100% of that quarter (Match + Mismatch + Pending). Volume-neutral.">
+                        <strong>Quarterly charts</strong> = Each bar is 100% of that quarter (Match + Mismatch + Pending). Volume-neutral.
+                    </li>
                 </ul>
             </div>
             <div class="evidence-section">
-                <h3 data-i18n-fr="Tableau de preuves - Ecarts de mineralisation" data-i18n-en="Evidence Table - Mineralisation Mismatches">Tableau de preuves - Ecarts ({len(report["mineralisation"].get("mismatch_intervals", []))} intervalles)</h3>
-                {_render_mineralisation_evidence_table(report["mineralisation"].get("mismatch_intervals", []), logger_id)}
+                <h3 data-i18n-fr="Tableau de preuves - Ecarts de mineralisation" data-i18n-en="Evidence Table - Mineralisation Mismatches">Evidence Table - Mineralisation Mismatches</h3>
+                <p class="mineral-mismatch-stats">
+                    <span data-i18n-fr="Mismatches:" data-i18n-en="Mismatches:">Mismatches:</span>
+                    <strong>{report["mineralisation"].get("mismatch_low_count", 0)}</strong>
+                    <span data-i18n-fr="Low (borderline)" data-i18n-en="Low (borderline)">Low (borderline)</span>,
+                    <strong>{report["mineralisation"].get("mismatch_high_count", 0)}</strong>
+                    <span data-i18n-fr="High" data-i18n-en="High">High</span>
+                    <span class="stats-note" data-i18n-fr="(borderline = assay suggests Leached; ne pas penaliser les erreurs limite)" data-i18n-en="(borderline = assay suggests Leached; do not penalise borderline errors)">(borderline = assay suggests Leached; do not penalise borderline errors)</span>
+                </p>
+                {_render_mineralisation_evidence_table(sorted(report["mineralisation"].get("mismatch_intervals", []), key=lambda x: 0 if x.get("significance") == "High" else 1), logger_id)}
             </div>
             <div class="notes-box">
                 <label data-i18n-fr="Notes du reviseur" data-i18n-en="Reviewer notes">Notes du reviseur</label>
@@ -3038,17 +3179,15 @@ def _render_html(
                 <h2 data-i18n-fr="Zonation de profil" data-i18n-en="Profile zonation">Zonation de profil</h2>
             </div>
             {zonation_data_warning}
-            <div class="two-panel">
-                <div class="panel-card">
-                    <h3 data-i18n-fr="Precision par categorie (Correct vs Incorrect)" data-i18n-en="Accuracy by category">Precision par categorie</h3>
-                    <div id="zonation-bar" class="plotly-chart" data-plotly-data="{html.escape(zonation_bar_data)}" data-plotly-layout="{html.escape(zonation_bar_layout)}"></div>
-                </div>
-                <div class="panel-card">
-                    <h3 data-i18n-fr="Attribution (devrait etre X)" data-i18n-en="Attribution (should be X)">Attribution (should be X)</h3>
-                    {zonation_based_on_note}
-                    <div class="intervals-section">
-                        {zonation_evidence_html}
-                    </div>
+            <div class="panel-card">
+                <h3 data-i18n-fr="Precision par categorie (Correct vs Incorrect)" data-i18n-en="Accuracy by category">Precision par categorie</h3>
+                <div id="zonation-bar" class="plotly-chart" data-plotly-data="{html.escape(zonation_bar_data)}" data-plotly-layout="{html.escape(zonation_bar_layout)}"></div>
+            </div>
+            <div class="evidence-section">
+                <h3 data-i18n-fr="Tableau de preuves" data-i18n-en="Evidence Table">Evidence Table</h3>
+                <p class="zonation-based-on-note" data-i18n-en="Based on mineral logging codes only." data-i18n-fr="Basé sur les codes de minéraux uniquement.">Based on mineral logging codes only.</p>
+                <div class="intervals-section">
+                    {zonation_evidence_html}
                 </div>
             </div>
             <div class="info-box rules-box">
@@ -3332,6 +3471,29 @@ def _render_html(
             flex: 1;
             padding: 24px;
         }}
+        .overview-hero {{
+            text-align: center;
+            margin-bottom: 28px;
+            padding: 24px 16px;
+            border-bottom: 2px solid var(--border);
+        }}
+        .overview-hero-title {{
+            margin: 0 0 8px 0;
+            font-size: 32px;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+        }}
+        .overview-hero-logger {{
+            margin: 0 0 4px 0;
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--accent);
+        }}
+        .overview-hero-date {{
+            margin: 0;
+            font-size: 16px;
+            color: var(--muted);
+        }}
         .panel-header {{
             display: flex;
             justify-content: space-between;
@@ -3375,6 +3537,29 @@ def _render_html(
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             gap: 16px;
+        }}
+        .overview-two-panel {{
+            min-height: 65vh;
+            align-items: stretch;
+        }}
+        .overview-two-panel .panel-card {{
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }}
+        .overview-two-panel .map-container {{
+            flex: 1;
+            min-height: 400px;
+        }}
+        .overview-two-panel .map-container-leaflet {{
+            min-height: 400px;
+        }}
+        .overview-two-panel .map-leaflet-viewport {{
+            min-height: 380px;
+        }}
+        .overview-two-panel .plotly-chart {{
+            flex: 1;
+            min-height: 400px;
         }}
         .panel-card {{
             background: var(--panel);
@@ -3633,6 +3818,10 @@ def _render_html(
         .geochem-cell {{ font-size: 12px; color: var(--muted); }}
         .reason-cell {{ max-width: 280px; font-size: 12px; }}
         .plotly-chart {{ min-height: 260px; }}
+        .mineral-mismatch-stats {{ margin: 8px 0 12px 0; font-size: 14px; color: var(--muted); }}
+        .mineral-mismatch-stats .stats-note {{ font-style: italic; margin-left: 8px; }}
+        .significance-low {{ background: #e8f4ea; color: #1b5e20; }}
+        .significance-high {{ background: #ffebee; color: #b71c1c; }}
         .charts-panel .panel-card {{ min-width: 320px; }}
         /* Compact table styles for fines and evidence tables */
         .compact-table th, .compact-table td {{
@@ -3700,10 +3889,12 @@ def _render_html(
             padding: 2px !important;
         }}
         .image-cell-compact img {{
-            width: 60px;
-            height: auto;
+            width: 80px;
+            height: 50px;
+            object-fit: cover;
             border-radius: 4px;
             border: 1px solid var(--border);
+            transform: none;
         }}
         /* Evidence section */
         .evidence-section {{
@@ -4162,6 +4353,31 @@ def _render_html(
         if (printBtn) {{
             printBtn.addEventListener('click', printReport);
         }}
+
+        // Image expansion handler - ensures only one image is expanded at a time
+        function handleImageExpand(img) {{
+            const wasExpanded = img.classList.contains('expanded');
+            // Close all expanded images first
+            document.querySelectorAll('.expandable-img.expanded').forEach(function(other) {{
+                other.classList.remove('expanded');
+            }});
+            // Toggle the clicked image (if it wasn't already expanded, expand it)
+            if (!wasExpanded) {{
+                img.classList.add('expanded');
+            }}
+        }}
+
+        // Close expanded images when clicking outside
+        document.addEventListener('click', function(e) {{
+            // If clicking on an expandable image, let the onclick handler manage it
+            if (e.target.classList.contains('expandable-img')) {{
+                return;
+            }}
+            // Otherwise, close all expanded images
+            document.querySelectorAll('.expandable-img.expanded').forEach(function(img) {{
+                img.classList.remove('expanded');
+            }});
+        }});
 
         // Sortable table functionality
         function initSortableTables() {{

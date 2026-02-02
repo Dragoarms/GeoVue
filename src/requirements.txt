@@ -11,3 +11,4 @@ tomli==2.2.1
 structlog>=24.4.0
 tkcalendar==1.6.1
 wordcloud>=1.9.0
+pyproj>=3.0.0

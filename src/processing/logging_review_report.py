@@ -399,6 +399,20 @@ def resolve_chemistry_columns(df: pd.DataFrame) -> Dict[str, str]:
     return resolved
 
 
+def _dataframe_has_collar_columns(df: pd.DataFrame) -> bool:
+    """Return True if df has hole-id and east/north-like columns (for map)."""
+    if df is None or df.empty or not hasattr(df, "columns"):
+        return False
+    resolver = ColumnResolver(df)
+    hole_col = resolver.get("hole_id")
+    cols_lower = {c.lower(): c for c in df.columns}
+    east_aliases = ["easting", "east", "utm_e", "e", "x", "grid_e", "grid_easting"]
+    north_aliases = ["northing", "north", "utm_n", "n", "y", "grid_n", "grid_northing"]
+    has_east = any(a in cols_lower for a in east_aliases)
+    has_north = any(a in cols_lower for a in north_aliases)
+    return bool(hole_col and has_east and has_north)
+
+
 def get_collar_dataframe(data_coordinator) -> pd.DataFrame:
     if not data_coordinator or not data_coordinator.is_initialized:
         return pd.DataFrame()
@@ -410,6 +424,11 @@ def get_collar_dataframe(data_coordinator) -> pd.DataFrame:
             src = geo_store.get_source(source_name)
             if src and src.df is not None and not src.df.empty:
                 return src.df.copy()
+    # Fallback: use any source that has collar-like columns (hole id + east/north)
+    for source_name in geo_store.list_sources():
+        src = geo_store.get_source(source_name)
+        if src and src.df is not None and not src.df.empty and _dataframe_has_collar_columns(src.df):
+            return src.df.copy()
     return pd.DataFrame()
 
 
