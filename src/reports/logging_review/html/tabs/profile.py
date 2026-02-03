@@ -2,7 +2,7 @@
 import html
 from typing import Any, Dict
 
-from ..charts import _plotly_zonation_bar_json
+from ..charts import _plotly_zonation_bar_pct_json
 from ..tables import _render_zonation_evidence_table
 
 
@@ -12,14 +12,22 @@ def render_profile_section(report: Dict[str, Any], logger_id: str) -> str:
     z_cats = ["Un", "Le", "De", "Hy", "Pr"]
     z_correct = [pz.get("correct_counts", {}).get(c, 0) for c in z_cats]
     z_mismatch = [pz.get("mismatch_counts", {}).get(c, 0) for c in z_cats]
+    z_correct_team = [pz.get("correct_counts_team", {}).get(c, 0) for c in z_cats]
+    z_mismatch_team = [pz.get("mismatch_counts_team", {}).get(c, 0) for c in z_cats]
     total_zonation_data = sum(z_correct) + sum(z_mismatch)
     has_zonation_data = total_zonation_data > 0
 
-    zonation_bar_data, zonation_bar_layout = _plotly_zonation_bar_json(
+    zonation_bar_data, zonation_bar_layout = _plotly_zonation_bar_pct_json(
         z_cats,
         z_correct,
         z_mismatch,
-        "Profile Zonation Logging Accuracy by Category",
+        "Logger: Accuracy by category (%)",
+    )
+    zonation_bar_data_team, zonation_bar_layout_team = _plotly_zonation_bar_pct_json(
+        z_cats,
+        z_correct_team,
+        z_mismatch_team,
+        "Team: Accuracy by category (%)",
     )
     zonation_mismatch_rows = pz.get("mismatch_rows", [])
     zonation_evidence_html = _render_zonation_evidence_table(zonation_mismatch_rows, logger_id)
@@ -40,9 +48,15 @@ def render_profile_section(report: Dict[str, Any], logger_id: str) -> str:
                 <h2 data-i18n-fr="Zonation de profil" data-i18n-en="Profile zonation">Zonation de profil</h2>
             </div>
             {zonation_data_warning}
-            <div class="panel-card">
-                <h3 data-i18n-fr="Precision par categorie (Correct vs Incorrect)" data-i18n-en="Accuracy by category">Precision par categorie</h3>
-                <div id="zonation-bar" class="plotly-chart" data-plotly-data="{html.escape(zonation_bar_data)}" data-plotly-layout="{html.escape(zonation_bar_layout)}"></div>
+            <div class="two-panel">
+                <div class="panel-card">
+                    <h3 data-i18n-fr="Precision par categorie (Logger)" data-i18n-en="Accuracy by category (Logger)">Precision par categorie (Logger)</h3>
+                    <div id="zonation-bar" class="plotly-chart" data-plotly-data="{html.escape(zonation_bar_data)}" data-plotly-layout="{html.escape(zonation_bar_layout)}"></div>
+                </div>
+                <div class="panel-card">
+                    <h3 data-i18n-fr="Precision par categorie (Equipe)" data-i18n-en="Accuracy by category (Team)">Precision par categorie (Equipe)</h3>
+                    <div id="zonation-bar-team" class="plotly-chart" data-plotly-data="{html.escape(zonation_bar_data_team)}" data-plotly-layout="{html.escape(zonation_bar_layout_team)}"></div>
+                </div>
             </div>
             <div class="evidence-section">
                 <h3 data-i18n-fr="Tableau de preuves" data-i18n-en="Evidence Table">Evidence Table</h3>

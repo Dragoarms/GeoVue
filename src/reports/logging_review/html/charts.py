@@ -149,6 +149,38 @@ def _plotly_zonation_bar_json(
     return json.dumps(data), json.dumps(layout)
 
 
+def _plotly_zonation_bar_pct_json(
+    categories: List[str], correct: List[int], incorrect: List[int], title: str
+) -> Tuple[str, str]:
+    """Clustered bar: Correct % vs Incorrect % by zonation category (each category sums to 100%)."""
+    n = len(categories)
+    correct_pct = []
+    incorrect_pct = []
+    for i in range(n):
+        c = correct[i] if i < len(correct) else 0
+        inc = incorrect[i] if i < len(incorrect) else 0
+        total = c + inc
+        if total > 0:
+            correct_pct.append(100.0 * c / total)
+            incorrect_pct.append(100.0 * inc / total)
+        else:
+            correct_pct.append(0.0)
+            incorrect_pct.append(0.0)
+    data = [
+        {"type": "bar", "x": categories, "y": correct_pct, "name": "Correct %", "marker": {"color": "#2f7d61"}},
+        {"type": "bar", "x": categories, "y": incorrect_pct, "name": "Incorrect %", "marker": {"color": "#c9382a"}},
+    ]
+    layout = {
+        "title": {"text": title},
+        "barmode": "group",
+        "margin": {"t": 40, "b": 40},
+        "height": 280,
+        "autosize": True,
+        "yaxis": {"title": {"text": "%"}, "range": [0, 100], "ticksuffix": "%"},
+    }
+    return json.dumps(data), json.dumps(layout)
+
+
 def _plotly_outlier_box_json(
     team_df: pd.DataFrame,
     strat_col: str,
