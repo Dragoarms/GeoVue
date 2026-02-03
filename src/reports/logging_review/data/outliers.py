@@ -163,7 +163,7 @@ def compute_hybrid_outlier_scores(
             top = row.sort_values(ascending=False).head(3).index.tolist()
             top_elements.at[idx] = ", ".join(top)
 
-        result.loc[group.index, "outlier_score"] = (mahal_norm + flag_score).fillna(0.0)
+        result.loc[group.index, "outlier_score"] = np.maximum(mahal_norm, flag_score).fillna(0.0)
         result.loc[group.index, "outlier_reason"] = reason_text.fillna("")
         result.loc[group.index, "outlier_elements"] = top_elements.fillna("")
 
