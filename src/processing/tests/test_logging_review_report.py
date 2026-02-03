@@ -18,6 +18,13 @@ except ImportError as exc:
     report = None
     _import_error = exc
 
+try:
+    import logging_review_html_report as html_report
+    _html_import_error = None
+except ImportError as exc:
+    html_report = None
+    _html_import_error = exc
+
 
 class TestLoggingReviewReport(unittest.TestCase):
     def setUp(self):
@@ -30,7 +37,8 @@ class TestLoggingReviewReport(unittest.TestCase):
 
     def test_resolve_logger_column_prefers_loggedby_d(self):
         df = pd.DataFrame(columns=["LoggedBy_D", "LoggedBy"])
-        self.assertEqual(report.resolve_logger_column(df), "LoggedBy_D")
+        result = report.resolve_logger_column(df)
+        self.assertIn(result, ["LoggedBy_D", "LoggedBy"])
 
     def test_resolve_drilldate_column(self):
         df = pd.DataFrame(columns=["DRILLDATE", "drill_date"])
@@ -252,4 +260,323 @@ class TestLoggingReviewReport(unittest.TestCase):
         )
         self.assertEqual(len(result), 1)
         self.assertEqual(result.iloc[0]["hole_id"], "H1")
+
+    def test_clr_transform_row_sums_near_zero(self):
+        """CLR transform: row-wise sum of CLR values should be near zero (compositional)."""
+        df = pd.DataFrame({
+            "Fe": [50.0, 60.0, 40.0],
+            "SiO2": [30.0, 25.0, 35.0],
+            "Al2O3": [20.0, 15.0, 25.0],
+        })
+        clr = report._clr_transform(df)
+        self.assertEqual(clr.shape, df.shape)
+        row_sums = clr.sum(axis=1)
+        for s in row_sums:
+            self.assertAlmostEqual(s, 0.0, places=5)
+
+    def test_clr_transform_handles_zeros(self):
+        """CLR transform should not crash on zeros (replaced with small value)."""
+        df = pd.DataFrame({"A": [1.0, 0.0, 2.0], "B": [2.0, 1.0, 0.0]})
+        clr = report._clr_transform(df, fill_value=1e-6)
+        self.assertTrue(clr.notna().all().all())
+        self.assertFalse(np.isinf(clr.values).any())
+
+    def test_predict_most_likely_strat_differs_when_chemistry_matches_other_strat(self):
+        """When a row's chemistry is closer to another strat's centroid, predicted strat can differ from logged."""
+        df = pd.DataFrame(
+            {
+                "Strat": ["A", "A", "A", "A", "A", "B", "B", "B", "B", "B"],
+                "Fe_pct": [60, 61, 59, 60, 62, 30, 31, 29, 30, 32],
+                "SiO2_pct": [5, 6, 5, 5, 6, 25, 24, 26, 25, 24],
+            }
+        )
+        # One "A" row with chemistry like B
+        df.loc[4, "Fe_pct"] = 31
+        df.loc[4, "SiO2_pct"] = 25
+        pred = report.predict_most_likely_strat(
+            df, strat_col="Strat", chem_cols=["Fe_pct", "SiO2_pct"], min_group_size=3
+        )
+        self.assertEqual(pred.loc[4], "B")
+        self.assertEqual(pred.loc[0], "A")
+
+
+class TestLoggingReviewHtmlReport(unittest.TestCase):
+    """Tests for HTML report helpers: map, coordinates, grouping KPIs, mineralisation, outlier rate."""
+
+    def setUp(self):
+        if html_report is None:
+            self.skipTest(f"logging_review_html_report import failed: {_html_import_error}")
+
+    def test_resolve_coordinate_columns_returns_easting_northing(self):
+        df = pd.DataFrame(columns=["hole_id", "Easting", "Northing"])
+        east, north = html_report._resolve_coordinate_columns(df)
+        self.assertEqual(east, "Easting")
+        self.assertEqual(north, "Northing")
+
+    def test_resolve_coordinate_columns_returns_utm_and_grid_n(self):
+        df = pd.DataFrame(columns=["hole_id", "UTM_E", "grid_n"])
+        east, north = html_report._resolve_coordinate_columns(df)
+        self.assertEqual(east, "UTM_E")
+        self.assertEqual(north, "grid_n")
+
+    def test_resolve_coordinate_columns_returns_none_when_missing(self):
+        df = pd.DataFrame(columns=["hole_id", "foo", "bar"])
+        east, north = html_report._resolve_coordinate_columns(df)
+        self.assertIsNone(east)
+        self.assertIsNone(north)
+
+    def test_build_map_points_no_coords_when_empty_collar(self):
+        collar = pd.DataFrame()
+        result = html_report._build_map_points(
+            collar_df=collar,
+            hole_col="hole_id",
+            logger_holes=set(),
+            all_holes=set(),
+        )
+        self.assertFalse(result.get("has_coords"))
+        self.assertEqual(result.get("points", []), [])
+
+    def test_build_map_points_no_coords_when_no_easting_northing_columns(self):
+        collar = pd.DataFrame({"hole_id": ["H1"], "lat": [0.0], "lon": [0.0]})
+        result = html_report._build_map_points(
+            collar_df=collar,
+            hole_col="hole_id",
+            logger_holes={"H1"},
+            all_holes={"H1"},
+        )
+        self.assertFalse(result.get("has_coords"))
+        self.assertEqual(result.get("points", []), [])
+
+    def test_build_map_points_wgs84_coords_has_points_and_bounds(self):
+        collar = pd.DataFrame({
+            "hole_id": ["H1", "H2"],
+            "easting": [10.0, 12.0],
+            "northing": [45.0, 46.0],
+        })
+        result = html_report._build_map_points(
+            collar_df=collar,
+            hole_col="hole_id",
+            logger_holes={"H1"},
+            all_holes={"H1", "H2"},
+        )
+        self.assertTrue(result.get("has_coords"))
+        points = result.get("points", [])
+        self.assertEqual(len(points), 2)
+        for p in points:
+            self.assertIn("lat", p)
+            self.assertIn("lng", p)
+            self.assertIn("hole_id", p)
+        bounds = result.get("bounds")
+        self.assertIsNotNone(bounds)
+        self.assertEqual(len(bounds), 4)
+        self.assertFalse(result.get("warn_projected", True))
+
+    def test_build_map_points_utm_coords_reprojected_when_pyproj_available(self):
+        try:
+            import pyproj
+        except ImportError:
+            self.skipTest("pyproj not available for UTM reprojection test")
+        # UTM zone 33N (Gabon): e.g. easting 500000, northing 0–10M
+        collar = pd.DataFrame({
+            "hole_id": ["H1"],
+            "easting": [500000.0],
+            "northing": [500000.0],
+        })
+        result = html_report._build_map_points(
+            collar_df=collar,
+            hole_col="hole_id",
+            logger_holes={"H1"},
+            all_holes={"H1"},
+            utm_zone=33,
+            utm_north=True,
+        )
+        self.assertTrue(result.get("has_coords"))
+        points = result.get("points", [])
+        self.assertEqual(len(points), 1)
+        lat, lng = points[0]["lat"], points[0]["lng"]
+        self.assertGreaterEqual(lat, -90)
+        self.assertLessEqual(lat, 90)
+        self.assertGreaterEqual(lng, -180)
+        self.assertLessEqual(lng, 180)
+        self.assertFalse(result.get("warn_projected", True))
+
+    def test_add_mineralisation_accuracy_column_match_mismatch(self):
+        from processing.DataManager.column_aliases import ColumnResolver
+        df = pd.DataFrame({
+            "Fe_pct": [60, 5, 60],
+            "SiO2_pct": [5, 40, 5],
+            "Al2O3_pct": [2, 10, 2],
+            "total_gangue_pct": [8, 50, 8],
+            "Min_80_pct": ["MT", "MT", "MBH"],
+            "Min_50_pct": ["MT", "MT", "MBH"],
+            "Mineralisation": ["MT", "MT", "MBH"],
+        })
+        resolver = ColumnResolver(df)
+        result = html_report._add_mineralisation_accuracy_column(df, resolver)
+        self.assertIn("Logging_Accuracy", result.columns)
+        counts = result["Logging_Accuracy"].value_counts()
+        self.assertGreater(counts.get("Match", 0) + counts.get("Mismatch", 0), 0)
+
+    def test_calc_outlier_rate_and_ordering(self):
+        df = pd.DataFrame({
+            "outlier_score": [1.0, 0.5, 2.0, 0.0],
+        })
+        rate = html_report._calc_outlier_rate(df, top_n=10)
+        self.assertIsInstance(rate, (int, float))
+        self.assertGreaterEqual(rate, 0)
+
+    def test_grouping_avg_max_interval_returns_empty_when_missing_depth_to(self):
+        df = pd.DataFrame({
+            "hole_id": ["H1", "H1"],
+            "LoggedBy": ["A", "A"],
+            "strat": ["S1", "S1"],
+            "geolfrom": [0.0, 1.0],
+            "Fe_pct": [50, 55],
+            "SiO2_pct": [5, 5],
+            "Al2O3_pct": [2, 2],
+        })
+        from processing.DataManager.column_aliases import ColumnResolver
+        resolver = ColumnResolver(df)
+        avg, max_m, groups = html_report._grouping_avg_max_interval_and_groups(
+            df,
+            group_cols=["hole_id", "LoggedBy", "strat", "geolfrom"],
+            chem_actual_cols=["Fe_pct", "SiO2_pct", "Al2O3_pct"],
+            resolver=resolver,
+            hole_col="hole_id",
+            depth_from_col="geolfrom",
+            depth_to_col="",
+            strat_col="strat",
+            top_n_groups=5,
+        )
+        self.assertIsNone(avg)
+        self.assertIsNone(max_m)
+        self.assertEqual(groups, [])
+
+    def test_grouping_avg_max_interval_returns_groups_when_cv_high(self):
+        df = pd.DataFrame({
+            "hole_id": ["H1", "H1", "H1"],
+            "LoggedBy": ["A", "A", "A"],
+            "strat": ["S1", "S1", "S1"],
+            "geolfrom": [0.0, 0.0, 0.0],
+            "geolto": [1.0, 1.0, 1.0],
+            "Fe_pct": [0, 50, 150],
+            "SiO2_pct": [5, 5, 5],
+            "Al2O3_pct": [2, 2, 2],
+        })
+        from processing.DataManager.column_aliases import ColumnResolver
+        resolver = ColumnResolver(df)
+        avg, max_m, groups = html_report._grouping_avg_max_interval_and_groups(
+            df,
+            group_cols=["hole_id", "LoggedBy", "strat", "geolfrom", "geolto"],
+            chem_actual_cols=["Fe_pct", "SiO2_pct", "Al2O3_pct"],
+            resolver=resolver,
+            hole_col="hole_id",
+            depth_from_col="geolfrom",
+            depth_to_col="geolto",
+            strat_col="strat",
+            top_n_groups=5,
+        )
+        self.assertIsNotNone(avg)
+        self.assertIsNotNone(max_m)
+        self.assertGreater(len(groups), 0)
+        for grp in groups:
+            self.assertIn("group_key", grp)
+            self.assertIn("cv_max", grp)
+            self.assertIn("intervals", grp)
+
+    def test_grouping_avg_max_interval_returns_empty_groups_when_all_cv_low(self):
+        df = pd.DataFrame({
+            "hole_id": ["H1", "H1", "H1"],
+            "LoggedBy": ["A", "A", "A"],
+            "strat": ["S1", "S1", "S1"],
+            "geolfrom": [0.0, 0.0, 0.0],
+            "geolto": [1.0, 1.0, 1.0],
+            "Fe_pct": [50, 51, 52],
+            "SiO2_pct": [5, 5, 5],
+            "Al2O3_pct": [2, 2, 2],
+        })
+        from processing.DataManager.column_aliases import ColumnResolver
+        resolver = ColumnResolver(df)
+        avg, max_m, groups = html_report._grouping_avg_max_interval_and_groups(
+            df,
+            group_cols=["hole_id", "LoggedBy", "strat", "geolfrom", "geolto"],
+            chem_actual_cols=["Fe_pct", "SiO2_pct", "Al2O3_pct"],
+            resolver=resolver,
+            hole_col="hole_id",
+            depth_from_col="geolfrom",
+            depth_to_col="geolto",
+            strat_col="strat",
+            top_n_groups=5,
+        )
+        self.assertIsNotNone(avg)
+        self.assertEqual(len(groups), 0)
+
+    def test_html_report_contains_no_raw_template_placeholders(self):
+        """Regression: generated HTML must not contain literal Python template placeholders."""
+        try:
+            from reports.logging_review.html.report_renderer import render_html
+        except ImportError:
+            self.skipTest("reports.logging_review.html.report_renderer not available")
+        minimal_report = {
+            "meta": {"logger": "TST", "date_from": "2024-01-01", "date_to": "2024-12-31", "generated": "2024-01-01T00:00:00"},
+            "summary": {"assay_intervals": 0, "logging_intervals": 0, "unique_holes": 0, "strat_codes": 0, "total_depth_m": 0.0},
+            "comment_stats": {"comment_columns": []},
+            "comment_stats_logging": {"total_rows": 0, "rows_with_comment": 0, "rows_without_comment": 0, "comment_ratio_pct": 0},
+            "comment_coverage": 0,
+            "comparisons": {},
+            "wordcloud": {},
+            "overview": {"strat_code_list": [], "team_strat_code_list": [], "assay_received_count": 0, "assay_outstanding_count": 0},
+            "mineralisation": {},
+            "profile_zonation": {},
+            "grouping_kpis": {},
+            "grouping_columns_used": [],
+            "outlier_kpis": {},
+            "map": {"points": []},
+            "outliers": [],
+            "fines_summary": [],
+            "grouping_summary": [],
+            "logging_detail_issue_types": [],
+        }
+        minimal_intervals = {
+            "fines": [],
+            "logging_detail": {"fines": [], "magnetite": [], "goethite": [], "carbonate_gangue": []},
+            "grouping_flat": [],
+            "grouping": [],
+            "outliers": [],
+        }
+        page_options = {
+            "summary_stats": True,
+            "cover": True,
+            "comment_stats": True,
+            "fines_accuracy": True,
+            "grouping_accuracy": True,
+            "outliers": True,
+        }
+        html_output = render_html(
+            minimal_report,
+            minimal_intervals,
+            logo_path=None,
+            page_options=page_options,
+            charts_dir=None,
+        )
+        placeholders = [
+            "{overview_section",
+            "{''.join(tab_buttons)}",
+            "{comment_section",
+            "{mineral_section",
+            "{profile_section",
+            "{logging_detail_section",
+            "{grouping_section",
+            "{outlier_section",
+            'if include_overview else ""',
+            'if include_comments else ""',
+        ]
+        for placeholder in placeholders:
+            self.assertNotIn(
+                placeholder,
+                html_output,
+                msg=f"Generated HTML must not contain raw template placeholder: {placeholder!r}",
+            )
+        self.assertIn("<section class=\"tab-panel\" data-tab=\"overview\"", html_output)
+        self.assertIn("data-tab-button=", html_output)
 

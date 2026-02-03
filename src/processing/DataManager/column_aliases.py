@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 COLUMN_ALIASES: Dict[str, List[str]] = {
     # === Key columns ===
     "hole_id": ["holeid", "hole_id", "bhid", "drillhole_id", "dhid", "hole"],
-    "depth_from": ["sampfrom", "geolfrom", "from", "depth_from", "from_depth", "interval_from"],
-    "depth_to": ["sampto", "geolto", "to", "depth_to", "to_depth", "interval_to"],
+    "depth_from": ["sampfrom", "geolfrom", "geology_from", "logging_from", "rc_from", "depth_from_geol", "from", "depth_from", "from_depth", "interval_from"],
+    "depth_to": ["sampto", "geolto", "geology_to", "logging_to", "rc_to", "depth_to_geol", "to", "depth_to", "to_depth", "interval_to"],
 
     # === Survey columns (drillhole deviation) ===
     "survey_depth": [
@@ -94,6 +94,11 @@ COLUMN_ALIASES: Dict[str, List[str]] = {
     "min_sh_pct": ["min_sh_pct", "min_shale_pct", "shale_pct"],
     "min_si_pct": ["min_si_pct", "min_silica_pct", "silica_logged_pct"],
     "min_qz_pct": ["min_qz_pct", "min_quartz_pct", "quartz_pct"],
+
+    # === Collar / project (logging review report) ===
+    "project_code": ["project_code", "projectcode", "project", "project_d", "projcode", "proj", "tenement", "prospect", "prospect_d"],
+    "easting": ["easting", "east", "utm_e", "e", "x", "grid_e", "grid_easting"],
+    "northing": ["northing", "north", "utm_n", "n", "y", "grid_n", "grid_northing"],
 }
 
 

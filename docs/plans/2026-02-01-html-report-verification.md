@@ -1,3 +1,5 @@
+**Status: Implemented**
+
 # HTML Logging Review Report – Verification Checklist
 
 Verification against `2026-02-01-html-report-graph-migration.md`.  

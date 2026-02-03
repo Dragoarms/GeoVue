@@ -1,4 +1,4 @@
-# python "c:/Users/georg/OneDrive/Home Python/GeoVue 26_01_27/scripts/preview_logging_review_report.py" "C:/Users/georg/Downloads/reports/New folder (4)"
+# python "c:/Users/georg/OneDrive/Home Python/GeoVue 26_01_27/scripts/preview_logging_review_report.py"
 
 """
 Regenerate the Logging Review HTML report from exported _datasets CSVs and optionally open it.
@@ -8,15 +8,18 @@ full data prep. After generating a report once from GeoVue (which creates output
 run this script to regenerate HTML from those CSVs and open it in your browser.
 
 Usage:
-  # From repo root, with venv active:
+  # From repo root, with venv active (no args = use default paths):
+  python scripts/preview_logging_review_report.py
   python scripts/preview_logging_review_report.py <output_dir> [--collar <collar.csv>] [--open]
 
-  output_dir   Path to folder containing _datasets/ (e.g. C:/Users/.../reports/New folder (4))
+  output_dir   Optional. Path to folder containing _datasets/ (or _datasets itself). If omitted,
+               uses default datasets and output paths.
   --collar     Optional path to collar CSV (hole id + easting/northing) for map
   --open       Open the generated HTML in the default browser (default: True)
   --no-open    Do not open the browser
 
 Example:
+  python scripts/preview_logging_review_report.py
   python scripts/preview_logging_review_report.py "C:/Users/georg/Downloads/reports/New folder (4)" --collar collars.csv
 """
 from __future__ import annotations
@@ -31,6 +34,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(REPO_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
+
+# Default paths when run with no arguments
+DEFAULT_DATASETS_DIR = r"C:\Users\georg\Downloads\reports\_datasets"
+DEFAULT_OUTPUT_DIR = r"C:\Users\georg\Downloads\reports\outputs"
 
 import pandas as pd
 
@@ -111,7 +118,9 @@ def main() -> int:
     parser.add_argument(
         "output_dir",
         type=str,
-        help="Path to folder containing _datasets/ (e.g. report output folder)",
+        nargs="?",
+        default=None,
+        help="Path to folder containing _datasets/ (optional; defaults to predefined datasets and output paths)",
     )
     parser.add_argument(
         "--collar",
@@ -123,18 +132,25 @@ def main() -> int:
     parser.add_argument("--no-open", dest="open_browser", action="store_false")
     args = parser.parse_args()
 
-    input_path = os.path.abspath(args.output_dir)
-    
-    # Allow user to provide either the _datasets folder or its parent
-    if os.path.basename(input_path) == "_datasets":
-        datasets_dir = input_path
-        output_dir = os.path.dirname(input_path)
-    elif os.path.isdir(os.path.join(input_path, "_datasets")):
-        datasets_dir = os.path.join(input_path, "_datasets")
-        output_dir = input_path
+    if args.output_dir is None:
+        datasets_dir = os.path.abspath(DEFAULT_DATASETS_DIR)
+        output_dir = os.path.abspath(DEFAULT_OUTPUT_DIR)
+        if not os.path.isdir(datasets_dir):
+            print(f"Error: default datasets dir not found: {datasets_dir}", file=sys.stderr)
+            return 1
+        os.makedirs(output_dir, exist_ok=True)
     else:
-        print(f"Error: _datasets not found at {input_path} or {os.path.join(input_path, '_datasets')}", file=sys.stderr)
-        return 1
+        input_path = os.path.abspath(args.output_dir)
+        # Allow user to provide either the _datasets folder or its parent
+        if os.path.basename(input_path) == "_datasets":
+            datasets_dir = input_path
+            output_dir = os.path.dirname(input_path)
+        elif os.path.isdir(os.path.join(input_path, "_datasets")):
+            datasets_dir = os.path.join(input_path, "_datasets")
+            output_dir = input_path
+        else:
+            print(f"Error: _datasets not found at {input_path} or {os.path.join(input_path, '_datasets')}", file=sys.stderr)
+            return 1
 
     try:
         logging_df, merged_df, full_team_df = load_datasets(datasets_dir)

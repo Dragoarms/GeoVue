@@ -10,11 +10,9 @@ import pandas as pd
 from gui.dialog_helper import DialogHelper
 from gui.widgets.themed_date_entry import create_themed_date_entry
 from processing.logging_review_report import (
-    filter_dataframe_by_logger_and_date,
     generate_logger_reports,
+    get_logger_list_and_date_options,
     prepare_logging_review_data,
-    resolve_drilldate_column,
-    resolve_logger_column,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,10 +62,10 @@ class LoggingReviewReportDialog:
         self._prep_queue: queue.Queue = queue.Queue()
         self._logger_counts: Dict[str, Tuple[int, int, int]] = {}  # logger -> (assays, logging, holes)
         self._tooltip_window: Optional[tk.Toplevel] = None
+        self._light_options: Optional[Dict[str, Any]] = None  # logger list + date options (no full prep)
 
         self._build_ui()
-        self._load_defaults_from_data()
-        self._start_prep()
+        self._load_light_options()
         self.dialog.update_idletasks()
         DialogHelper.center_dialog(
             self.dialog,
@@ -86,10 +84,9 @@ class LoggingReviewReportDialog:
         if fonts:
             normal_font = fonts.get("normal") or fonts.get("entry") or normal_font
 
-        # Progress (shown while loading data)
+        # Progress (shown only when generating report)
         self.progress_frame = ttk.Frame(container)
-        self.progress_frame.pack(fill=tk.X, pady=(0, 8))
-        self.progress_label = ttk.Label(self.progress_frame, text=self.t("Loading data..."))
+        self.progress_label = ttk.Label(self.progress_frame, text=self.t("Preparing data..."))
         self.progress_label.pack(anchor=tk.W)
         self.progress_bar = ttk.Progressbar(
             self.progress_frame, mode="indeterminate", length=300
@@ -253,125 +250,22 @@ class LoggingReviewReportDialog:
         """Select all loggers in the list (generates one report per logger in chosen period)."""
         self.logger_listbox.selection_set(0, tk.END)
 
-    def _load_defaults_from_data(self) -> None:
-        """Set default date range and logger list. Logger list is replaced after prep."""
-        if not self.data_coordinator:
-            return
-        geo_store = self.data_coordinator.geological_store
-        if not geo_store:
-            return
-        # Logger list from sources (used if prep is skipped or until prep completes)
-        logger_values = []
-        for source_name in geo_store.list_sources():
-            src = geo_store.get_source(source_name)
-            if not src or src.df is None or src.df.empty:
-                continue
-            logger_col = resolve_logger_column(src.df)
-            if logger_col:
-                logger_values.extend(src.df[logger_col].dropna().astype(str).unique().tolist())
-        logger_values = sorted({v for v in logger_values if v.strip()})
-        if logger_values:
-            for value in logger_values:
-                self.logger_listbox.insert(tk.END, value)
-            self.logger_listbox.selection_set(0)
-        # Date range from collar
-        collar_df = None
-        for source_name in ["excollar", "collar", "collars"]:
-            if source_name in geo_store.list_sources():
-                src = geo_store.get_source(source_name)
-                if src and src.df is not None and not src.df.empty:
-                    collar_df = src.df.copy()
-                    break
-        if collar_df is not None:
-            date_col = resolve_drilldate_column(collar_df)
-            if date_col:
-                dates = pd.to_datetime(collar_df[date_col], errors="coerce").dropna()
-                if not dates.empty:
-                    self.date_from_var.set(dates.min().date().isoformat())
-                    self.date_to_var.set(dates.max().date().isoformat())
-
-    def _start_prep(self) -> None:
-        """Start background data prep; poll queue to update progress."""
+    def _load_light_options(self) -> None:
+        """Load logger list and date range only (no heavy merge). Full prep runs on Generate."""
         if not self.data_coordinator or not self.data_coordinator.is_initialized:
-            self.progress_frame.pack_forget()
             return
-
-        def run_prep() -> None:
-            try:
-                def progress_cb(msg: str, pct: float) -> None:
-                    self._prep_queue.put(("progress", msg, pct))
-
-                data = prepare_logging_review_data(
-                    self.data_coordinator, progress_callback=progress_cb
-                )
-                self._prep_queue.put(("done", data))
-            except Exception as e:
-                self._prep_queue.put(("error", str(e)))
-
-        self.progress_bar.start(10)
-        threading.Thread(target=run_prep, daemon=True).start()
-        self._poll_prep()
-
-    def _poll_prep(self) -> None:
-        """Process prep queue and update UI."""
-        try:
-            while True:
-                item = self._prep_queue.get_nowait()
-                if item[0] == "progress":
-                    _, msg, pct = item
-                    self.progress_label.config(text=msg)
-                elif item[0] == "done":
-                    self._prep_cache = item[1]
-                    self.progress_bar.stop()
-                    self.progress_frame.pack_forget()
-                    self._refresh_logger_list_from_cache()
-                    return
-                elif item[0] == "error":
-                    self.progress_bar.stop()
-                    self.progress_label.config(text=self.t("Load failed"))
-                    logger.exception("Prep failed: %s", item[1])
-                    return
-        except queue.Empty:
-            pass
-        self.dialog.after(200, self._poll_prep)
-
-    def _refresh_logger_list_from_cache(self) -> None:
-        """Populate logger list from cache and compute per-logger counts for tooltip."""
-        if not self._prep_cache:
-            return
-        self.logger_listbox.delete(0, tk.END)
-        logger_values = self._prep_cache.get("logger_values") or []
-        date_from = self.date_from_var.get().strip() or None
-        date_to = self.date_to_var.get().strip() or None
-        drilldate_col = self._prep_cache.get("drilldate_col") or ""
-        logger_col = self._prep_cache["logger_col"]
-        hole_col = self._prep_cache["hole_col"]
-        merged_df = filter_dataframe_by_logger_and_date(
-            self._prep_cache["merged_df"],
-            logger_col=logger_col,
-            date_col=drilldate_col,
-            logger_values=None,
-            date_from=date_from,
-            date_to=date_to,
-        )
-        logging_df = filter_dataframe_by_logger_and_date(
-            self._prep_cache["logging_df"],
-            logger_col=logger_col,
-            date_col=drilldate_col,
-            logger_values=None,
-            date_from=date_from,
-            date_to=date_to,
-        )
-        self._logger_counts = {}
-        for lv in logger_values:
-            m = merged_df[merged_df[logger_col].astype(str) == str(lv)]
-            lg = logging_df[logging_df[logger_col].astype(str) == str(lv)]
-            holes = m[hole_col].nunique() if hole_col in m.columns else 0
-            self._logger_counts[lv] = (len(m), len(lg), int(holes))
+        self._light_options = get_logger_list_and_date_options(self.data_coordinator)
+        logger_values = self._light_options.get("logger_values") or []
         for value in logger_values:
             self.logger_listbox.insert(tk.END, value)
         if logger_values:
             self.logger_listbox.selection_set(0)
+        date_from = self._light_options.get("date_from") or ""
+        date_to = self._light_options.get("date_to") or ""
+        if date_from:
+            self.date_from_var.set(date_from)
+        if date_to:
+            self.date_to_var.set(date_to)
 
     def _on_logger_motion(self, event: tk.Event) -> None:
         """Show tooltip with assays / logging / holes for hovered logger."""
@@ -433,6 +327,59 @@ class LoggingReviewReportDialog:
             return
         page_options = {key: var.get() for key, var in self.page_vars.items()}
 
+        def run_prep_then_generate() -> None:
+            try:
+                def progress_cb(msg: str, pct: float) -> None:
+                    self._prep_queue.put(("progress", msg, pct))
+
+                prepped = prepare_logging_review_data(
+                    self.data_coordinator, progress_callback=progress_cb
+                )
+                self._prep_queue.put(("prep_done", prepped))
+            except Exception as e:
+                self._prep_queue.put(("error", str(e)))
+
+        self.progress_frame.pack(fill=tk.X, pady=(0, 8))
+        self.progress_label.config(text=self.t("Preparing data..."))
+        self.progress_bar.start(10)
+        self._prep_cache = None
+        threading.Thread(target=run_prep_then_generate, daemon=True).start()
+        self._poll_then_generate(logger_values, page_options)
+
+    def _poll_then_generate(
+        self, logger_values: List[str], page_options: Dict[str, bool]
+    ) -> None:
+        """Poll prep queue; when done run generate_logger_reports and show result."""
+        try:
+            while True:
+                item = self._prep_queue.get_nowait()
+                if item[0] == "progress":
+                    _, msg, _pct = item
+                    self.progress_label.config(text=msg)
+                elif item[0] == "prep_done":
+                    self._prep_cache = item[1]
+                    self.progress_bar.stop()
+                    self.progress_frame.pack_forget()
+                    self._do_generate(logger_values, page_options)
+                    return
+                elif item[0] == "error":
+                    self.progress_bar.stop()
+                    self.progress_frame.pack_forget()
+                    DialogHelper.show_message(
+                        self.dialog,
+                        self.t("Report Error"),
+                        self.t("Failed to prepare data.") + "\n" + str(item[1]),
+                        message_type="error",
+                    )
+                    return
+        except queue.Empty:
+            pass
+        self.dialog.after(200, lambda: self._poll_then_generate(logger_values, page_options))
+
+    def _do_generate(
+        self, logger_values: List[str], page_options: Dict[str, bool]
+    ) -> None:
+        """Run report generation with current prepped_data and show result."""
         try:
             output_files, skipped_loggers = generate_logger_reports(
                 data_coordinator=self.data_coordinator,
