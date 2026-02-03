@@ -135,7 +135,7 @@ def compute_hybrid_outlier_scores(
         else:
             mahal_norm = mahal / mahal_p95
 
-        # IQR outlier flags and per-element severity
+        # IQR outlier flags — use max severity across elements, not sum
         flag_score = pd.Series(0.0, index=group.index)
         reason_text = pd.Series("", index=group.index)
         top_elements = pd.Series("", index=group.index)
@@ -149,9 +149,9 @@ def compute_hybrid_outlier_scores(
             lower = q1 - 1.5 * iqr
             upper = q3 + 1.5 * iqr
             z = _robust_scale(series)
-            is_outlier = (series < lower) | (series > upper)
-            flag_score[is_outlier] += z[is_outlier].abs()
-            for idx in series[is_outlier].index:
+            is_outlier_mask = (series < lower) | (series > upper)
+            flag_score = flag_score.combine(z.abs().where(is_outlier_mask, 0.0), max)
+            for idx in series[is_outlier_mask].index:
                 current = reason_text.at[idx]
                 direction = "high" if series.at[idx] > upper else "low"
                 reason = f"{col} {direction} (value {series.at[idx]:.2f}, IQR {q1:.2f}-{q3:.2f})"
