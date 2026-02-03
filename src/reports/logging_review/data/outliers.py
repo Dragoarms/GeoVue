@@ -127,11 +127,13 @@ def compute_hybrid_outlier_scores(
             mahal.append(float(np.sqrt(vec.T @ sub_cov @ vec)))
 
         mahal = pd.Series(mahal, index=group.index)
-        mahal_iqr = mahal.quantile(0.75) - mahal.quantile(0.25)
-        if mahal_iqr == 0:
+        # Normalize by 95th percentile so scores are comparable across strats.
+        # Score of 1.0 = 95th percentile, >1 = more extreme (no median centering).
+        mahal_p95 = mahal.quantile(0.95)
+        if mahal_p95 == 0 or np.isnan(mahal_p95):
             mahal_norm = mahal * 0.0
         else:
-            mahal_norm = (mahal - mahal.median()) / (mahal_iqr / 1.349)
+            mahal_norm = mahal / mahal_p95
 
         # IQR outlier flags and per-element severity
         flag_score = pd.Series(0.0, index=group.index)
