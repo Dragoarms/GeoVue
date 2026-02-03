@@ -742,6 +742,14 @@ def _check_profile_zonation_and_analyze(
     return correct_counts, mismatch_counts, mismatch_attribution
 
 
+def _zonation_adjacent(logged: str, should_be: str) -> bool:
+    """True when logged and should_be are adjacent in Un, Le, De, Hy, Pr (e.g. Le vs De)."""
+    order = ["Un", "Le", "De", "Hy", "Pr"]
+    if logged not in order or should_be not in order:
+        return False
+    return abs(order.index(logged) - order.index(should_be)) == 1
+
+
 def _collect_zonation_mismatch_rows(
     df: pd.DataFrame,
     zonation_cols: Dict[str, Optional[str]],
@@ -799,12 +807,15 @@ def _collect_zonation_mismatch_rows(
             # Only include rows where logged zonation differs from what it should be
             # (skip rows where classification is actually correct)
             if should_be and should_be != zonation:
+                significance = "Low" if _zonation_adjacent(zonation, should_be) else "High"
                 rows_out.append({
                     "hole_id": _safe_str(row.get(hole_col)),
                     "depth_from": _safe_float(row.get(depth_from_col)) if depth_from_col else None,
                     "depth_to": _safe_float(row.get(depth_to_col)),
                     "logged_zonation": zonation,
                     "should_be": should_be,
+                    "validation": "Mismatch",
+                    "significance": significance,
                     "total_gangue_pct": total_gangue,
                     "de_pct": de_pct,
                     "hy_pct": hy_pct,

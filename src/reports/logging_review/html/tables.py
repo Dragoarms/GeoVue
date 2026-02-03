@@ -1,4 +1,9 @@
-"""Table renderers for logging review HTML report."""
+"""Table renderers for logging review HTML report.
+
+Evidence tables (mineralisation, zonation, logging detail, outlier) use a standard layout:
+checkbox column, sortable content columns (with data-sort on cells), then image column last
+with class \"image-cell-compact\" and expandable image markup (expandable-img img-small, handleImageExpand).
+"""
 import html
 import json
 from typing import Any, Dict, List, Tuple
@@ -181,6 +186,9 @@ def _render_zonation_evidence_table(
         de_display = f"{item.get('de_pct', 0) or 0:.1f}%" if item.get("de_pct") is not None else "-"
         hy_display = f"{item.get('hy_pct', 0) or 0:.1f}%" if item.get("hy_pct") is not None else "-"
         pr_display = f"{item.get('pr_pct', 0) or 0:.1f}%" if item.get("pr_pct") is not None else "-"
+        validation = item.get("validation", "Mismatch")
+        significance = item.get("significance", "High")
+        validation_class = "validation-mismatch" if validation == "Mismatch" else "validation-match"
         if item.get("image"):
             image_html = (
                 f"<img src=\"{item['image']}\" alt=\"Interval\" class=\"rotated-image expandable-img img-small\" "
@@ -195,6 +203,8 @@ def _render_zonation_evidence_table(
             f"<td class=\"sortable\" data-sort=\"{item.get('depth_from', 0) or 0}\">{html.escape(str(depth))}</td>"
             f"<td data-sort=\"{html.escape(_safe_str(item.get('logged_zonation')))}\">{html.escape(_safe_str(item.get('logged_zonation')))}</td>"
             f"<td data-sort=\"{html.escape(_safe_str(item.get('should_be')))}\">{html.escape(_safe_str(item.get('should_be')))}</td>"
+            f"<td class=\"{validation_class}\" data-sort=\"{validation}\">{html.escape(validation)}</td>"
+            f"<td class=\"significance-{significance.lower()}\" data-sort=\"{significance}\">{html.escape(significance)}</td>"
             f"<td class=\"sortable\" data-sort=\"{total_g or 0}\">{total_g_display}</td>"
             f"<td class=\"sortable\" data-sort=\"{item.get('de_pct') or 0}\">{de_display}</td>"
             f"<td class=\"sortable\" data-sort=\"{item.get('hy_pct') or 0}\">{hy_display}</td>"
@@ -210,10 +220,12 @@ def _render_zonation_evidence_table(
         "<th class=\"sortable\" data-i18n-fr=\"Profondeur\" data-i18n-en=\"Depth\">Depth</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Zonation loggee\" data-i18n-en=\"Logged zonation\">Logged zonation</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Devrait etre\" data-i18n-en=\"Should be\">Should be</th>"
-        "<th class=\"sortable\" data-i18n-fr=\"Gangue totale %\" data-i18n-en=\"Total gangue %\">Total gangue %</th>"
-        "<th class=\"sortable\">De %</th>"
-        "<th class=\"sortable\">Hy %</th>"
-        "<th class=\"sortable\">Pr %</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Validation\" data-i18n-en=\"Validation\">Validation</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Significance\" data-i18n-en=\"Significance\">Significance</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Gangue totale % loggee\" data-i18n-en=\"Total gangue % Logged\">Total gangue % Logged</th>"
+        "<th class=\"sortable\">Logged De %</th>"
+        "<th class=\"sortable\">Logged Hy %</th>"
+        "<th class=\"sortable\">Logged Pr %</th>"
         "<th data-i18n-fr=\"Image\" data-i18n-en=\"Image\">Image</th>"
         "</tr></thead>"
         "<tbody>"
