@@ -14,6 +14,7 @@ from .tabs.overview import build_overview_data
 from .tables import _outlier_significance_from_reason, _parse_outlier_reason_to_flags
 from .types import IntervalsForReview, ReportData
 from .utils import _safe_float, _safe_str
+from reports.logging_review.data.outliers import OUTLIER_DISPLAY_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +348,7 @@ def build_html_report(
     )
     assay_logger_df["most_likely_strat"] = most_likely_predictions
 
-    all_outliers = assay_logger_df[assay_logger_df["outlier_score"] > 0].copy()
+    all_outliers = assay_logger_df[assay_logger_df["outlier_score"] > OUTLIER_DISPLAY_THRESHOLD].copy()
     all_outliers = all_outliers.sort_values("outlier_score", ascending=False)
     total_misclassified = len(all_outliers)
 

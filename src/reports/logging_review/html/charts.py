@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from ..data.outliers import OUTLIER_DISPLAY_THRESHOLD
+
 def _plotly_pie_json(labels: List[str], values: List[float], title: str) -> Tuple[str, str]:
     """Return (data_json, layout_json) for a Plotly pie chart."""
     colors = {"Match": "#2f7d61", "Mismatch": "#c9382a", "Pending Assays": "#5d6672"}
@@ -226,7 +228,7 @@ def _plotly_outlier_scatter_json(
     df = assay_df[[strat_col, x_col, y_col] + (["outlier_score"] if has_outlier else [])].dropna(subset=[x_col, y_col])
     if df.empty:
         return "[]", "{}"
-    is_outlier = df["outlier_score"] > 0 if has_outlier else pd.Series(False, index=df.index)
+    is_outlier = df["outlier_score"] > OUTLIER_DISPLAY_THRESHOLD if has_outlier else pd.Series(False, index=df.index)
     non_outliers = df[~is_outlier]
     outliers_df = df[is_outlier]
     data = []

@@ -7,6 +7,10 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Threshold above which a sample is shown as outlier in scatter plots and report lists.
+# ~3-sigma equivalent; only genuinely anomalous samples are highlighted.
+OUTLIER_DISPLAY_THRESHOLD = 3.0
+
 
 def _clr_transform(data: pd.DataFrame, fill_value: Optional[float] = None) -> pd.DataFrame:
     """
