@@ -528,6 +528,10 @@ CSS_STYLES: str = """        :root {
             border-radius: 8px;
             object-fit: contain;
         }
+        .source-row-highlight {
+            background: rgba(13, 91, 136, 0.12) !important;
+            outline: 2px solid #0d5b88;
+        }
         .image-cell-compact {
             width: 80px;
             padding: 2px !important;

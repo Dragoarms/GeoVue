@@ -233,16 +233,24 @@ JS_SCRIPTS: str = """        const defaultLang = 'fr';
             printBtn.addEventListener('click', printReport);
         }
 
-        // Image expansion handler - ensures only one image is expanded at a time
+        // Image expansion handler - ensures only one image is expanded at a time; highlights source row
+        function clearRowHighlight() {
+            document.querySelectorAll('tr.source-row-highlight').forEach(function(row) {
+                row.classList.remove('source-row-highlight');
+            });
+        }
         function handleImageExpand(img) {
             const wasExpanded = img.classList.contains('expanded');
-            // Close all expanded images first
+            // Clear any previous row highlight and close all expanded images first
+            clearRowHighlight();
             document.querySelectorAll('.expandable-img.expanded').forEach(function(other) {
                 other.classList.remove('expanded');
             });
             // Toggle the clicked image (if it wasn't already expanded, expand it)
             if (!wasExpanded) {
                 img.classList.add('expanded');
+                const row = img.closest('tr');
+                if (row) row.classList.add('source-row-highlight');
             }
         }
 
@@ -252,7 +260,8 @@ JS_SCRIPTS: str = """        const defaultLang = 'fr';
             if (e.target.classList.contains('expandable-img')) {
                 return;
             }
-            // Otherwise, close all expanded images
+            // Otherwise, close all expanded images and clear row highlight
+            clearRowHighlight();
             document.querySelectorAll('.expandable-img.expanded').forEach(function(img) {
                 img.classList.remove('expanded');
             });
