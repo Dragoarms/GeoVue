@@ -188,6 +188,20 @@ class MineralCodeManager:
         """Get list of all known mineral codes."""
         return list(self._codes.keys())
 
+    def get_magnetic_magnetite_codes(self) -> Set[str]:
+        """
+        Return mineral codes that are magnetic/magnetite (NOT non-magnetic variants).
+        Uses name: contains 'magnetite' or 'magnetic', excludes 'non-magnetic' and 'non magnetic'.
+        """
+        out = set()
+        for code, info in self._codes.items():
+            name = (info.name or "").lower()
+            if "non-magnetic" in name or "non magnetic" in name:
+                continue
+            if "magnetite" in name or "magnetic" in name:
+                out.add(code)
+        return out
+
 
 @dataclass
 class IntervalMetrics:
@@ -214,6 +228,7 @@ class IntervalMetrics:
     mafics_gangue_pct: float = 0.0
     undefined_gangue_pct: float = 0.0
     magnesium_gangue_pct: float = 0.0
+    magnetite_pct: float = 0.0
 
     # Si gangue friability
     si_friable_pct: float = 0.0
@@ -250,6 +265,7 @@ class IntervalMetrics:
             "mafics_gangue_pct": self.mafics_gangue_pct,
             "undefined_gangue_pct": self.undefined_gangue_pct,
             "magnesium_gangue_pct": self.magnesium_gangue_pct,
+            "magnetite_pct": self.magnetite_pct,
             "si_friable_pct": self.si_friable_pct,
             "si_non_friable_pct": self.si_non_friable_pct,
             "zonation_un_pct": self.zonation_un_pct,
@@ -387,6 +403,8 @@ class RCMetricsCalculator:
 
         quartz_pct = 0.0
         chert_pct = 0.0
+        magnetic_codes = self.mineral_codes.get_magnetic_magnetite_codes()
+        magnetite_pct_sum = 0.0
 
         for code, raw_pct, col in minerals:
             normalised_pct = raw_pct * metrics.normalisation_factor
@@ -431,6 +449,8 @@ class RCMetricsCalculator:
                 quartz_pct += raw_pct
             if self.mineral_codes.is_chert_variant(code):
                 chert_pct += raw_pct
+            if code in magnetic_codes:
+                magnetite_pct_sum += raw_pct * 100
 
         # Calculate final metrics
         if hardness_pct_sum > 0:
@@ -447,6 +467,7 @@ class RCMetricsCalculator:
         metrics.mafics_gangue_pct = round(gangue_by_type[self.GANGUE_MAFICS] * 100, 2)
         metrics.undefined_gangue_pct = round(gangue_by_type[self.GANGUE_UNDEFINED] * 100, 2)
         metrics.magnesium_gangue_pct = round(gangue_by_type[self.GANGUE_MAGNESIUM] * 100, 2)
+        metrics.magnetite_pct = round(magnetite_pct_sum, 2)
 
         # Si gangue friability (as percentage of Si gangue)
         total_si = si_friable + si_non_friable

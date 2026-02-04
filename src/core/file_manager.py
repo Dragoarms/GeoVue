@@ -114,6 +114,7 @@ class FileManager:
         "compartments": "Extracted Compartment Images",
         "traces": "Drillhole Traces",
         "datasets": "Drillhole Datasets",
+        "cross_sections": "Cross Sections",
         "debugging": "Debugging",
     }
 
@@ -245,6 +246,14 @@ class FileManager:
                 / self.SUBFOLDER_NAMES["review_compartments"],
                 "drill_traces": self.shared_base_dir / self.FOLDER_NAMES["traces"],
                 "datasets": self.shared_base_dir / self.FOLDER_NAMES["datasets"],
+                "cross_sections": (
+                    Path(self.config_manager.get("shared_folder_cross_sections"))
+                    if (
+                        self.config_manager
+                        and self.config_manager.get("shared_folder_cross_sections")
+                    )
+                    else (self.shared_base_dir / self.FOLDER_NAMES["cross_sections"])
+                ),
             }
 
             # Save individual paths to config if available
@@ -291,6 +300,24 @@ class FileManager:
                 self.config_manager.set(
                     "shared_folder_drill_traces", str(self.shared_paths["drill_traces"])
                 )
+                # Only write default cross_sections path when user has not set one
+                if not self.config_manager.get("shared_folder_cross_sections"):
+                    self.config_manager.set(
+                        "shared_folder_cross_sections",
+                        str(self.shared_paths["cross_sections"]),
+                    )
+
+            # When no shared base dir, still allow cross_sections from config (user may have set it)
+            if (
+                self.config_manager
+                and self.config_manager.get("shared_folder_cross_sections")
+                and "cross_sections" not in self.shared_paths
+            ):
+                if not self.shared_paths:
+                    self.shared_paths = {}
+                self.shared_paths["cross_sections"] = Path(
+                    self.config_manager.get("shared_folder_cross_sections")
+                )
 
             self.logger.debug(
                 f"Initialized shared paths with base: {self.shared_base_dir}"
@@ -324,6 +351,17 @@ class FileManager:
                 return None
 
         return path if path.exists() else None
+
+    def get_cross_sections_path(
+        self, create_if_missing: bool = False
+    ) -> Optional[Path]:
+        """
+        Get the shared Cross Sections folder path (section PDFs for Section Tool integration).
+
+        Returns:
+            Path to the Cross Sections folder, or None if not configured.
+        """
+        return self.get_shared_path("cross_sections", create_if_missing=create_if_missing)
 
     def update_shared_path(self, path_key: str, new_path: str) -> bool:
         """
@@ -362,6 +400,7 @@ class FileManager:
                         "review_compartments": "shared_folder_review_compartments_folder",
                         "drill_traces": "shared_folder_drill_traces",
                         "datasets": "shared_folder_datasets",
+                        "cross_sections": "shared_folder_cross_sections",
                     }
 
                     if path_key in config_key_map:

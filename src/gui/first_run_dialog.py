@@ -32,6 +32,7 @@ class FirstRunDialog:
                 "compartments": "Extracted Compartment Images",
                 "traces": "Drillhole Traces",
                 "datasets": "Drillhole Datasets",
+                "cross_sections": "Cross Sections",
             }
             self.REQUIRED_SUBFOLDERS = {
                 "processed": ["Approved Originals", "Rejected Originals"],
@@ -50,6 +51,7 @@ class FirstRunDialog:
                 "compartments": "Extracted Compartment Images",
                 "traces": "Drillhole Traces",
                 "datasets": "Drillhole Datasets",
+                "cross_sections": "Cross Sections",
             }
             self.REQUIRED_SUBFOLDERS = {
                 "processed": ["Approved Originals", "Rejected Originals"],
@@ -1373,6 +1375,9 @@ class FirstRunDialog:
                         backup_path
                         / self.REQUIRED_FOLDERS["compartments"]
                         / "Compartment Images for Review"
+                    ),
+                    "shared_folder_cross_sections": str(
+                        backup_path / self.REQUIRED_FOLDERS["cross_sections"]
                     ),
                 }
             )

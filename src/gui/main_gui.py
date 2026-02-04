@@ -453,6 +453,13 @@ class MainGUI:
         # Check for datasets folder (contains CSV files for data manager)
         datasets_dir = self.file_manager.get_shared_path("datasets", create_if_missing=False)
         datasets_folder_exists = bool(datasets_dir and datasets_dir.exists())
+        # Check for cross sections folder (section PDFs for Section Tool integration)
+        cross_sections_dir = self.file_manager.get_shared_path(
+            "cross_sections", create_if_missing=False
+        )
+        cross_sections_folder_exists = bool(
+            cross_sections_dir and cross_sections_dir.exists()
+        )
 
         # Expand if any paths are missing
         should_expand = not (
@@ -461,6 +468,7 @@ class MainGUI:
             and drill_traces_exists
             and register_path_exists
             and datasets_folder_exists
+            and cross_sections_folder_exists
         )
 
         shared_collapsible = self.gui_manager.create_collapsible_frame(
@@ -475,6 +483,7 @@ class MainGUI:
         self.drill_traces_path_var = tk.StringVar()
         self.register_path_var = tk.StringVar()
         self.datasets_folder_var = tk.StringVar()
+        self.cross_sections_path_var = tk.StringVar()
 
         # Set display values using FileManager's paths or config
         config = self.app.config_manager.as_dict()
@@ -530,6 +539,16 @@ class MainGUI:
             else config.get("shared_folder_datasets", "")
         )
 
+        # Cross Sections folder (section PDFs for Section Tool integration)
+        cross_sections_path = self.file_manager.get_shared_path(
+            "cross_sections", create_if_missing=False
+        )
+        self.cross_sections_path_var.set(
+            str(cross_sections_path)
+            if cross_sections_path
+            else config.get("shared_folder_cross_sections", "")
+        )
+
         # Create path input fields
         self._create_shared_path_field(
             shared_collapsible.content_frame,
@@ -570,6 +589,14 @@ class MainGUI:
             datasets_folder_exists,
             is_file=False,  # This is a folder containing CSV files
             path_key="datasets",
+        )
+        self._create_shared_path_field(
+            shared_collapsible.content_frame,
+            self.t("Cross Sections Folder:"),
+            self.cross_sections_path_var,
+            cross_sections_folder_exists,
+            is_file=False,
+            path_key="cross_sections",
         )
         # Data Settings button (replaces obsolete Create New Register)
         button_container = ttk.Frame(
@@ -1825,6 +1852,20 @@ class MainGUI:
                 )
                 paths_found = True
 
+            # Cross Sections folder (section PDFs for Section Tool integration)
+            cross_sections_path = self.file_manager.get_shared_path(
+                "cross_sections", create_if_missing=False
+            )
+            if cross_sections_path and cross_sections_path.exists():
+                self.app.config_manager.set(
+                    "shared_folder_cross_sections", str(cross_sections_path)
+                )
+                self.cross_sections_path_var.set(str(cross_sections_path))
+                self.logger.info(
+                    f"Saved shared cross sections folder: {cross_sections_path}"
+                )
+                paths_found = True
+
             # Update entry widget colors based on path validity
             self._update_path_entry_colors()
 
@@ -2252,8 +2293,16 @@ class MainGUI:
                                     subchild.config(
                                         text=self.t("Processed Originals Folder:")
                                     )
-                                elif "Drill" in subchild.cget("text"):
+                                elif "Drill Traces" in subchild.cget("text"):
                                     subchild.config(text=self.t("Drill Traces Folder:"))
+                                elif "Drillhole Datasets" in subchild.cget("text"):
+                                    subchild.config(
+                                        text=self.t("Drillhole Datasets Folder:")
+                                    )
+                                elif "Cross Sections" in subchild.cget("text"):
+                                    subchild.config(
+                                        text=self.t("Cross Sections Folder:")
+                                    )
                                 elif "Excel" in subchild.cget("text"):
                                     subchild.config(text=self.t("Excel Register:"))
 

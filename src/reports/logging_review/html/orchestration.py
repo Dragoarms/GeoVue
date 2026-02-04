@@ -93,7 +93,8 @@ def generate_logger_html_reports_from_prepped_data(
         filename = f"RC_Logging_Review_{logger_value}.html"
         output_path = os.path.join(output_dir, filename)
 
-        html_report = build_html_report(
+        # Stream report directly to file to avoid MemoryError (evidence tables with many base64 images)
+        build_html_report(
             data_coordinator=data_coordinator,
             logger_value=str(logger_value),
             assay_logger_df=assay_logger_df,
@@ -116,10 +117,8 @@ def generate_logger_html_reports_from_prepped_data(
             stats=stats,
             output_dir=output_dir,
             full_team_df=full_team_df,
+            output_path=output_path,
         )
-
-        with open(output_path, "w", encoding="utf-8") as handle:
-            handle.write(html_report)
 
         output_files.append(output_path)
 
@@ -337,7 +336,7 @@ def generate_logger_html_reports(
         filename = f"RC_Logging_Review_{logger_value}.html"
         output_path = os.path.join(output_dir, filename)
 
-        html_report = build_html_report(
+        build_html_report(
             data_coordinator=data_coordinator,
             logger_value=str(logger_value),
             assay_logger_df=assay_logger_df,
@@ -358,10 +357,8 @@ def generate_logger_html_reports(
             include_images=include_images,
             logo_path=logo_path,
             stats=stats,
+            output_path=output_path,
         )
-
-        with open(output_path, "w", encoding="utf-8") as handle:
-            handle.write(html_report)
 
         output_files.append(output_path)
 

@@ -32,6 +32,8 @@ def render_outlier_section(
     outlier_box_layout = report.get("outlier_box_plot_layout", "{}")
     outlier_scatter_data = report.get("outlier_scatter_data", "[]")
     outlier_scatter_layout = report.get("outlier_scatter_layout", "{}")
+    outlier_pca_data = report.get("outlier_pca_data", "[]")
+    outlier_pca_layout = report.get("outlier_pca_layout", "{}")
 
     outlier_intervals = intervals.get("outliers", [])
     outlier_table_html = _render_outlier_table(outlier_intervals, logger_id)
@@ -56,7 +58,13 @@ def render_outlier_section(
                 <div id="outlier-box-plot" class="plotly-chart" data-plotly-data="{html.escape(outlier_box_data)}" data-plotly-layout="{html.escape(outlier_box_layout)}"></div>
             </div>
             <div class="panel-card">
-                <h3 data-i18n-fr="Clusters geochimiques et positions des anomalies" data-i18n-en="Geochem clusters and outlier positions">Clusters geochimiques et positions des anomalies</h3>
+                <h3 data-i18n-fr="Clusters geochimiques (PCA multivarié)" data-i18n-en="Geochem clusters (multivariate PCA)">Clusters geochimiques (PCA multivarié)</h3>
+                <p class="chart-description" data-i18n-fr="Projection PCA en espace CLR. Les vecteurs montrent quels éléments séparent les groupes. Les points rouges (X) sont les anomalies détectées." data-i18n-en="PCA projection in CLR space. Vectors show which elements separate groups. Red X markers are detected outliers.">PCA projection in CLR space. Vectors show which elements separate groups. Red X markers are detected outliers.</p>
+                <div id="outlier-pca-plot" class="plotly-chart" data-plotly-data="{html.escape(outlier_pca_data)}" data-plotly-layout="{html.escape(outlier_pca_layout)}"></div>
+            </div>
+            <div class="panel-card">
+                <h3 data-i18n-fr="Paires d'éléments (convex hulls par strat)" data-i18n-en="Element pairs (convex hulls per strat)">Element pairs (convex hulls per strat)</h3>
+                <p class="chart-description" data-i18n-fr="Tous les strats sont affichés; les hulls sont tracés seulement pour les strats avec assez d'échantillons. Chaque graphique a ses propres axes." data-i18n-en="All strats are shown; hulls are drawn only for strats with enough samples. Each plot has its own axes.">All strats are shown; hulls are drawn only for strats with enough samples. Each plot has its own axes.</p>
                 <div id="outlier-scatter-plot" class="plotly-chart" data-plotly-data="{html.escape(outlier_scatter_data)}" data-plotly-layout="{html.escape(outlier_scatter_layout)}"></div>
             </div>
             <div class="intervals-section">

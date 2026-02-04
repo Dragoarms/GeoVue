@@ -77,6 +77,36 @@ class TestLoggingReviewReport(unittest.TestCase):
         self.assertEqual(len(scores), len(df))
         self.assertTrue(scores["outlier_score"].notna().all())
 
+    def test_hybrid_outlier_scores_mahalanobis_matches_vectorized_reference(self):
+        """Regression: outlier_score from fixed fixture matches reference (ensures vectorized Mahalanobis matches loop)."""
+        np.random.seed(42)
+        n = 50
+        df = pd.DataFrame({
+            "Strat": ["A"] * 25 + ["B"] * 25,
+            "Fe": 50.0 + 5 * np.random.randn(n),
+            "SiO2": 10.0 + 3 * np.random.randn(n),
+            "Al2O3": 2.0 + 1 * np.random.randn(n),
+        })
+        df.loc[10, "Fe"] = 80.0
+        scores = report.compute_hybrid_outlier_scores(
+            df, "Strat", ["Fe", "SiO2", "Al2O3"], min_group_size=5
+        )
+        self.assertTrue(np.isfinite(scores["outlier_score"]).all())
+        self.assertGreater(scores.loc[10, "outlier_score"], 5.0)
+        expected_first_15 = [
+            0.557560480933131, 0.0540982645250724, 0.1720018713567352,
+            0.2481388659963763, 0.20782086372048436, 0.23223081828093528,
+            0.4989859942038674, 0.1523698438698943, 0.17479949600816136,
+            0.1496889781929007, 7.601566438587703, 0.10037583580401148,
+            0.3103412733430854, 3.333670244854303, 0.28540425867353053,
+        ]
+        np.testing.assert_allclose(
+            scores["outlier_score"].head(15).values,
+            expected_first_15,
+            rtol=1e-5,
+            err_msg="outlier_score should match reference (vectorized Mahalanobis)",
+        )
+
     def test_filter_dataframe_by_logger_and_date(self):
         df = pd.DataFrame(
             {
@@ -417,6 +447,23 @@ class TestLoggingReviewHtmlReport(unittest.TestCase):
         counts = result["Logging_Accuracy"].value_counts()
         self.assertGreater(counts.get("Match", 0) + counts.get("Mismatch", 0), 0)
 
+    def test_add_mineralisation_accuracy_uses_zonation_un_as_unmineralised(self):
+        """When zonation is Un (or Le), logging is unmineralised; unmineralised assay should Match."""
+        from processing.DataManager.column_aliases import ColumnResolver
+        df = pd.DataFrame({
+            "Fe_pct": [20.4, 34.4],
+            "SiO2_pct": [32.0, 22.2],
+            "Al2O3_pct": [24.4, 17.0],
+            "zonation_un_pct": [100, 100],
+            "zonation_de_pct": [0, 0],
+            "zonation_hy_pct": [0, 0],
+            "zonation_pr_pct": [0, 0],
+        })
+        resolver = ColumnResolver(df)
+        result = html_report._add_mineralisation_accuracy_column(df, resolver)
+        self.assertIn("Logging_Accuracy", result.columns)
+        self.assertEqual(list(result["Logging_Accuracy"]), ["Match", "Match"])
+
     def test_calc_outlier_rate_and_ordering(self):
         df = pd.DataFrame({
             "outlier_score": [1.0, 0.5, 2.0, 0.0],
@@ -579,4 +626,42 @@ class TestLoggingReviewHtmlReport(unittest.TestCase):
             )
         self.assertIn("<section class=\"tab-panel\" data-tab=\"overview\"", html_output)
         self.assertIn("data-tab-button=", html_output)
+
+    def test_lookup_interval_image_uses_cache_to_avoid_duplicate_io(self):
+        """When the same (hole_id, depth_to) is looked up twice with a shared cache, get_image_path is called once."""
+        from unittest.mock import MagicMock, patch
+
+        get_image_path_calls = []
+        def track_get_image_path(key):
+            get_image_path_calls.append(key)
+            return "/fake/path.png"
+
+        mock_dc = MagicMock()
+        mock_dc.get_image_path.side_effect = track_get_image_path
+        mock_dc.get_keys_for_hole.return_value = []
+
+        cache = {}
+        with patch("logging_review_html_report._encode_image_base64", return_value="data:image/png;base64,abc"):
+            r1 = html_report._lookup_interval_image(mock_dc, "H1", 10.0, cache=cache)
+            r2 = html_report._lookup_interval_image(mock_dc, "H1", 10.0, cache=cache)
+        self.assertEqual(r1, "data:image/png;base64,abc")
+        self.assertEqual(r2, "data:image/png;base64,abc")
+        self.assertEqual(len(get_image_path_calls), 1, "get_image_path should be called once when cache is used")
+
+    def test_fines_and_magnetite_flags_work_with_series_from_itertuples(self):
+        """Regression: interval building uses itertuples then pd.Series(dict(...)); flag functions receive a Series."""
+        from processing.DataManager.column_aliases import ColumnResolver
+        # Row that triggers "Friable Silica" and magnetite issue (negative LOI, no magnetite).
+        df = pd.DataFrame([{
+            "hole_id": "H1", "geolfrom": 0.0, "geolto": 1.0, "strat": "S1",
+            "Fe_pct": 60.0, "SiO2_pct": 6.0, "Al2O3_pct": 3.0, "total_gangue_pct": 0.0,
+            "loi_1000_pct": -0.5, "magnetite_pct": 0.0,
+        }])
+        resolver = ColumnResolver(df)
+        tup = next(df.itertuples(index=False))
+        row = pd.Series(dict(zip(df.columns, tup)))
+        fines_issue = html_report._flag_fines_issue(row, resolver)
+        self.assertIsNotNone(fines_issue, "row should trigger fines issue (Friable Silica)")
+        mag_issue = html_report._flag_magnetite_issue(row, resolver)
+        self.assertIsNotNone(mag_issue, "row should trigger magnetite issue (negative LOI, no magnetite)")
 

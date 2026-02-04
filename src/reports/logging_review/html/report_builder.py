@@ -8,7 +8,7 @@ import pandas as pd
 
 from processing.DataManager.column_aliases import ColumnResolver
 from .collar_map import _build_map_points
-from .charts import _plotly_outlier_box_json, _plotly_outlier_scatter_json
+from .charts import _plotly_outlier_box_json, _plotly_outlier_scatter_grid_json, _plotly_pca_biplot_json
 from .report_renderer import render_html
 from .tabs.overview import build_overview_data
 from .tables import _outlier_significance_from_reason, _parse_outlier_reason_to_flags
@@ -42,8 +42,13 @@ def build_html_report(
     stats: Dict[str, Any],
     output_dir: Optional[str] = None,
     full_team_df: Optional[pd.DataFrame] = None,
+    output_path: Optional[str] = None,
 ) -> str:
-    """Build report data and return rendered HTML. Uses helpers from processing (lazy import)."""
+    """
+    Build report data and render HTML.
+    If output_path is set, stream HTML directly to that file (reduces memory for large reports with many images).
+    Returns the output_path when streaming, or the HTML string when not.
+    """
     from processing.logging_review_html_report import (
         _add_mineralisation_accuracy_column,
         _build_grouping_groups_with_images,
@@ -70,6 +75,10 @@ def build_html_report(
         _flag_fines_issue,
         _flag_goethite_issue,
         _flag_magnetite_issue,
+        _flag_sulphide_issue,
+        _flag_manganese_issue,
+        _flag_mafics_issue,
+        _flag_magnesium_issue,
         _grouping_avg_max_interval_and_groups,
         _group_mineralisation_by_quarter,
         _lookup_interval_image,
@@ -215,12 +224,14 @@ def build_html_report(
                     "geochem": {"Fe": fe_val, "SiO2": sio2_val, "Al2O3": al2o3_val},
                 })
 
+    image_cache = {} if (data_coordinator and include_images) else None
     if data_coordinator and include_images:
         for item in mineral_mismatch_intervals:
             item["image"] = _lookup_interval_image(
                 data_coordinator,
                 item.get("hole_id"),
                 item.get("depth_to"),
+                cache=image_cache,
             )
 
     project_with_accuracy = _add_mineralisation_accuracy_column(project_filtered_df, ColumnResolver(project_filtered_df))
@@ -243,6 +254,7 @@ def build_html_report(
                 data_coordinator,
                 item.get("hole_id"),
                 item.get("depth_to"),
+                cache=image_cache,
             )
     zonation_cols_team = _resolve_zonation_columns(project_filtered_df)
     team_df_for_zonation, zonation_cols_team = _derive_dominant_zonation_column(project_filtered_df, zonation_cols_team)
@@ -289,33 +301,31 @@ def build_html_report(
     al2o3_col = fines_resolver.get("al2o3_pct")
     sio2_col = fines_resolver.get("sio2_pct")
     p_col = fines_resolver.get("p_pct")
+    loi_1000_col = fines_resolver.get("loi_1000_pct") or fines_resolver.get("loi_pct")
+    hy_col = fines_resolver.get("zonation_hy_pct")
+    loi_425_col = fines_resolver.get("loi_425_pct") or fines_resolver.get("loi_pct")
+    carbonate_col = fines_resolver.get("carbonate_gangue_pct")
+    cao_col = fines_resolver.get("cao_pct")
+    loi_col = fines_resolver.get("loi_pct")
+    magnetite_pct_col = fines_resolver.get("magnetite_pct")
+    s_col = fines_resolver.get("s_pct")
+    mn_col = fines_resolver.get("mn_pct")
+    mgo_col = fines_resolver.get("mgo_pct")
+    sulphide_col = fines_resolver.get("sulphide_gangue_pct")
+    manganese_col = fines_resolver.get("manganese_gangue_pct")
+    mafics_col = fines_resolver.get("mafics_gangue_pct")
+    magnesium_col = fines_resolver.get("magnesium_gangue_pct")
     fines_intervals = []
-    for _, row in assay_logger_df.iterrows():
-        issue = _flag_fines_issue(row, fines_resolver)
-        if issue:
-            geochem = {}
-            if fe_col and fe_col in row: geochem["Fe"] = _safe_float(row.get(fe_col))
-            if al2o3_col and al2o3_col in row: geochem["Al2O3"] = _safe_float(row.get(al2o3_col))
-            if sio2_col and sio2_col in row: geochem["SiO2"] = _safe_float(row.get(sio2_col))
-            if p_col and p_col in row: geochem["P"] = _safe_float(row.get(p_col))
-            significance = _significance_for_logging_detail_issue(issue, "fines")
-            fines_intervals.append(
-                {
-                    "hole_id": _safe_str(row.get(hole_col)),
-                    "depth_from": _safe_float(row.get(depth_from_col)) if depth_from_col else None,
-                    "depth_to": _safe_float(row.get(depth_to_col)),
-                    "classified_as": _safe_str(row.get(strat_col)),
-                    "strat": _safe_str(row.get(strat_col)),
-                    "issue": issue,
-                    "geochem": geochem,
-                    "significance": significance,
-                }
-            )
-
     magnetite_intervals = []
     goethite_intervals = []
     carbonate_intervals = []
-    for _, row in assay_logger_df.iterrows():
+    sulphide_intervals = []
+    manganese_intervals = []
+    mafics_intervals = []
+    magnesium_intervals = []
+    cols = assay_logger_df.columns
+    for tup in assay_logger_df.itertuples(index=False):
+        row = pd.Series(dict(zip(cols, tup)))
         geochem = {}
         if fe_col and fe_col in row:
             geochem["Fe"] = _safe_float(row.get(fe_col))
@@ -325,6 +335,18 @@ def build_html_report(
             geochem["SiO2"] = _safe_float(row.get(sio2_col))
         if p_col and p_col in row:
             geochem["P"] = _safe_float(row.get(p_col))
+        issue_fines = _flag_fines_issue(row, fines_resolver)
+        if issue_fines:
+            fines_intervals.append({
+                "hole_id": _safe_str(row.get(hole_col)),
+                "depth_from": _safe_float(row.get(depth_from_col)) if depth_from_col else None,
+                "depth_to": _safe_float(row.get(depth_to_col)),
+                "classified_as": _safe_str(row.get(strat_col)),
+                "strat": _safe_str(row.get(strat_col)),
+                "issue": issue_fines,
+                "geochem": geochem,
+                "significance": _significance_for_logging_detail_issue(issue_fines, "fines"),
+            })
         base = {
             "hole_id": _safe_str(row.get(hole_col)),
             "depth_from": _safe_float(row.get(depth_from_col)) if depth_from_col else None,
@@ -333,15 +355,79 @@ def build_html_report(
             "strat": _safe_str(row.get(strat_col)),
             "geochem": geochem,
         }
+        assay = {}
+        if loi_1000_col and loi_1000_col in row:
+            assay["loi_1000_pct"] = _safe_float(row.get(loi_1000_col))
+        if hy_col and hy_col in row:
+            assay["hy_pct"] = _safe_float(row.get(hy_col))
+        if loi_425_col and loi_425_col in row:
+            assay["loi_pct"] = _safe_float(row.get(loi_425_col))
+        if carbonate_col and carbonate_col in row:
+            assay["carbonate_pct"] = _safe_float(row.get(carbonate_col))
+        if cao_col and cao_col in row:
+            assay["cao_pct"] = _safe_float(row.get(cao_col))
+        if loi_col and loi_col in row and "loi_pct" not in assay:
+            assay["loi_pct"] = _safe_float(row.get(loi_col))
+        if magnetite_pct_col and magnetite_pct_col in row:
+            assay["magnetite_pct"] = _safe_float(row.get(magnetite_pct_col))
+        if sulphide_col and sulphide_col in row:
+            assay["sulphide_pct"] = _safe_float(row.get(sulphide_col))
+        if s_col and s_col in row:
+            assay["s_pct"] = _safe_float(row.get(s_col))
+        if manganese_col and manganese_col in row:
+            assay["manganese_pct"] = _safe_float(row.get(manganese_col))
+        if mn_col and mn_col in row:
+            assay["mn_pct"] = _safe_float(row.get(mn_col))
+        if mafics_col and mafics_col in row:
+            assay["mafics_pct"] = _safe_float(row.get(mafics_col))
+        if fe_col and fe_col in row and "fe_pct" not in assay:
+            assay["fe_pct"] = _safe_float(row.get(fe_col))
+        if magnesium_col and magnesium_col in row:
+            assay["magnesium_pct"] = _safe_float(row.get(magnesium_col))
+        if mgo_col and mgo_col in row:
+            assay["mgo_pct"] = _safe_float(row.get(mgo_col))
         issue_m = _flag_magnetite_issue(row, fines_resolver)
         if issue_m:
-            magnetite_intervals.append({**base, "issue": issue_m, "significance": _significance_for_logging_detail_issue(issue_m, "magnetite")})
+            magnetite_intervals.append({
+                **base, "issue": issue_m, "significance": _significance_for_logging_detail_issue(issue_m, "magnetite"),
+                "assay": assay,
+            })
         issue_g = _flag_goethite_issue(row, fines_resolver)
         if issue_g:
-            goethite_intervals.append({**base, "issue": issue_g, "significance": _significance_for_logging_detail_issue(issue_g, "goethite")})
+            goethite_intervals.append({
+                **base, "issue": issue_g, "significance": _significance_for_logging_detail_issue(issue_g, "goethite"),
+                "assay": assay,
+            })
         issue_c = _flag_carbonate_issue(row, fines_resolver)
         if issue_c:
-            carbonate_intervals.append({**base, "issue": issue_c, "significance": _significance_for_logging_detail_issue(issue_c, "carbonate")})
+            carbonate_intervals.append({
+                **base, "issue": issue_c, "significance": _significance_for_logging_detail_issue(issue_c, "carbonate"),
+                "assay": assay,
+            })
+        issue_s = _flag_sulphide_issue(row, fines_resolver)
+        if issue_s:
+            sulphide_intervals.append({
+                **base, "issue": issue_s, "significance": _significance_for_logging_detail_issue(issue_s, "sulphide"),
+                "assay": assay,
+            })
+        issue_mn = _flag_manganese_issue(row, fines_resolver)
+        if issue_mn:
+            manganese_intervals.append({
+                **base, "issue": issue_mn, "significance": _significance_for_logging_detail_issue(issue_mn, "manganese"),
+                "assay": assay,
+            })
+        issue_maf = _flag_mafics_issue(row, fines_resolver)
+        if issue_maf:
+            mafics_intervals.append({
+                **base, "issue": issue_maf, "significance": _significance_for_logging_detail_issue(issue_maf, "mafics"),
+                "assay": assay,
+            })
+        issue_mg = _flag_magnesium_issue(row, fines_resolver)
+        if issue_mg:
+            magnesium_intervals.append({
+                **base, "issue": issue_mg, "significance": _significance_for_logging_detail_issue(issue_mg, "magnesium"),
+                "assay": assay,
+            })
 
     most_likely_predictions = predict_most_likely_strat(
         assay_logger_df, strat_col, chem_actual_cols, min_group_size=10
@@ -350,11 +436,22 @@ def build_html_report(
 
     all_outliers = assay_logger_df[assay_logger_df["outlier_score"] > OUTLIER_DISPLAY_THRESHOLD].copy()
     all_outliers = all_outliers.sort_values("outlier_score", ascending=False)
-    total_misclassified = len(all_outliers)
+    # Evidence table and KPI: only intervals where recorded strat != most likely (strat mismatch for review)
+    recorded_strat = all_outliers[strat_col].astype(str).str.strip()
+    likely_strat = all_outliers["most_likely_strat"].fillna("-").astype(str).str.strip()
+    meaningful_likely = likely_strat.ne("") & likely_strat.ne("-")
+    strat_mismatch_mask = meaningful_likely & (recorded_strat != likely_strat)
+    strat_mismatch_outliers = all_outliers[strat_mismatch_mask].copy()
+    total_misclassified = len(strat_mismatch_outliers)
+    # Mark strat-mismatch outliers so PCA/scatter charts highlight only these (not in-strat chemistry noise)
+    assay_logger_df["display_outlier"] = False
+    assay_logger_df.loc[strat_mismatch_outliers.index, "display_outlier"] = True
 
-    display_outliers = all_outliers.head(top_n) if top_n > 0 else all_outliers
+    display_outliers = strat_mismatch_outliers.head(top_n) if top_n > 0 else strat_mismatch_outliers
     outlier_rows = []
-    for _, row in display_outliers.iterrows():
+    out_cols = display_outliers.columns
+    for tup in display_outliers.itertuples(index=False):
+        row = pd.Series(dict(zip(out_cols, tup)))
         strat_val = _safe_str(row.get(strat_col))
         most_likely = _safe_str(row.get("most_likely_strat", "-"))
         reason = _safe_str(row.get("outlier_reason"))
@@ -380,7 +477,7 @@ def build_html_report(
                 "depth_to": _safe_float(row.get(depth_to_col)),
                 "strat": strat_val,
                 "recorded_as": strat_val,
-                "most_likely": most_likely if most_likely != strat_val else strat_val,
+                "most_likely": most_likely,
                 "reason": reason_str,
                 "outlier_score": _safe_float(row.get("outlier_score")) or 0.0,
                 "outlier_reason": reason,
@@ -497,8 +594,17 @@ def build_html_report(
     outlier_box_data, outlier_box_layout = _plotly_outlier_box_json(
         project_filtered_df, strat_col, chem_actual_cols
     )
-    outlier_scatter_data, outlier_scatter_layout = _plotly_outlier_scatter_json(
-        assay_logger_df, strat_col, chem_actual_cols
+    # Use lower point caps for large reports to avoid MemoryError when embedding chart JSON
+    n_assay = len(assay_logger_df)
+    max_pts_pca = min(2000, max(600, n_assay // 5))
+    max_pts_grid = 400 if n_assay > 5000 else 500
+    outlier_scatter_data, outlier_scatter_layout = _plotly_outlier_scatter_grid_json(
+        assay_logger_df, strat_col, chem_actual_cols,
+        min_strat_count=10, max_points_per_plot=max_pts_grid
+    )
+    outlier_pca_data, outlier_pca_layout = _plotly_pca_biplot_json(
+        assay_logger_df, strat_col, chem_actual_cols,
+        min_strat_count=10, max_points=max_pts_pca
     )
 
     report_data: ReportData = {
@@ -600,45 +706,84 @@ def build_html_report(
         "outlier_box_plot_layout": outlier_box_layout,
         "outlier_scatter_data": outlier_scatter_data,
         "outlier_scatter_layout": outlier_scatter_layout,
+        "outlier_pca_data": outlier_pca_data,
+        "outlier_pca_layout": outlier_pca_layout,
         "map": map_data,
         "project_codes": logger_project_codes,
         "has_project_scope": has_project_scope,
         "logging_detail_issue_types": [
             {"key": "fines", "label_fr": "Fines / mineralisation vs gangue", "label_en": "Fines / mineralisation vs gangue", "rules_fr": "Proportion des intervalles ou la geochimie (Fe, SiO2, Al2O3, gangue) suggere un probleme: ex. mineralisation loggee comme gangue, silice friable, argiles.", "rules_en": "Proportion of intervals where geochemistry suggests an issue: e.g. mineralisation logged as gangue, friable silica, clays."},
-            {"key": "magnetite", "label_fr": "Magnetite vs LOI1000", "label_en": "Magnetite vs LOI1000", "rules_fr": "LOI1000 negatif suggere magnetite; codes MT, MBH, MBM. Flag: magnetite loggee mais LOI1000 non negatif.", "rules_en": "Negative LOI1000 suggests magnetite; codes MT, MBH, MBM. Flag: magnetite logged but LOI1000 not negative."},
+            {"key": "magnetite", "label_fr": "Magnetite vs LOI1000", "label_en": "Magnetite vs LOI1000", "rules_fr": "LOI1000 negatif suggere magnetite; codes MT, MBH, MBM. Flag: LOI1000 negatif mais pas de magnetite loggee.", "rules_en": "Negative LOI1000 suggests magnetite; codes MT, MBH, MBM. Flag: LOI1000 negative but no magnetite logged."},
             {"key": "goethite", "label_fr": "Goethite (Hy) vs LOI", "label_en": "Goethite (Hy) vs LOI", "rules_fr": "Zonation Hy (goethite) elevee doit correspondre a un LOI (ex. LOI 425) eleve. Flag: Hy eleve mais LOI bas ou manquant.", "rules_en": "High zonation Hy (goethite) should align with LOI (e.g. LOI 425). Flag: high Hy but low or missing LOI."},
             {"key": "carbonate_gangue", "label_fr": "Gangue carbonate vs essai", "label_en": "Carbonate gangue vs assay", "rules_fr": "Gangue carbonate loggee % coherente avec l'essai (LOI/CaO). Flag: ecart important entre logge et essai.", "rules_en": "Logged carbonate gangue % should be consistent with assay (LOI/CaO). Flag: logged % inconsistent with assay."},
+            {"key": "sulphide_gangue", "label_fr": "Gangue sulfure vs S%", "label_en": "Sulphide gangue vs S%", "rules_fr": "Gangue sulfure loggee % coherente avec S% essai. Flag: ecart important.", "rules_en": "Logged sulphide gangue % should be consistent with S% assay. Flag: logged % inconsistent with assay."},
+            {"key": "manganese_gangue", "label_fr": "Gangue manganese vs Mn%", "label_en": "Manganese gangue vs Mn%", "rules_fr": "Gangue manganese loggee % coherente avec Mn% essai. Flag: ecart important.", "rules_en": "Logged manganese gangue % should be consistent with Mn% assay. Flag: logged % inconsistent with assay."},
+            {"key": "mafics_gangue", "label_fr": "Mafiques vs Fe%", "label_en": "Mafics gangue vs Fe%", "rules_fr": "Mafiques logges % coherents avec Fe% essai (proxy). Flag: ecart important.", "rules_en": "Logged mafics gangue % should be consistent with Fe% assay (proxy). Flag: logged % inconsistent with assay."},
+            {"key": "magnesium_gangue", "label_fr": "Gangue magnesium vs MgO%", "label_en": "Magnesium gangue vs MgO%", "rules_fr": "Gangue magnesium loggee % coherente avec MgO% essai. Flag: ecart important.", "rules_en": "Logged magnesium gangue % should be consistent with MgO% assay. Flag: logged % inconsistent with assay."},
         ],
     }
 
     fines_with_images = _build_intervals_with_images(
-        data_coordinator, fines_intervals, include_images
+        data_coordinator, fines_intervals, include_images, image_cache=image_cache
     )
     for i, item in enumerate(fines_with_images):
         if i < len(fines_intervals) and "geochem" in fines_intervals[i]:
             item["geochem"] = fines_intervals[i]["geochem"]
 
     magnetite_with_images = _build_intervals_with_images(
-        data_coordinator, magnetite_intervals, include_images
+        data_coordinator, magnetite_intervals, include_images, image_cache=image_cache
     )
     goethite_with_images = _build_intervals_with_images(
-        data_coordinator, goethite_intervals, include_images
+        data_coordinator, goethite_intervals, include_images, image_cache=image_cache
     )
     carbonate_with_images = _build_intervals_with_images(
-        data_coordinator, carbonate_intervals, include_images
+        data_coordinator, carbonate_intervals, include_images, image_cache=image_cache
+    )
+    sulphide_with_images = _build_intervals_with_images(
+        data_coordinator, sulphide_intervals, include_images, image_cache=image_cache
+    )
+    manganese_with_images = _build_intervals_with_images(
+        data_coordinator, manganese_intervals, include_images, image_cache=image_cache
+    )
+    mafics_with_images = _build_intervals_with_images(
+        data_coordinator, mafics_intervals, include_images, image_cache=image_cache
+    )
+    magnesium_with_images = _build_intervals_with_images(
+        data_coordinator, magnesium_intervals, include_images, image_cache=image_cache
     )
     for i, item in enumerate(magnetite_with_images):
-        if i < len(magnetite_intervals) and "geochem" in magnetite_intervals[i]:
-            item["geochem"] = magnetite_intervals[i]["geochem"]
+        if i < len(magnetite_intervals):
+            if "geochem" in magnetite_intervals[i]:
+                item["geochem"] = magnetite_intervals[i]["geochem"]
+            if "assay" in magnetite_intervals[i]:
+                item["assay"] = magnetite_intervals[i]["assay"]
     for i, item in enumerate(goethite_with_images):
-        if i < len(goethite_intervals) and "geochem" in goethite_intervals[i]:
-            item["geochem"] = goethite_intervals[i]["geochem"]
+        if i < len(goethite_intervals):
+            if "geochem" in goethite_intervals[i]:
+                item["geochem"] = goethite_intervals[i]["geochem"]
+            if "assay" in goethite_intervals[i]:
+                item["assay"] = goethite_intervals[i]["assay"]
     for i, item in enumerate(carbonate_with_images):
-        if i < len(carbonate_intervals) and "geochem" in carbonate_intervals[i]:
-            item["geochem"] = carbonate_intervals[i]["geochem"]
+        if i < len(carbonate_intervals):
+            if "geochem" in carbonate_intervals[i]:
+                item["geochem"] = carbonate_intervals[i]["geochem"]
+            if "assay" in carbonate_intervals[i]:
+                item["assay"] = carbonate_intervals[i]["assay"]
+    for i, item in enumerate(sulphide_with_images):
+        if i < len(sulphide_intervals) and "assay" in sulphide_intervals[i]:
+            item["assay"] = sulphide_intervals[i]["assay"]
+    for i, item in enumerate(manganese_with_images):
+        if i < len(manganese_intervals) and "assay" in manganese_intervals[i]:
+            item["assay"] = manganese_intervals[i]["assay"]
+    for i, item in enumerate(mafics_with_images):
+        if i < len(mafics_intervals) and "assay" in mafics_intervals[i]:
+            item["assay"] = mafics_intervals[i]["assay"]
+    for i, item in enumerate(magnesium_with_images):
+        if i < len(magnesium_intervals) and "assay" in magnesium_intervals[i]:
+            item["assay"] = magnesium_intervals[i]["assay"]
 
     grouping_with_groups = _build_grouping_groups_with_images(
-        data_coordinator, grouping_groups_for_review, include_images
+        data_coordinator, grouping_groups_for_review, include_images, image_cache=image_cache
     )
 
     intervals_for_review: IntervalsForReview = {
@@ -648,14 +793,27 @@ def build_html_report(
             "magnetite": magnetite_with_images,
             "goethite": goethite_with_images,
             "carbonate_gangue": carbonate_with_images,
+            "sulphide_gangue": sulphide_with_images,
+            "manganese_gangue": manganese_with_images,
+            "mafics_gangue": mafics_with_images,
+            "magnesium_gangue": magnesium_with_images,
         },
         "grouping_flat": _build_intervals_with_images(
-            data_coordinator, grouping_intervals, include_images
+            data_coordinator, grouping_intervals, include_images, image_cache=image_cache
         ),
         "grouping": grouping_with_groups,
         "outliers": _build_outlier_intervals_with_images(
-            data_coordinator, outlier_rows, include_images
+            data_coordinator, outlier_rows, include_images, image_cache=image_cache
         ),
     }
 
-    return render_html(report_data, intervals_for_review, logo_path, page_options, charts_dir=charts_dir)
+    if output_path:
+        with open(output_path, "w", encoding="utf-8") as f:
+            render_html(
+                report_data, intervals_for_review, logo_path, page_options,
+                charts_dir=charts_dir, stream=f
+            )
+        return output_path
+    return render_html(
+        report_data, intervals_for_review, logo_path, page_options, charts_dir=charts_dir
+    )

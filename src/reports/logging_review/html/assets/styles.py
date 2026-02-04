@@ -338,6 +338,16 @@ CSS_STYLES: str = """        :root {
         .interval-table th {
             background: #f3f5f7;
         }
+        /* Pin table headers when scrolling */
+        .interval-table thead th {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            box-shadow: 0 1px 0 var(--border);
+        }
+        .evidence-table thead th {
+            background: #fef3c7 !important;
+        }
         .image-cell img {
             width: 120px;
             height: auto;

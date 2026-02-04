@@ -72,6 +72,7 @@ class ConfigManager:
         "shared_folder_extracted_compartments_folder",
         "shared_folder_approved_compartments_folder",
         "shared_folder_review_compartments_folder",
+        "shared_folder_cross_sections",  # Folder containing section PDFs (Section Tool integration)
         "output_format",
         "jpeg_quality",
         "enable_blur_detection",
@@ -247,6 +248,7 @@ class ConfigManager:
             "shared_folder_drill_traces": "",
             "shared_folder_register_path": "",
             "shared_folder_register_data_folder": "",
+            "shared_folder_cross_sections": "",
             "compartment_pattern": r"([A-Z]{2}\d{4})_CC_(\d+)(?:_(Wet|Dry))?(?:_.*)?\.(?:png|tiff|jpg)$",
             "review_toggles": [
                 "Bad Image",

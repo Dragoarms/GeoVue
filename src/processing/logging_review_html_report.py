@@ -7,6 +7,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Type for image lookup cache: (hole_id_upper, depth_float) -> base64 data URL or None
+ImageLookupCache = Optional[Dict[Tuple[str, float], Optional[str]]]
+
 import numpy as np
 import pandas as pd
 
@@ -255,8 +258,13 @@ def _flag_fines_issue(row: pd.Series, resolver: ColumnResolver) -> Optional[str]
 
 
 def _has_magnetite_logged(row: pd.Series, resolver: ColumnResolver) -> bool:
-    """True if row has MT, MBH, or MBM in dominant/mineralisation columns."""
-    magnetite_codes = {"MT", "MBH", "MBM"}
+    """True if row has magnetite from RC metric magnetite_pct or MT/MBH/MBM in dominant/mineralisation columns."""
+    mag_col = resolver.get("magnetite_pct")
+    if mag_col and mag_col in row.index:
+        val = row.get(mag_col)
+        if not pd.isna(val) and float(val) > 0.5:
+            return True
+    magnetite_codes = {"MT", "MBH", "MBM", "MBB", "MI"}
     for std in ("min_80_pct", "min_50_pct", "mineralisation"):
         col = resolver.get(std)
         if not col or col not in row.index:
@@ -268,18 +276,18 @@ def _has_magnetite_logged(row: pd.Series, resolver: ColumnResolver) -> bool:
 
 
 def _flag_magnetite_issue(row: pd.Series, resolver: ColumnResolver) -> Optional[str]:
-    """Flag: magnetite (MT/MBH/MBM) logged but LOI1000 not negative."""
-    if not _has_magnetite_logged(row, resolver):
-        return None
+    """Flag: LOI1000 negative but no magnetite logged (MT/MBH/MBM/MBB/MI or magnetite_pct)."""
     loi_col = resolver.get("loi_1000_pct") or resolver.get("loi_pct")
     if not loi_col or loi_col not in row.index:
         return None
     loi = row.get(loi_col)
     if pd.isna(loi):
-        return "Magnetite logged (MT/MBH/MBM) but LOI1000 missing"
+        return None
     if float(loi) >= 0:
-        return "Magnetite logged (MT/MBH/MBM) but LOI1000 not negative"
-    return None
+        return None
+    if _has_magnetite_logged(row, resolver):
+        return None
+    return "LOI1000 negative but no magnetite logged (MT/MBH/MBM)"
 
 
 def _flag_goethite_issue(row: pd.Series, resolver: ColumnResolver) -> Optional[str]:
@@ -326,6 +334,86 @@ def _flag_carbonate_issue(row: pd.Series, resolver: ColumnResolver) -> Optional[
     return None
 
 
+def _flag_sulphide_issue(row: pd.Series, resolver: ColumnResolver) -> Optional[str]:
+    """Flag: logged sulphide gangue % inconsistent with S% assay."""
+    col = resolver.get("sulphide_gangue_pct")
+    if not col or col not in row.index:
+        return None
+    val = row.get(col)
+    if pd.isna(val):
+        return None
+    logged = float(val)
+    proxy_col = resolver.get("s_pct")
+    if not proxy_col or proxy_col not in row.index or pd.isna(row.get(proxy_col)):
+        return None
+    assay_pct = float(row.get(proxy_col))
+    if logged > 15 and assay_pct < 2:
+        return "Logged sulphide % high but assay (S%) low"
+    if logged < 2 and assay_pct > 10:
+        return "Logged sulphide % low but assay (S%) high"
+    return None
+
+
+def _flag_manganese_issue(row: pd.Series, resolver: ColumnResolver) -> Optional[str]:
+    """Flag: logged manganese gangue % inconsistent with Mn% assay."""
+    col = resolver.get("manganese_gangue_pct")
+    if not col or col not in row.index:
+        return None
+    val = row.get(col)
+    if pd.isna(val):
+        return None
+    logged = float(val)
+    proxy_col = resolver.get("mn_pct")
+    if not proxy_col or proxy_col not in row.index or pd.isna(row.get(proxy_col)):
+        return None
+    assay_pct = float(row.get(proxy_col))
+    if logged > 15 and assay_pct < 2:
+        return "Logged manganese % high but assay (Mn%) low"
+    if logged < 2 and assay_pct > 10:
+        return "Logged manganese % low but assay (Mn%) high"
+    return None
+
+
+def _flag_mafics_issue(row: pd.Series, resolver: ColumnResolver) -> Optional[str]:
+    """Flag: logged mafics gangue % inconsistent with Fe% as proxy (mafic minerals often Fe-rich)."""
+    col = resolver.get("mafics_gangue_pct")
+    if not col or col not in row.index:
+        return None
+    val = row.get(col)
+    if pd.isna(val):
+        return None
+    logged = float(val)
+    proxy_col = resolver.get("fe_pct")
+    if not proxy_col or proxy_col not in row.index or pd.isna(row.get(proxy_col)):
+        return None
+    assay_pct = float(row.get(proxy_col))
+    if logged > 15 and assay_pct < 10:
+        return "Logged mafics % high but assay (Fe%) low"
+    if logged < 2 and assay_pct > 30:
+        return "Logged mafics % low but assay (Fe%) high"
+    return None
+
+
+def _flag_magnesium_issue(row: pd.Series, resolver: ColumnResolver) -> Optional[str]:
+    """Flag: logged magnesium gangue % inconsistent with MgO% assay."""
+    col = resolver.get("magnesium_gangue_pct")
+    if not col or col not in row.index:
+        return None
+    val = row.get(col)
+    if pd.isna(val):
+        return None
+    logged = float(val)
+    proxy_col = resolver.get("mgo_pct")
+    if not proxy_col or proxy_col not in row.index or pd.isna(row.get(proxy_col)):
+        return None
+    assay_pct = float(row.get(proxy_col))
+    if logged > 15 and assay_pct < 2:
+        return "Logged magnesium % high but assay (MgO%) low"
+    if logged < 2 and assay_pct > 10:
+        return "Logged magnesium % low but assay (MgO%) high"
+    return None
+
+
 def _significance_for_logging_detail_issue(issue: str, issue_type: str) -> str:
     """Classify significance: High if major elements (Fe, SiO2, Al2O3, gangue) involved; Low if only minor (P, CaO, LOI, carbonate)."""
     if not issue:
@@ -333,7 +421,7 @@ def _significance_for_logging_detail_issue(issue: str, issue_type: str) -> str:
     issue_lower = issue.lower()
     major = any(x in issue_lower for x in ("fe", "sio2", "al2o3", "al ", "gangue", "mineralisation", "silica", "iron"))
     minor_only = any(x in issue_lower for x in ("p ", "p%", "cao", "loi", "carbonate")) and not major
-    if issue_type == "carbonate":
+    if issue_type in ("carbonate", "sulphide", "manganese", "mafics", "magnesium"):
         return "Low"
     if minor_only:
         return "Low"
@@ -583,7 +671,13 @@ def _comment_stats_logging_intervals(logging_df: pd.DataFrame) -> Dict[str, Any]
 
 
 def _add_mineralisation_accuracy_column(df: pd.DataFrame, resolver: ColumnResolver) -> pd.DataFrame:
-    """Add Logging Accuracy: Match, Mismatch, Pending Assays. QAQC04 logic."""
+    """Add Logging Accuracy: Match, Mismatch, Pending Assays. QAQC04 logic.
+
+    Match = logging consistent with assays: gangue <15% and assay mineralised, OR
+    gangue >=15% (or zonation Un/Le) and assay unmineralised.
+    When zonation is available (Un/Le/De/Hy/Pr), use it: Un/Le = unmineralised,
+    De/Hy/Pr = mineralised. Otherwise use total_gangue_pct < 15 for mineralised.
+    """
     result = df.copy()
     fe_col = resolver.get("fe_pct")
     sio2_col = resolver.get("sio2_pct")
@@ -593,8 +687,12 @@ def _add_mineralisation_accuracy_column(df: pd.DataFrame, resolver: ColumnResolv
         if col and col in result.columns:
             result[col] = pd.to_numeric(result[col], errors="coerce")
 
+    zonation_cols = _resolve_zonation_columns(result)
+    result_with_zonation, zonation_cols_derived = _derive_dominant_zonation_column(result, zonation_cols)
+    zonation_col = zonation_cols_derived.get("zonation")
+
     def determine_accuracy(row):
-        if fe_col not in result.columns or pd.isna(row.get(fe_col)):
+        if fe_col not in result_with_zonation.columns or pd.isna(row.get(fe_col)):
             return "Pending Assays"
         fe = row.get(fe_col)
         if pd.isna(fe):
@@ -606,12 +704,18 @@ def _add_mineralisation_accuracy_column(df: pd.DataFrame, resolver: ColumnResolv
             pd.notna(fe) and pd.notna(sio2) and pd.notna(al2o3)
             and float(fe) > 50 and float(sio2) < 10 and float(al2o3) < 5
         )
-        is_mineralised_logging = pd.notna(gangue) and float(gangue) < 15
+        zonation_val = _safe_str(row.get(zonation_col)).strip() if zonation_col else ""
+        if zonation_val in ("Un", "Le"):
+            is_mineralised_logging = False
+        elif zonation_val in ("De", "Hy", "Pr"):
+            is_mineralised_logging = True
+        else:
+            is_mineralised_logging = pd.notna(gangue) and float(gangue) < 15
         if is_mineralised_assay == is_mineralised_logging:
             return "Match"
         return "Mismatch"
 
-    result["Logging_Accuracy"] = result.apply(determine_accuracy, axis=1)
+    result["Logging_Accuracy"] = result_with_zonation.apply(determine_accuracy, axis=1)
     return result
 
 
@@ -1071,6 +1175,7 @@ def _build_intervals_with_images(
     data_coordinator,
     intervals: List[Dict[str, Any]],
     include_images: bool,
+    image_cache: ImageLookupCache = None,
 ) -> List[Dict[str, Any]]:
     result = []
     for item in intervals:
@@ -1080,6 +1185,7 @@ def _build_intervals_with_images(
                 data_coordinator,
                 item.get("hole_id"),
                 item.get("depth_to"),
+                cache=image_cache,
             )
         result.append({**item, "image": image_data})
     return result
@@ -1089,6 +1195,7 @@ def _build_grouping_groups_with_images(
     data_coordinator,
     groups: List[Dict[str, Any]],
     include_images: bool,
+    image_cache: ImageLookupCache = None,
 ) -> List[Dict[str, Any]]:
     result = []
     for grp in groups:
@@ -1100,6 +1207,7 @@ def _build_grouping_groups_with_images(
                     data_coordinator,
                     it.get("hole_id"),
                     it.get("depth_to"),
+                    cache=image_cache,
                 )
             intervals_with_img.append({**it, "image": image_data})
         result.append({
@@ -1118,6 +1226,7 @@ def _build_outlier_intervals_with_images(
     data_coordinator,
     intervals: List[Dict[str, Any]],
     include_images: bool,
+    image_cache: ImageLookupCache = None,
 ) -> List[Dict[str, Any]]:
     result = []
     for item in intervals:
@@ -1127,25 +1236,37 @@ def _build_outlier_intervals_with_images(
                 data_coordinator,
                 item.get("hole_id"),
                 item.get("depth_to"),
+                cache=image_cache,
             )
         issue = item.get("reason") or item.get("outlier_reason") or "Geochemistry outlier vs strat expectation"
         result.append({**item, "issue": issue, "image": image_data})
     return result
 
 
-def _lookup_interval_image(data_coordinator, hole_id: Optional[str], depth_to: Optional[float]) -> Optional[str]:
+def _lookup_interval_image(
+    data_coordinator,
+    hole_id: Optional[str],
+    depth_to: Optional[float],
+    cache: ImageLookupCache = None,
+) -> Optional[str]:
     """
     Look up and encode an interval image from the data coordinator.
 
     Tries multiple moisture statuses (Wet, Dry, None) to find a matching image,
     since the image index keys include moisture_status but the lookup may not know it.
+    If cache is provided, results are stored and reused for the same (hole_id, depth_to)
+    to avoid duplicate file I/O when the same interval appears in multiple lists.
     """
     if not data_coordinator or not hole_id or depth_to is None:
         return None
     try:
         hole_str = str(hole_id).upper()
         depth_float = float(depth_to)
+        cache_key = (hole_str, depth_float)
+        if cache is not None and cache_key in cache:
+            return cache[cache_key]
 
+        encoded = None
         # Try different moisture statuses - images are typically indexed with "Wet" or "Dry"
         for moisture in ("Wet", "Dry", None):
             key = ImageKey(hole_str, depth_float, moisture)
@@ -1153,25 +1274,31 @@ def _lookup_interval_image(data_coordinator, hole_id: Optional[str], depth_to: O
             if img_path:
                 encoded = _encode_image_base64(img_path)
                 if encoded:
-                    return encoded
+                    break
 
-        # If no direct match, try to find any image for this hole/depth via the hole index
-        # This handles cases where the exact moisture_status doesn't match
-        try:
-            hole_keys = data_coordinator.get_keys_for_hole(hole_str)
-            depth_int = int(depth_float)
-            for key in hole_keys:
-                if key.depth_to_int == depth_int:
-                    img_path = data_coordinator.get_image_path(key)
-                    if img_path:
-                        encoded = _encode_image_base64(img_path)
-                        if encoded:
-                            return encoded
-        except Exception:
-            pass
+        if not encoded:
+            # If no direct match, try to find any image for this hole/depth via the hole index
+            try:
+                hole_keys = data_coordinator.get_keys_for_hole(hole_str)
+                depth_int = int(depth_float)
+                for key in hole_keys:
+                    if key.depth_to_int == depth_int:
+                        img_path = data_coordinator.get_image_path(key)
+                        if img_path:
+                            encoded = _encode_image_base64(img_path)
+                            if encoded:
+                                break
+            except Exception:
+                pass
+
+        if cache is not None:
+            cache[cache_key] = encoded
+        return encoded
 
     except Exception as e:
         logger.debug(f"Image lookup failed for {hole_id}@{depth_to}: {e}")
+        if cache is not None:
+            cache[(str(hole_id).upper(), float(depth_to))] = None
         return None
     return None
 

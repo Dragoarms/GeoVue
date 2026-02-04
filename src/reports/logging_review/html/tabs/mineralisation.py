@@ -115,13 +115,13 @@ def render_mineralisation_section(report: Dict[str, Any], logger_id: str) -> str
             <div class="info-box">
                 <h4 data-i18n-fr="Note methodologique" data-i18n-en="Methodology note">Note methodologique</h4>
                 <ul>
-                    <li data-i18n-html-fr="<strong>Match</strong> = Le logging est coherent avec les essais (gangue &lt;15% loggee ET essai montre mineralise, OU gangue &gt;=15% loggee ET essai montre non-mineralise)"
-                        data-i18n-html-en="<strong>Match</strong> = Logging is consistent with assays (gangue &lt;15% logged AND assay shows mineralised, OR gangue &gt;=15% logged AND assay shows unmineralised)">
-                        <strong>Match</strong> = Logging is consistent with assays (gangue &lt;15% logged AND assay shows mineralised, OR gangue &gt;=15% logged AND assay shows unmineralised)
+                    <li data-i18n-html-fr="<strong>Match</strong> = Le logging est coherent avec les essais (zonation Un/Le ou gangue &gt;=15% = non-mineralise; De/Hy/Pr ou gangue &lt;15% = mineralise; accord avec l'essai)"
+                        data-i18n-html-en="<strong>Match</strong> = Logging is consistent with assays (zonation Un/Le or gangue &gt;=15% = unmineralised; De/Hy/Pr or gangue &lt;15% = mineralised; agrees with assay)">
+                        <strong>Match</strong> = Logging is consistent with assays (zonation Un/Le or gangue &gt;=15% = unmineralised; De/Hy/Pr or gangue &lt;15% = mineralised; agrees with assay)
                     </li>
-                    <li data-i18n-html-fr="<strong>Mismatch</strong> = Le logging est incoherent avec les essais (ex. gangue &lt;15% loggee mais essai montre non-mineralise)"
-                        data-i18n-html-en="<strong>Mismatch</strong> = Logging inconsistent with assays (e.g. gangue &lt;15% logged but assay shows unmineralised)">
-                        <strong>Mismatch</strong> = Logging inconsistent with assays (e.g. gangue &lt;15% logged but assay shows unmineralised)
+                    <li data-i18n-html-fr="<strong>Mismatch</strong> = Le logging est incoherent avec les essais (ex. zonation mineralise ou gangue &lt;15% mais essai montre non-mineralise)"
+                        data-i18n-html-en="<strong>Mismatch</strong> = Logging inconsistent with assays (e.g. mineralised zonation or gangue &lt;15% but assay shows unmineralised)">
+                        <strong>Mismatch</strong> = Logging inconsistent with assays (e.g. mineralised zonation or gangue &lt;15% but assay shows unmineralised)
                     </li>
                     <li data-i18n-html-fr="<strong>Pending Assays</strong> = Pas de donnees d'essai disponibles pour cet intervalle"
                         data-i18n-html-en="<strong>Pending Assays</strong> = No assay data available for this interval">

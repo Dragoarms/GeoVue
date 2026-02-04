@@ -56,6 +56,8 @@ class ReportData(TypedDict, total=False):
     outlier_box_plot_layout: Any
     outlier_scatter_data: Any
     outlier_scatter_layout: Any
+    outlier_pca_data: Any
+    outlier_pca_layout: Any
     map: Dict[str, Any]
     project_codes: List[str]
     has_project_scope: bool
@@ -87,11 +89,15 @@ class IntervalItem(TypedDict, total=False):
 
 
 class LoggingDetailIntervals(TypedDict):
-    """Intervals for the logging-detail tab (fines, magnetite, goethite, carbonate_gangue)."""
+    """Intervals for the logging-detail tab (fines, magnetite, goethite, carbonate_gangue, sulphide/manganese/mafics/magnesium gangue)."""
     fines: List[IntervalItem]
     magnetite: List[IntervalItem]
     goethite: List[IntervalItem]
     carbonate_gangue: List[IntervalItem]
+    sulphide_gangue: List[IntervalItem]
+    manganese_gangue: List[IntervalItem]
+    mafics_gangue: List[IntervalItem]
+    magnesium_gangue: List[IntervalItem]
 
 
 class GroupingGroupItem(TypedDict, total=False):

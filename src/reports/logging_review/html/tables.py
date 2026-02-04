@@ -201,10 +201,10 @@ def _render_zonation_evidence_table(
             f"<td><input type=\"checkbox\" data-review-id=\"{checkbox_id}\"></td>"
             f"<td class=\"sortable\" data-sort=\"{html.escape(_safe_str(item.get('hole_id')))}\">{html.escape(_safe_str(item.get('hole_id')))}</td>"
             f"<td class=\"sortable\" data-sort=\"{item.get('depth_from', 0) or 0}\">{html.escape(str(depth))}</td>"
-            f"<td data-sort=\"{html.escape(_safe_str(item.get('logged_zonation')))}\">{html.escape(_safe_str(item.get('logged_zonation')))}</td>"
-            f"<td data-sort=\"{html.escape(_safe_str(item.get('should_be')))}\">{html.escape(_safe_str(item.get('should_be')))}</td>"
             f"<td class=\"{validation_class}\" data-sort=\"{validation}\">{html.escape(validation)}</td>"
             f"<td class=\"significance-{significance.lower()}\" data-sort=\"{significance}\">{html.escape(significance)}</td>"
+            f"<td data-sort=\"{html.escape(_safe_str(item.get('logged_zonation')))}\">{html.escape(_safe_str(item.get('logged_zonation')))}</td>"
+            f"<td data-sort=\"{html.escape(_safe_str(item.get('should_be')))}\">{html.escape(_safe_str(item.get('should_be')))}</td>"
             f"<td class=\"sortable\" data-sort=\"{total_g or 0}\">{total_g_display}</td>"
             f"<td class=\"sortable\" data-sort=\"{item.get('de_pct') or 0}\">{de_display}</td>"
             f"<td class=\"sortable\" data-sort=\"{item.get('hy_pct') or 0}\">{hy_display}</td>"
@@ -218,10 +218,10 @@ def _render_zonation_evidence_table(
         "<th></th>"
         "<th class=\"sortable\" data-i18n-fr=\"Trou\" data-i18n-en=\"Hole\">Hole</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Profondeur\" data-i18n-en=\"Depth\">Depth</th>"
-        "<th class=\"sortable\" data-i18n-fr=\"Zonation loggee\" data-i18n-en=\"Logged zonation\">Logged zonation</th>"
-        "<th class=\"sortable\" data-i18n-fr=\"Devrait etre\" data-i18n-en=\"Should be\">Should be</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Validation\" data-i18n-en=\"Validation\">Validation</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Significance\" data-i18n-en=\"Significance\">Significance</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Zonation loggee\" data-i18n-en=\"Logged zonation\">Logged zonation</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Devrait etre\" data-i18n-en=\"Should be\">Should be</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Gangue totale % loggee\" data-i18n-en=\"Total gangue % Logged\">Total gangue % Logged</th>"
         "<th class=\"sortable\">Logged De %</th>"
         "<th class=\"sortable\">Logged Hy %</th>"
@@ -234,16 +234,60 @@ def _render_zonation_evidence_table(
     )
 
 
+# Chemistry columns per logging-detail issue type (header_label, source_dict, key)
+LOGGING_DETAIL_CHEM_COLUMNS: Dict[str, List[Tuple[str, str, str]]] = {
+    "fines": [
+        ("Fe%", "geochem", "Fe"),
+        ("SiO2%", "geochem", "SiO2"),
+        ("Al2O3%", "geochem", "Al2O3"),
+    ],
+    "magnetite": [
+        ("Fe%", "geochem", "Fe"),
+        ("LOI1000%", "assay", "loi_1000_pct"),
+        ("Magnetite%", "assay", "magnetite_pct"),
+    ],
+    "goethite": [
+        ("Hy%", "assay", "hy_pct"),
+        ("LOI%", "assay", "loi_pct"),
+    ],
+    "carbonate_gangue": [
+        ("Carbonate%", "assay", "carbonate_pct"),
+        ("CaO%", "assay", "cao_pct"),
+        ("LOI%", "assay", "loi_pct"),
+    ],
+    "sulphide_gangue": [
+        ("Sulphide%", "assay", "sulphide_pct"),
+        ("S%", "assay", "s_pct"),
+    ],
+    "manganese_gangue": [
+        ("Manganese%", "assay", "manganese_pct"),
+        ("Mn%", "assay", "mn_pct"),
+    ],
+    "mafics_gangue": [
+        ("Mafics%", "assay", "mafics_pct"),
+        ("Fe%", "assay", "fe_pct"),
+    ],
+    "magnesium_gangue": [
+        ("Magnesium%", "assay", "magnesium_pct"),
+        ("MgO%", "assay", "mgo_pct"),
+    ],
+}
+
+
 def _render_logging_detail_evidence_table(
     intervals: List[Dict[str, Any]], logger_id: str, table_id: str
 ) -> str:
-    """One evidence table per issue type: Hole, Depth, Issue, Fe%, SiO2%, Al2O3%, Classified as, Image (small placeholder)."""
+    """Evidence table per issue type: Hole, Depth, Issue, Significance, chemistry columns (by table_id), Classified as, Image."""
     if not intervals:
         return (
             "<div class=\"empty\" data-i18n-fr=\"Aucun intervalle signale pour revue.\" "
             "data-i18n-en=\"No intervals flagged for review.\">"
             "No intervals flagged for review.</div>"
         )
+    chem_cols = LOGGING_DETAIL_CHEM_COLUMNS.get(table_id, LOGGING_DETAIL_CHEM_COLUMNS["fines"])
+    thead_chem = "".join(
+        f'<th class="sortable">{html.escape(label)}</th>' for label, _s, _k in chem_cols
+    )
     rows = []
     for idx, item in enumerate(intervals):
         checkbox_id = f"{logger_id}::logging_detail::{table_id}::{idx}"
@@ -262,23 +306,30 @@ def _render_logging_detail_evidence_table(
         classified_as = html.escape(_safe_str(item.get("classified_as", item.get("strat", "-"))))
         significance = item.get("significance", "High")
         geochem = item.get("geochem", {})
-        fe_val = geochem.get("Fe")
-        sio2_val = geochem.get("SiO2")
-        al2o3_val = geochem.get("Al2O3")
-        fe_display = f"{fe_val:.1f}" if fe_val is not None else "-"
-        sio2_display = f"{sio2_val:.1f}" if sio2_val is not None else "-"
-        al2o3_display = f"{al2o3_val:.1f}" if al2o3_val is not None else "-"
-
+        assay = item.get("assay", {})
+        chem_cells = []
+        for _label, source, key in chem_cols:
+            if source == "geochem":
+                val = geochem.get(key)
+            else:
+                val = assay.get(key)
+            disp = f"{val:.1f}" if val is not None else "-"
+            sort_val = val if val is not None else 0
+            chem_cells.append(
+                f'<td class="geochem-cell" data-sort="{sort_val}">{html.escape(disp)}</td>'
+            )
+        chem_html = "".join(chem_cells)
+        validation = item.get("validation", "Mismatch")
+        validation_class = "validation-mismatch" if validation == "Mismatch" else "validation-match"
         rows.append(
             "<tr class=\"compact-row\">"
             f"<td><input type=\"checkbox\" data-review-id=\"{checkbox_id}\"></td>"
             f"<td class=\"sortable\" data-sort=\"{html.escape(_safe_str(item.get('hole_id')))}\">{html.escape(_safe_str(item.get('hole_id')))}</td>"
             f"<td class=\"sortable\" data-sort=\"{item.get('depth_from', 0) or 0}\">{html.escape(str(depth))}</td>"
-            f"<td class=\"issue-cell\">{html.escape(_safe_str(item.get('issue')))}</td>"
+            f"<td class=\"{validation_class}\" data-sort=\"{validation}\">{html.escape(validation)}</td>"
             f"<td class=\"significance-{significance.lower()}\" data-sort=\"{significance}\">{html.escape(significance)}</td>"
-            f"<td class=\"geochem-cell\" data-sort=\"{fe_val or 0}\">{fe_display}</td>"
-            f"<td class=\"geochem-cell\" data-sort=\"{sio2_val or 0}\">{sio2_display}</td>"
-            f"<td class=\"geochem-cell\" data-sort=\"{al2o3_val or 0}\">{al2o3_display}</td>"
+            f"<td class=\"issue-cell\">{html.escape(_safe_str(item.get('issue')))}</td>"
+            f"{chem_html}"
             f"<td class=\"classification-cell\">{classified_as}</td>"
             f"<td class=\"image-cell-compact\">{image_html}</td>"
             "</tr>"
@@ -290,11 +341,10 @@ def _render_logging_detail_evidence_table(
         "<th></th>"
         "<th class=\"sortable\" data-i18n-fr=\"Trou\" data-i18n-en=\"Hole\">Hole</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Profondeur\" data-i18n-en=\"Depth\">Depth</th>"
-        "<th class=\"sortable\" data-i18n-fr=\"Probleme\" data-i18n-en=\"Issue\">Issue</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Validation\" data-i18n-en=\"Validation\">Validation</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Significance\" data-i18n-en=\"Significance\">Significance</th>"
-        "<th class=\"sortable\">Fe%</th>"
-        "<th class=\"sortable\">SiO2%</th>"
-        "<th class=\"sortable\">Al2O3%</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Probleme\" data-i18n-en=\"Issue\">Issue</th>"
+        f"{thead_chem}"
         "<th data-i18n-fr=\"Classe comme\" data-i18n-en=\"Classified as\">Classified as</th>"
         "<th data-i18n-fr=\"Image\" data-i18n-en=\"Image\">Image</th>"
         "</tr></thead>"
@@ -403,15 +453,18 @@ def _render_outlier_table(intervals: List[Dict[str, Any]], logger_id: str) -> st
         })
         details_payload = html.escape(details_json, quote=True)
 
+        validation = "Flagged"
+        validation_class = "validation-mismatch"
         rows.append(
             "<tr data-outlier-idx=\"" + str(idx) + "\">"
             f"<td><input type=\"checkbox\" data-review-id=\"{checkbox_id}\"></td>"
             f"<td class=\"sortable\" data-sort=\"{html.escape(_safe_str(item.get('hole_id')))}\">{html.escape(_safe_str(item.get('hole_id')))}</td>"
             f"<td class=\"sortable\" data-sort=\"{item.get('depth_from') or 0}\">{html.escape(depth)}</td>"
+            f"<td class=\"{validation_class}\" data-sort=\"{validation}\">{html.escape(validation)}</td>"
+            f"<td class=\"significance-{significance.lower()}\" data-sort=\"{significance}\">{html.escape(significance)}</td>"
             f"<td>{html.escape(_safe_str(item.get('recorded_as', item.get('strat', ''))))}</td>"
             f"<td class=\"most-likely-cell\">{html.escape(_safe_str(item.get('most_likely', '-')))}</td>"
             f"<td class=\"flags-cell\">{flags_html}</td>"
-            f"<td class=\"significance-{significance.lower()}\" data-sort=\"{significance}\">{html.escape(significance)}</td>"
             f"<td class=\"geochem-cell\" data-sort=\"{fe_val or 0}\">{fe_display}</td>"
             f"<td class=\"geochem-cell\" data-sort=\"{sio2_val or 0}\">{sio2_display}</td>"
             f"<td class=\"geochem-cell\" data-sort=\"{al2o3_val or 0}\">{al2o3_display}</td>"
@@ -426,10 +479,11 @@ def _render_outlier_table(intervals: List[Dict[str, Any]], logger_id: str) -> st
         "<th></th>"
         "<th class=\"sortable\" data-i18n-fr=\"Trou\" data-i18n-en=\"Hole\">Hole</th>"
         "<th class=\"sortable\" data-i18n-fr=\"Profondeur\" data-i18n-en=\"Depth\">Depth</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Validation\" data-i18n-en=\"Validation\">Validation</th>"
+        "<th class=\"sortable\" data-i18n-fr=\"Significance\" data-i18n-en=\"Significance\">Significance</th>"
         "<th data-i18n-fr=\"Enregistre\" data-i18n-en=\"Recorded\">Recorded</th>"
         "<th data-i18n-fr=\"Plus probable\" data-i18n-en=\"Likely\">Likely</th>"
         "<th data-i18n-fr=\"Drapeaux\" data-i18n-en=\"Flags\">Flags</th>"
-        "<th class=\"sortable\" data-i18n-fr=\"Significance\" data-i18n-en=\"Significance\">Significance</th>"
         "<th class=\"sortable\">Fe%</th><th class=\"sortable\">SiO2%</th><th class=\"sortable\">Al2O3%</th><th class=\"sortable\">P%</th>"
         "<th data-i18n-fr=\"Actions\" data-i18n-en=\"Actions\">Actions</th>"
         "<th data-i18n-fr=\"Image\" data-i18n-en=\"Image\">Image</th>"

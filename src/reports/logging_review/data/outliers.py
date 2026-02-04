@@ -112,21 +112,13 @@ def compute_hybrid_outlier_scores(
         cov_shrink = (1 - alpha) * cov + alpha * np.eye(dim)
         inv_cov = np.linalg.pinv(cov_shrink)
 
-        mahal = []
-        for idx, row in z_centered.iterrows():
-            vec = row.values.astype(float)
-            if np.all(np.isnan(vec)):
-                mahal.append(0.0)
-                continue
-            mask = ~np.isnan(vec)
-            vec = vec[mask]
-            if vec.size == 0:
-                mahal.append(0.0)
-                continue
-            sub_cov = inv_cov[np.ix_(mask, mask)]
-            mahal.append(float(np.sqrt(vec.T @ sub_cov @ vec)))
-
-        mahal = pd.Series(mahal, index=group.index)
+        # Vectorized Mahalanobis: diag(X @ inv_cov @ X.T); NaN rows get 0
+        X = z_centered.fillna(0.0).values
+        mahal_sq = np.einsum("ij,jk,ik->i", X, inv_cov, X)
+        mahal_arr = np.sqrt(np.maximum(mahal_sq, 0.0))
+        all_nan = z_centered.isna().all(axis=1).values
+        mahal_arr[all_nan] = 0.0
+        mahal = pd.Series(mahal_arr, index=group.index)
         # Normalize by 95th percentile so scores are comparable across strats.
         # Score of 1.0 = 95th percentile, >1 = more extreme (no median centering).
         mahal_p95 = mahal.quantile(0.95)
