@@ -1,0 +1,30 @@
+[project]
+name = "geovue-capture"
+version = "2.8.0"
+description = "GeoVue Capture - Automated chip tray photography system for Raspberry Pi 5"
+requires-python = ">=3.11"
+
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "pillow",
+]
+
+[project.optional-dependencies]
+pi = [
+    "gpiod>=2.0",
+    "lgpio",
+]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+geovue-capture = "geovue_capture.main:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
