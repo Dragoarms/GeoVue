@@ -155,24 +155,59 @@ class WetDryPredictor:
             logger.error(f"Prediction error for {image_path}: {e}")
             return ("unknown", 0.0)
 
-    def predict_batch(self, image_paths: List[str]) -> List[Tuple[str, float]]:
+    def predict_batch(
+        self,
+        image_paths: List[str],
+        batch_size: int = 32,
+    ) -> List[Tuple[str, float]]:
         """
-        Predict wet/dry for multiple images efficiently.
+        Predict wet/dry for multiple images efficiently using batched inference.
+
+        Stacks images into tensors and runs a single forward pass per batch,
+        instead of one model call per image.
 
         Args:
             image_paths: List of paths to compartment images
+            batch_size: Number of images per forward pass
 
         Returns:
-            List of (label, confidence) tuples
+            List of (label, confidence) tuples, in the same order as image_paths
         """
         if not self.is_available:
             return [("unknown", 0.0) for _ in image_paths]
 
-        results = []
+        # Pre-load and transform all images, tracking which indices failed
+        tensors = []
+        index_map = []  # maps tensor position -> original index
+        results: List[Tuple[str, float]] = [("unknown", 0.0)] * len(image_paths)
 
-        for image_path in image_paths:
-            result = self.predict_single(image_path)
-            results.append(result)
+        for i, image_path in enumerate(image_paths):
+            try:
+                image = Image.open(image_path).convert("RGB")
+                tensor = self._transform(image)
+                tensors.append(tensor)
+                index_map.append(i)
+            except Exception as e:
+                logger.error(f"Failed to load image {image_path}: {e}")
+                results[i] = ("unknown", 0.0)
+
+        if not tensors:
+            return results
+
+        # Run batched inference
+        with torch.no_grad():
+            for batch_start in range(0, len(tensors), batch_size):
+                batch_tensors = tensors[batch_start : batch_start + batch_size]
+                batch_indices = index_map[batch_start : batch_start + batch_size]
+
+                batch = torch.stack(batch_tensors).to(self._device)
+                outputs = self._model(batch)
+                probs = torch.nn.functional.softmax(outputs, dim=1)
+                confidences, predicted = probs.max(1)
+
+                for j, orig_idx in enumerate(batch_indices):
+                    label = "Wet" if predicted[j].item() == 1 else "Dry"
+                    results[orig_idx] = (label, confidences[j].item())
 
         return results
 

@@ -883,14 +883,15 @@ class QAQCScanner:
 
             self.logger.info(f"Running ML predictions on {len(unclassified)} unclassified items...")
 
-            for item in unclassified:
-                label, confidence = predictor.predict_single(item.image_path)
+            image_paths = [item.image_path for item in unclassified]
+            batch_results = predictor.predict_batch(image_paths)
 
+            for item, (label, confidence) in zip(unclassified, batch_results):
                 if label in ("Wet", "Dry"):
                     item.moisture = label
                     item.ml_predicted = True
                     item.ml_confidence = confidence
-                    item.quality = "OK"  # Default to OK for ML predictions
+                    item.quality = "OK"
 
             # Log summary
             ml_predicted = [i for i in items if i.ml_predicted]

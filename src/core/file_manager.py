@@ -889,26 +889,39 @@ class FileManager:
             if status in ["KEEP_ORIGINAL", "MISSING"]:
                 return result
 
-            # Save locally first
-            local_path = self.save_compartment(
-                image,
-                hole_id,
-                compartment_depth,
-                has_data=False,
-                output_format=output_format,
-                source_uid=source_uid,
-            )
+            # Guard against invalid/unknown status — never write an unclassified file
+            # to the approved folder
+            if status not in ["Wet", "Dry"]:
+                self.logger.error(
+                    f"save_reviewed_compartment called with invalid status '{status}' "
+                    f"for {hole_id}_CC_{compartment_depth:03d} — skipping to prevent "
+                    f"unclassified file in approved folder"
+                )
+                return result
 
-            if local_path:
-                # Add suffix for wet/dry
-                if status in ["Wet", "Dry"]:
-                    suffix = f"_{status}"
-                    base, ext = os.path.splitext(local_path)
-                    new_local_path = f"{base}{suffix}{ext}"
-                    os.rename(local_path, new_local_path)
-                    local_path = new_local_path
+            # Build the classified filename upfront — no intermediate unclassified file
+            save_dir = self.get_hole_dir("approved_compartments", hole_id)
+            filename = f"{hole_id}_CC_{compartment_depth:03d}_{status}.{output_format}"
+            local_path = os.path.join(save_dir, filename)
 
-                result["local_path"] = local_path
+            # Save directly to final classified path
+            if output_format.lower() == "png" and source_uid:
+                success = self.save_png_with_uid(image, local_path, source_uid)
+                if not success:
+                    cv2.imwrite(local_path, image)
+            elif output_format.lower() == "jpg":
+                cv2.imwrite(local_path, image, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                if source_uid:
+                    self.embed_uid_in_image(local_path, source_uid)
+            else:
+                cv2.imwrite(local_path, image)
+
+            if not os.path.exists(local_path):
+                self.logger.error(f"Failed to write reviewed compartment: {local_path}")
+                return result
+
+            self.logger.info(f"Saved reviewed compartment: {local_path}")
+            result["local_path"] = local_path
 
                 # Upload to shared folder if configured
                 shared_path = self.get_shared_path(
