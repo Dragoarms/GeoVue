@@ -1,0 +1,1341 @@
+{
+  "version": "1.0",
+  "description": "Mineral code lookup table for QAQC validation. Converted from ReadMe.xlsx Lookups_Mineral_Logging_Codes sheet.",
+  "codes": {
+    "AB": {
+      "name": "Archaean Mafic Unassigned",
+      "hardness": 0,
+      "gangue_type": 6,
+      "gangue_name": "Mafics",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "AC": {
+      "name": "Grey Chert",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "AV": {
+      "name": "Acid volcanic",
+      "hardness": 0,
+      "gangue_type": 6,
+      "gangue_name": "Mafics",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "BA": {
+      "name": "Basalt",
+      "hardness": 5,
+      "gangue_type": 6,
+      "gangue_name": "Mafics",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "BC": {
+      "name": "Black chert",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "BS": {
+      "name": "Black shale",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CC": {
+      "name": "Calcrete",
+      "hardness": 1,
+      "gangue_type": 3,
+      "gangue_name": "Carbonate",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CD": {
+      "name": "Crocidolite",
+      "hardness": 1,
+      "gangue_type": 7,
+      "gangue_name": "Undefined",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CF": {
+      "name": "Cavity fill",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CFF": {
+      "name": "Cavity fill friable",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "CFM": {
+      "name": "Cavity fill medium",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "CFP": {
+      "name": "Cavity fill. Partial",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "CH": {
+      "name": "Chert",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CHF": {
+      "name": "Chert friable",
+      "hardness": 1,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CHH": {
+      "name": "Chert Hard",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CHHP": {
+      "name": "Chert - Unknown",
+      "hardness": 1,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CHL": {
+      "name": "Chlorite",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CHM": {
+      "name": "Chert Medium",
+      "hardness": 3,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CHP": {
+      "name": "Powdery Chert",
+      "hardness": 1,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CL": {
+      "name": "Chlorite",
+      "hardness": 1,
+      "gangue_type": 8,
+      "gangue_name": "Magnesium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CS": {
+      "name": "Carbonaceous shale",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "CT": {
+      "name": "Calcite",
+      "hardness": 1,
+      "gangue_type": 3,
+      "gangue_name": "Carbonate",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "DC": {
+      "name": "Dol/calc clay",
+      "hardness": 1,
+      "gangue_type": 3,
+      "gangue_name": "Carbonate",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "DM": {
+      "name": "Dolomite",
+      "hardness": 5,
+      "gangue_type": 3,
+      "gangue_name": "Carbonate",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "DS": {
+      "name": "Dol.calc shale",
+      "hardness": 1,
+      "gangue_type": 3,
+      "gangue_name": "Carbonate",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "DT": {
+      "name": "Dolerite",
+      "hardness": 5,
+      "gangue_type": 8,
+      "gangue_name": "Magnesium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "EP": {
+      "name": "Epidote",
+      "hardness": 3,
+      "gangue_type": 7,
+      "gangue_name": "Undefined",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "FS": {
+      "name": "Ferruginised shale",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "FSP": {
+      "name": "Feldspar",
+      "hardness": 3,
+      "gangue_type": 6,
+      "gangue_name": "Mafics",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "FW": {
+      "name": "Fossil wood",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "GC": {
+      "name": "Goethitised chert",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "GGM": {
+      "name": "Glassy Goethite (Vitreous)",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "GH": {
+      "name": "Goethite-Hematite",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "HyDe",
+      "numeric_zonation": "Mix"
+    },
+    "GHF": {
+      "name": "Goethite-Hematite friable",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "HyDe",
+      "numeric_zonation": "Mix"
+    },
+    "GHH": {
+      "name": "Goethite-Hematite Hard (d-dense)",
+      "hardness": 5,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "HyDe",
+      "numeric_zonation": "Mix"
+    },
+    "GHHD": {
+      "name": "Goethite-Hematite Hard (dense)",
+      "hardness": 5,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "HyDe",
+      "numeric_zonation": "Mix"
+    },
+    "GHHd": {
+      "name": "Goethite-Hematite Hard (dense)",
+      "hardness": 5,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "HyDe",
+      "numeric_zonation": "Mix"
+    },
+    "GHHp": {
+      "name": "Goethite-Hematite Hard (porous)",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "HyDe",
+      "numeric_zonation": "Mix"
+    },
+    "GHM": {
+      "name": "Goethite-Hematite medium",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "HyDe",
+      "numeric_zonation": "Mix"
+    },
+    "GHMW": {
+      "name": "Goethite-Hematite weathered",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "HyDe",
+      "numeric_zonation": "Mix"
+    },
+    "GHP": {
+      "name": "Goethite-Hematite powdery",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "HyDe",
+      "numeric_zonation": "Mix"
+    },
+    "GO": {
+      "name": "Goethite",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "GOF": {
+      "name": "Goethite-only-Friable",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "GOH": {
+      "name": "Goethite hard",
+      "hardness": 5,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "GOM": {
+      "name": "Goethite medium",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "GP": {
+      "name": "Gypsum",
+      "hardness": 1,
+      "gangue_type": 4,
+      "gangue_name": "Sulphide or Sulphate",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "GQ": {
+      "name": "Griqualandite (limonitised crocidolite)",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "GR": {
+      "name": "Granite",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "GS": {
+      "name": "Goethitic Shale",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "GSF": {
+      "name": "Goethite Shale friable",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "GSM": {
+      "name": "Goethite Shale medium",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "GSP": {
+      "name": "Goethite Shale powdery",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "GYP": {
+      "name": "Gypsum",
+      "hardness": 1,
+      "gangue_type": 4,
+      "gangue_name": "Sulphide or Sulphate",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "HC": {
+      "name": "Hematitic chert",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "HGF": {
+      "name": "Hematite Goethite friable",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "DeHy",
+      "numeric_zonation": "Mix"
+    },
+    "HGH": {
+      "name": "Hematite Goethite hard",
+      "hardness": 5,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "DeHy",
+      "numeric_zonation": "Mix"
+    },
+    "HGM": {
+      "name": "Hematite Goethite medium",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "DeHy",
+      "numeric_zonation": "Mix"
+    },
+    "HO": {
+      "name": "Hematite",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "HOF": {
+      "name": "Hematite friable",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "HOH": {
+      "name": "Hematite Hard",
+      "hardness": 5,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "HOM": {
+      "name": "Hematite medium",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "HOP": {
+      "name": "Hematite powdery",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "HOS": {
+      "name": "Hematite Specular",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "HOX": {
+      "name": "Micro to Nanoplate hematite",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "HRN": {
+      "name": "Hornblende",
+      "hardness": 5,
+      "gangue_type": 6,
+      "gangue_name": "Mafics",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "HS": {
+      "name": "Hematitic shale",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "HSF": {
+      "name": "Hematite Shale friable",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "HSM": {
+      "name": "Hematite Shale medium",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "HSP": {
+      "name": "Hematite Shale powdery",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "KA": {
+      "name": "Kaolin",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "KL": {
+      "name": "Clay",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "KLF": {
+      "name": "Clays friable",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "KLM": {
+      "name": "Clays medium",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "KLP": {
+      "name": "Clays powdery",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "KS": {
+      "name": "Khaki shale",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "LC": {
+      "name": "Limonitised chert",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "LG": {
+      "name": "Limonite Goethite",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "LH": {
+      "name": "NULL",
+      "hardness": 0,
+      "gangue_type": 7,
+      "gangue_name": "Undefined",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "LI": {
+      "name": "Lignite",
+      "hardness": 1,
+      "gangue_type": 7,
+      "gangue_name": "Undefined",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "LK": {
+      "name": "Limonitic clay",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "LM": {
+      "name": "Limestone",
+      "hardness": 3,
+      "gangue_type": 3,
+      "gangue_name": "Carbonate",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "LO": {
+      "name": "NULL",
+      "hardness": 0,
+      "gangue_type": 7,
+      "gangue_name": "Undefined",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "LS": {
+      "name": "Limonitised shale",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "MBB": {
+      "name": "Magnetic BiF Biscuity",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "MBH": {
+      "name": "Magnetic BIF Hard",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "MBM": {
+      "name": "Magnetic BiF Medium",
+      "hardness": 3,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "MG": {
+      "name": "Martite-Goethite (Goethite)",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "PrHy",
+      "numeric_zonation": "Mix"
+    },
+    "MGF": {
+      "name": "Martite Goethite friable",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "PrHy",
+      "numeric_zonation": "Mix"
+    },
+    "MGH": {
+      "name": "Martite Goethite Hard",
+      "hardness": 5,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "PrHy",
+      "numeric_zonation": "Mix"
+    },
+    "MGM": {
+      "name": "Martite Goethite medium",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "PrHy",
+      "numeric_zonation": "Mix"
+    },
+    "MI": {
+      "name": "Maghemite",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "MIC": {
+      "name": "Mica",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "MN": {
+      "name": "Manganese",
+      "hardness": 1,
+      "gangue_type": 5,
+      "gangue_name": "Manganese",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "MNF": {
+      "name": "Manganese Friable",
+      "hardness": 1,
+      "gangue_type": 5,
+      "gangue_name": "Manganese",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "MNH": {
+      "name": "Manganese Hard",
+      "hardness": 5,
+      "gangue_type": 5,
+      "gangue_name": "Manganese",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "MNM": {
+      "name": "Manganese Medium",
+      "hardness": 3,
+      "gangue_type": 5,
+      "gangue_name": "Manganese",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "MNP": {
+      "name": "Manganese Powered",
+      "hardness": 1,
+      "gangue_type": 5,
+      "gangue_name": "Manganese",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "MO": {
+      "name": "Martite Only",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Pr",
+      "numeric_zonation": 2
+    },
+    "MOF": {
+      "name": "Martite friable",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Pr",
+      "numeric_zonation": 2
+    },
+    "MOH": {
+      "name": "Martite hard",
+      "hardness": 5,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Pr",
+      "numeric_zonation": 2
+    },
+    "MOM": {
+      "name": "Martite medium",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Pr",
+      "numeric_zonation": 2
+    },
+    "MS": {
+      "name": "Manganiferous shale",
+      "hardness": 1,
+      "gangue_type": 5,
+      "gangue_name": "Manganese",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "MT": {
+      "name": "Magnetite",
+      "hardness": 5,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Pr",
+      "numeric_zonation": 2
+    },
+    "MV": {
+      "name": "Mafic Volcanics",
+      "hardness": 5,
+      "gangue_type": 6,
+      "gangue_name": "Mafics",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "NB": {
+      "name": "Green BIF",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "NBB": {
+      "name": "Non-magnetic BiF Biscuity",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "NBH": {
+      "name": "Non-magnetic BIF Hard",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "NBM": {
+      "name": "Non-Magnetic BIF Medium",
+      "hardness": 3,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "NC": {
+      "name": "Green chert",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "NS": {
+      "name": "Green shale",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "OG": {
+      "name": "Ochreous Goethite",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "OGF": {
+      "name": "Ochreous Goethite friable",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "OGP": {
+      "name": "Ochreous Goethite powdery",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 4
+    },
+    "OH": {
+      "name": "Ochreous Hematite",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "OHF": {
+      "name": "Ochreous Hematite. friable",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "OQ": {
+      "name": "Opaline silica",
+      "hardness": 3,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "OS": {
+      "name": "Orange shale",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "PB": {
+      "name": "Pink/purple BIF",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "PE": {
+      "name": "Peat",
+      "hardness": 1,
+      "gangue_type": 7,
+      "gangue_name": "Undefined",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "PI": {
+      "name": "Pisolite",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "PY": {
+      "name": "Pyrite",
+      "hardness": 3,
+      "gangue_type": 4,
+      "gangue_name": "Sulphide or Sulphate",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "QT": {
+      "name": "Quartzite",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "QZ": {
+      "name": "Quartz",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "RB": {
+      "name": "Red BIF",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "RC": {
+      "name": "Red chert",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "RI": {
+      "name": "Riebeckite",
+      "hardness": 3,
+      "gangue_type": 7,
+      "gangue_name": "Undefined",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "RO": {
+      "name": "Red ochre",
+      "hardness": 1,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "De",
+      "numeric_zonation": 3
+    },
+    "RS": {
+      "name": "Red shale",
+      "hardness": 1,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "RY": {
+      "name": "Rhyolite",
+      "hardness": 3,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "S": {
+      "name": "Unknown",
+      "hardness": 0,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SB": {
+      "name": "Asbestos",
+      "hardness": 1,
+      "gangue_type": 7,
+      "gangue_name": "Undefined",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SD": {
+      "name": "Siderite",
+      "hardness": 1,
+      "gangue_type": 3,
+      "gangue_name": "Carbonate",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SER": {
+      "name": "Sericite",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SH": {
+      "name": "Shale",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SHF": {
+      "name": "Non-enriched shale friable",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SHG": {
+      "name": "Unknown",
+      "hardness": 0,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SHH": {
+      "name": "Non-enriched Shale. Hard",
+      "hardness": 3,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SHM": {
+      "name": "Non-enriched shale medium",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SHP": {
+      "name": "Non-enriched shale powdery",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SI": {
+      "name": "Silica",
+      "hardness": 3,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SL": {
+      "name": "Soil",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SO": {
+      "name": "NULL",
+      "hardness": 0,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SP": {
+      "name": "Stilpnomelane",
+      "hardness": 3,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SR": {
+      "name": "Silcrete",
+      "hardness": 3,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "SS": {
+      "name": "Sandstone",
+      "hardness": 3,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "ST": {
+      "name": "Siltstone",
+      "hardness": 1,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "TB": {
+      "name": "Tan/brown BIF",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "Te": {
+      "name": "Tiger eye (silicified crocidolite)",
+      "hardness": 3,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "TLC": {
+      "name": "Talc",
+      "hardness": 1,
+      "gangue_type": 8,
+      "gangue_name": "Magnesium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "TS": {
+      "name": "Tan/brown BIF",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "TU": {
+      "name": "Tuff",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "UX": {
+      "name": "Unknown",
+      "hardness": 0,
+      "gangue_type": 7,
+      "gangue_name": "Undefined",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "VG": {
+      "name": "Vitreous Goethite",
+      "hardness": 3,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "Hy",
+      "numeric_zonation": 1
+    },
+    "VGH": {
+      "name": "Variable Goethite-hydrohematite Hard",
+      "hardness": 5,
+      "gangue_type": 0,
+      "gangue_name": "Mineralised",
+      "profile_zonation": "DeHy",
+      "numeric_zonation": "Mix"
+    },
+    "VO": {
+      "name": "Void",
+      "hardness": 0,
+      "gangue_type": 7,
+      "gangue_name": "Undefined",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "WB": {
+      "name": "White BIF",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "WC": {
+      "name": "White chert",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "WS": {
+      "name": "White shale",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "YB": {
+      "name": "Yellow BIF",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "YC": {
+      "name": "Yellow chert",
+      "hardness": 5,
+      "gangue_type": 1,
+      "gangue_name": "Silica",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "YS": {
+      "name": "Yellow shale",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "YSF": {
+      "name": "Yellow Shale Friable",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    },
+    "YSM": {
+      "name": "Yellow Shale Medium",
+      "hardness": 1,
+      "gangue_type": 2,
+      "gangue_name": "Aluminium",
+      "profile_zonation": "Un",
+      "numeric_zonation": 1
+    }
+  },
+  "gangue_types": {
+    "0": "Mineralised",
+    "1": "Silica",
+    "2": "Aluminium",
+    "3": "Carbonate",
+    "4": "Sulphide or Sulphate",
+    "5": "Manganese",
+    "6": "Mafics",
+    "7": "Undefined",
+    "8": "Magnesium"
+  },
+  "zonation_mix_rules": {
+    "PrHy": {"Pr": 0.6, "Hy": 0.4},
+    "HyDe": {"Hy": 0.6, "De": 0.4},
+    "DeHy": {"De": 0.6, "Hy": 0.4}
+  },
+  "quartz_variants": ["QZ", "QTZ", "QT"],
+  "chert_variants": ["CHM", "CHH", "NBH", "MBH"],
+  "hardness_levels": {
+    "0": "Undefined",
+    "1": "Friable",
+    "3": "Medium",
+    "5": "Hard"
+  },
+  "zonation_names": {
+    "Un": "Unenriched",
+    "Pr": "Primary",
+    "De": "Dehydrated",
+    "Hy": "Hydrated",
+    "Hc": "Hematite Core"
+  }
+}

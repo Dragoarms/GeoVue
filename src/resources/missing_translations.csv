@@ -1,0 +1,462 @@
+﻿Key
+ðŸŒ Language
+Synchronize the 'Chip Tray Photos' folder from Microsoft Teams to OneDrive
+Select your synchronized OneDrive folder location
+Set key folders to 'Always Keep on This Device' for offline access
+Setup Instructions
+Synchronize SharePoint Folder
+Steps to Sync
+You need to 'Sync' a SharePoint folder which contains the Chip Tray Photos folder.
+Open Microsoft Teams and navigate to the channel containing the 'Chip Tray Photos' folder.
+"In the toolbar at the top, click 'Sync'. This will create a link in your File Explorer to the SharePoint location."
+⚠️ Required: Set Folders for Offline Access
+"After sync completes, right-click these folders in OneDrive and select 'Always Keep on This Device':"
+Extracted Compartment Images (Required for viewing)
+Chip Tray Register (Required for data)
+Drillhole Datasets (Required for geological data)
+Processed Original Images (Optional but recommended)
+Note: Initial download may exceed 100GB. Ensure sufficient disk space.
+"Once you have completed these steps, click 'Next'."
+OneDrive Folder
+Select OneDrive Folder
+OneDrive Folder Location
+Look for: C:\Users\[YourName]\OneDrive - Fortescue\...\Chip Tray Photos
+Folder Verification
+Please browse to select your synchronized 'Chip Tray Photos' folder.
+Use existing OneDrive folder structure
+Failed to create folders
+Auto-Loop Mode (Skip manual steps)
+   ⓘ Automatically processes images with valid filename metadata
+Bulk Renamer
+Calculate Image Properties
+Drillhole Correlation
+Sync to Cloud
+BIFf
+BIFf-s
+Compact
+BIFhm
+Not Confident
+Other
+⚙ Settings
+📊 Data Viz
+⚙ Viz Config
+🔍 Zoom
+⚙ Zoom Settings
+💾 Save
+Export CSV
+Import CSV Data
+⭐ Gold Assays [g]
+🧱 Jasperlitic [j]
+Apply to Selected
+Statistics
+Mode: All Images
+â—€ Previous
+Next â–¶
+Add
+Clear
+Apply
+Show All
+Show Unclassified.
+Show Classified.
+Show Conflicts.
+Loading
+✖
+Applying Filters
+Loading Images
+Add Holes
+➕ Add Holes
+Remove Hole
+➖ Remove Hole
+Create Tie Line
+🔗 Create Tie Line
+Clear Tie Lines
+✂️ Clear Tie Lines
+Stretch/Compress
+↕️ Stretch/Compress
+Save Session
+💾 Save Session
+Load Session
+📁 Load Session
+Ready
+holes
+tie lines
+Drillhole Selection
+Select Drillholes for Correlation
+Filter Drillholes
+Apply Filter
+Clear Filter
+Showing %d drillholes
+Collar Map
+Zoom
+Fit
++
+Clear Line
+Selected Drillholes
+Sort by Distance
+Section Width
+meters
+⚙
+Click start and end points for tie line
+Remove all tie lines?
+Stretch/compress feature coming soon
+Settings
+Visualization settings coming soon
+Lock/Unlock Column
+🔒 Lock/Unlock Column
+Auto Batch Processing
+Processing Complete
+"Successfully processed 3 images.
+
+Would you like to start the QAQC review process now?"
+Wet (1)
+Dry (2)
+Hide Classified
+Save & Next
+🔓
+Show Images
+🖼️ Show Images
+Configure Data Visualizations
+↑ Move Up
+↓ Move Down
+🎨 Manage Color Maps
+RESET TO DEFAULT
+✏️
+Edit Color Map
++ Add Range
+Generate Intervals
+Set Limits From Data
+Add Point
+Generate Curve
+Configure Data Viz
+📊 Configure Data Viz
+Manage Visualization Columns
+Configure which data columns to display as line/bar graphs next to drillhole sections
+Click a row to select it for reordering. Use buttons below to add/remove columns or reset to defaults.
+Hide Images
+Move Up
+Move Down
+Manage Color Maps
+Zoom Window
+🔍 Zoom Window
+Failed to open drillhole selector
+Hide Zoom
+Photo Bulk Renamer
+Select CSV
+Select Photo Folder
+Increment Hole
+Rename & Next →
+Skip →
+"Successfully processed 88 images.
+
+Would you like to start the QAQC review process now?"
+Generating Image Properties
+Scanning folders...
+Found {} images. Loading existing properties...
+Processing {} images...
+Processed {}/{}: {}...
+Finalizing and saving all properties...
+Complete!
+Image Properties Generation Complete
+Total images scanned: {}
+Newly calculated: {}
+Retrieved from cache: {}
+Properties saved to: {}/Register_Data/{}
+Generation Results
+Label:
+ID:
+Pick Color
+Keybinding:
+💾 Update
+➕ Add Classification
+Icon:
+➕ Add Tag
+Interpolate
+Show Walls
+Remove Interpolation
+"Successfully processed 14 images.
+
+Would you like to start the QAQC review process now?"
+Select Holes for Review
+Selected: {count} / {max}
+Select All
+Deselect All
+Process
+All
+None
+Reset
+"Successfully processed 65 images.
+
+Would you like to start the QAQC review process now?"
+Files to sync to cloud:
+Approved compartments (already in cloud)
+(will be deleted locally to free space)
+Approved original images (already in cloud)
+Rejected original images (already in cloud)
+Already-uploaded files will be deleted locally to free space.
+Total
+Syncing to Cloud
+CLOUD SYNC DETAILED RESULTS:
+Cloud sync completed:
+Uploaded files cleaned up locally
+Skipped (already in cloud)
+Space freed
+Failed uploads
+Missing from cloud
+(marked as uploaded but not found in cloud)
+See status box for error details
+Sync Complete
+Original Image Viewer
+"Failed to open Original Image Viewer:
+
+'GeoVue' object has no attribute 'json_register_manager'"
+Load Images
+⟳ Reprocess Current
+Show Corners
+Show Compartments
+Next ▶
+Fit to Window
+"Failed to open Original Image Viewer:
+
+cannot import name 'open_original_image_viewer' from 'gui.original_image_viewer_dialog' (C:\Excel Automation Local Outputs\Chip Tray Photo Processor\GeoVue Final\src\gui\original_image_viewer_dialog.py)"
+Load Hole
+◀
+▶
+⟳ Reprocess
+"Failed to open Original Image Viewer:
+
+ModernButton.__init__() got an unexpected keyword argument 'height'"
+"Failed to open Original Image Viewer:
+
+'CompartmentSlotStrip' object has no attribute 'pack'"
+"Successfully processed 1 images.
+
+Would you like to start the QAQC review process now?"
+Loading Hole Data
+"Yes, Reprocess"
+{available} of {total} available
+Available!
+📄 Export PDF
+1. Image Source
+2. Filters (Optional)
+3. Layout Settings
+4. Label Settings
+Pick
+5. Data Visualizations
+6. Document Settings
+Export to PDF
+Exporting PDF
+➕ Add
+📂 Load Layout
+💾 Save Layout
+"Successfully processed 109 images.
+
+Would you like to start the QAQC review process now?"
+📊 Scatter Filter
+🔄 Update Plot
+Failed to add hole
+Failed to open logging review:
+📊 Filter Dataset
+✖ Clear Filters
++ Add Filter
+✖ Clear All Filters
+✓ Apply Filters
+🗑️ Delete
+Conflicts
+Classified
+Unclassified
+Clear selection
+Clear All Filters
+Apply Filters
+🎨 Manage Colors
+"Successfully processed 6 images.
+
+Would you like to start the QAQC review process now?"
+Continue to Adjustment
+No missing markers to place. Click 'Continue to Adjustment' to proceed.
+Column Settings
+Expand All
+Collapse All
+Reset to Defaults
+Save
+Classification Manager dialog - coming soon.
+Tag Manager dialog - coming soon.
+📊 Filter Dataset (Scatter Plot)
+Generate Anyway
+Select None
+Select Defaults
+📁 Export CSV
+Clear Filters
+Sort
+Version Too Old
+This version of GeoVue is too old and cannot be used.
+Your version
+You must update to continue using GeoVue.
+Exit GeoVue
+âš™ Settings
+â†» Rotate
+ðŸ“Š Data Viz
+âš™ Viz Config
+ðŸ’¾ Save
+ðŸ“„ Export PDF
+Ã¢â€”â‚¬ Previous
+Next Ã¢â€“Â¶
+Advanced Filters
+All Classified
+My Classified
+All Unclassified
+My Unclassified
+ðŸ“ Export CSV
+🔄 Refresh
+⚙️ Auto-adjust Widths
+✏️ Edit
+🎨 Manage
+🗑️ Remove Column
+−
+🗑️
+"Successfully processed 38 images.
+
+Would you like to start the QAQC review process now?"
+"Successfully processed 84 images.
+
+Would you like to start the QAQC review process now?"
+"Successfully processed 480 images.
+
+Would you like to start the QAQC review process now?"
+No Collar Data
+"No collar data available.
+
+Please place 'Collar_Dashboard_PowerBi_Export.xlsx' or '.csv' in the 'Drillhole Datasets' folder."
+Preparing...
+Initializing...
+Running deduplication check...
+Deduplication complete
+Scanning files...
+Scan complete
+Starting sync...
+Approved compartments moved
+Error checking sync status:
+💧 Dry
+Export
+📷 Export
+Select hole(s) to remove:
+Remove Selected
+Filter Error
+Error applying filter: name 'filter_matches_row' is not defined
+Select Export Directory
+Export Complete
+"Exported 1 column images to:
+C:/Users/gsymonds/Downloads/test OK sections cst"
+   ℹ Automatically processes images with valid filename metadata
+   ↳ Skip existing/duplicate intervals
+"      Uncheck to extract duplicates (e.g., wet/dry pairs) for manual selection"
+"Successfully processed 55 images.
+
+Would you like to start the QAQC review process now?"
+Display Settings
+Image Width (px):
+Cell Height (px):
+Data Column Width (px):
+"Exported 2 column images to:
+C:/Users/gsymonds/Downloads/test OK sections cst"
+An error occurred: 'MainGUI' object has no attribute 'DrillholeTraceGenerator'
+1. Export Mode
+2. Image Source
+3. Filters (Optional)
+4. Strip Log Settings
+4. Grid Layout Settings
+5. Label Settings
+6. Data Visualizations
+7. Document Settings
+🏷️ Petrology
+🏷️ FINAL GOLD
+"Successfully processed 31 images.
+
+Would you like to start the QAQC review process now?"
+🏷️ New Tag
+🏷️ MultiElement [m]
+Image Processing
+   Automatically processes images with valid filename metadata
+   Skip existing/duplicate intervals
+Drillhole Datasets Folder:
+Cross Sections Folder:
+Image Analysis and Review
+Review All Images
+Logging Review Report
+Start Image Processing
+Start Image Analysis
+Original Viewer
+Preparing data...
+Date Range
+Logger
+Outlier Count
+Top N
+Report Pages
+Cover Page
+Summary Statistics
+Comment Statistics
+Fines Accuracy
+Grouping Accuracy
+Top Outliers
+Output Folder
+Generate
+No Reports Generated
+None of the selected loggers have data in the selected date range.
+Skipped:
+Report Generated
+Reports generated successfully.
+Cancel After Current Image
+➕ Add Filter
+Review Extracted
+Confirm Removal
+Remove 6 holes?
+Filter Dataset (Graphical Selection)
+💾 Save Preset
+📂 Load Preset
+Edit Color Map
++ Add Range
+Generate Intervals
+Set Limits From Data
+Add Point
+Generate Curve
+💾 Save Plot
+📂 Load
+Preparation complete
+Review compartments will be moved to cloud and deleted locally.
+Review compartments moved
+"Successfully processed 5 images.
+
+Would you like to start the QAQC review process now?"
+🏷️ March26
+Pre-Load Snowflake Data
+Retry Phase 1
+Clear Cache
+✕
+Snowflake Account Setup
+Test Connection
+Skip for Now
+Save & Connect
+Load Depths (Snowflake)
+"Successfully processed 36 images.
+
+Would you like to start the QAQC review process now?"
+Loading Snowflake Data
+Find Missing Trays
+"Successfully processed 79 images.
+
+Would you like to start the QAQC review process now?"
+Reject & Next →
+Export Rejected List
+"Successfully processed 80 images.
+
+Would you like to start the QAQC review process now?"
+Chip Tray Inventory
+"Successfully processed 4 images.
+
+Would you like to start the QAQC review process now?"
+Report Error
+Failed to generate reports.
+Mark Lost
+Clear Status
+Select All Pending
+Export PDF (Pending only)
+🏷️ APRIL26

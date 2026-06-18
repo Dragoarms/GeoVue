@@ -1,0 +1,39 @@
+{
+  "name": "profilezonation",
+  "description": "",
+  "type": "categorical",
+  "categories": {
+    "De": {
+      "color": "#e54444",
+      "bgr": [
+        68,
+        68,
+        229
+      ]
+    },
+    "Hy": {
+      "color": "#ff8040",
+      "bgr": [
+        64,
+        128,
+        255
+      ]
+    },
+    "Le": {
+      "color": "#44e5e5",
+      "bgr": [
+        229,
+        229,
+        68
+      ]
+    },
+    "Un": {
+      "color": "#c0c0c0",
+      "bgr": [
+        192,
+        192,
+        192
+      ]
+    }
+  }
+}

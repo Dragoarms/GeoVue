@@ -1,0 +1,62 @@
+{
+  "name": "Lithology Colors",
+  "type": "categorical",
+  "description": "Standard colors for geological lithologies",
+  "default_color": [
+    200,
+    200,
+    200
+  ],
+  "null_color": [
+    255,
+    255,
+    255
+  ],
+  "colors": {
+    "Sandstone": [
+      255,
+      255,
+      0
+    ],
+    "Shale": [
+      128,
+      128,
+      128
+    ],
+    "Limestone": [
+      0,
+      191,
+      255
+    ],
+    "Granite": [
+      255,
+      192,
+      203
+    ],
+    "Basalt": [
+      64,
+      64,
+      64
+    ],
+    "Quartzite": [
+      255,
+      228,
+      196
+    ],
+    "Dolomite": [
+      135,
+      206,
+      235
+    ],
+    "Conglomerate": [
+      139,
+      69,
+      19
+    ],
+    "Breccia": [
+      165,
+      42,
+      42
+    ]
+  }
+}

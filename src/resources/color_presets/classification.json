@@ -1,0 +1,55 @@
+{
+  "name": "classification",
+  "description": "",
+  "type": "categorical",
+  "categories": {
+    "BIFf": {
+      "color": "#00ff00",
+      "bgr": [
+        0,
+        255,
+        0
+      ]
+    },
+    "BIFf-s": {
+      "color": "#ffff00",
+      "bgr": [
+        0,
+        255,
+        255
+      ]
+    },
+    "BIFhm": {
+      "color": "#ff0000",
+      "bgr": [
+        0,
+        0,
+        255
+      ]
+    },
+    "Compact": {
+      "color": "#ff8000",
+      "bgr": [
+        0,
+        128,
+        255
+      ]
+    },
+    "Not Confident": {
+      "color": "#808080",
+      "bgr": [
+        128,
+        128,
+        128
+      ]
+    },
+    "Other": {
+      "color": "#ff80ff",
+      "bgr": [
+        255,
+        128,
+        255
+      ]
+    }
+  }
+}
