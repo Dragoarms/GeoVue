@@ -13,145 +13,173 @@ from tkinter import ttk
 import threading
 from typing import Optional, Callable
 from gui.dialog_helper import DialogHelper
+from gui.widgets.modern_button import ModernButton
 
 
 class ProgressDialog:
     """
     A modal progress dialog for showing progress of background operations.
-    
+
     This dialog blocks user interaction with the main window while showing
     progress updates from a background thread.
     """
-    
-    def __init__(self, parent, title: str, message: str = ""):
+
+    def __init__(self, parent, title: str, message: str = "", modal: bool = True):
         """
         Initialize the progress dialog.
-        
+
         Args:
             parent: Parent window
             title: Dialog title
             message: Initial message to display
+            modal: If True, dialog blocks interaction with parent. Set False for batch processing.
         """
         self.parent = parent
         self.title = title
         self.message = message
+        self.modal = modal
         self.dialog = None
         self.progress_var = tk.DoubleVar(value=0)
         self.message_var = tk.StringVar(value=message)
         self.cancelled = False
         self._create_dialog()
-        
+
     def _create_dialog(self):
         """Create the progress dialog window."""
         # Create dialog using DialogHelper without fixed size
         self.dialog = DialogHelper.create_dialog(
             self.parent,
             self.title,
-            modal=True
+            modal=True,
             # Remove size_ratio, min_width, min_height - let it auto-size
         )
-        
+
         # Prevent closing
         self.dialog.protocol("WM_DELETE_WINDOW", lambda: None)
-        
+
         # Main frame
         main_frame = ttk.Frame(self.dialog, padding="20")
         main_frame.pack(fill=tk.BOTH, expand=True)
-        
+
         # Message label
         self.message_label = ttk.Label(
-            main_frame,
-            textvariable=self.message_var,
-            wraplength=350
+            main_frame, textvariable=self.message_var, wraplength=350
         )
         self.message_label.pack(pady=(0, 10))
-        
+
         # Progress bar
         self.progress_bar = ttk.Progressbar(
             main_frame,
             variable=self.progress_var,
             maximum=100,
             length=350,
-            mode='determinate'
+            mode="determinate",
         )
         self.progress_bar.pack(pady=(0, 10))
-        
+
         # Percentage label
-        self.percent_label = ttk.Label(
-            main_frame,
-            text="0%"
-        )
+        self.percent_label = ttk.Label(main_frame, text="0%")
         self.percent_label.pack()
-        
+
+        # Detailed status label (simpler messages)
+        self.status_label = ttk.Label(main_frame, text="", wraplength=350)
+        self.status_label.pack(pady=(5, 0))
+
+        # Cancel button (using modern button style)
+        self.cancel_button = ModernButton(
+            main_frame,
+            text="Cancel After Current Image",
+            color="#d9534f",  # Red color for cancel action
+            command=self._on_cancel,
+        )
+        self.cancel_button.pack(pady=(15, 0))
+
         # Update and center the dialog after content is added
         self.dialog.update_idletasks()
-        
+
         # Center on parent
         self.dialog.transient(self.parent)
-        self.dialog.grab_set()
-        
+
+        # Only grab if modal (don't block other dialogs in non-modal mode)
+        if self.modal:
+            self.dialog.grab_set()
+
         # Get the actual size after packing
         self.dialog.update_idletasks()
         width = self.dialog.winfo_reqwidth()
         height = self.dialog.winfo_reqheight()
-        
+
         # Center on screen
         parent_x = self.parent.winfo_x()
         parent_y = self.parent.winfo_y()
         parent_width = self.parent.winfo_width()
         parent_height = self.parent.winfo_height()
-        
+
         x = parent_x + (parent_width - width) // 2
         y = parent_y + (parent_height - height) // 2
-        
+
         self.dialog.geometry(f"{width}x{height}+{x}+{y}")
 
-    def _update_progress_ui(self, message: str, percentage: float):
+    def _on_cancel(self):
+        """Handle cancel button click."""
+        self.cancelled = True
+        self.cancel_button.set_text("Cancelling...")
+        self.cancel_button.set_state("disabled")
+        self.message_var.set("Finishing current image, then stopping...")
+
+    def _update_progress_ui(self, message: str, percentage: float, status: str = ""):
         """Update UI elements on main thread."""
         try:
             self.message_var.set(message)
             self.progress_var.set(percentage)
             self.percent_label.config(text=f"{int(percentage)}%")
+            if status and hasattr(self, 'status_label'):
+                self.status_label.config(text=status)
             self.dialog.update()
-            
-            # Auto-close if at 100%
-            if percentage >= 100:
+
+            # Auto-close if at 100% (only for modal dialogs)
+            if percentage >= 100 and self.modal:
                 self.dialog.after(500, self.close)  # Close after 500ms delay
         except Exception:
             pass  # Dialog may have been destroyed
 
-    def update_progress(self, message: str, percentage: float):
+    def update_progress(self, message: str, percentage: float, status: str = ""):
         """
         Update progress from any thread.
-        
+
         Args:
-            message: Progress message
+            message: Progress message (main text)
             percentage: Progress percentage (0-100)
+            status: Optional status text (e.g., "Extracted 20 compartments")
         """
         if self.dialog and self.dialog.winfo_exists():
             # Schedule update on main thread
-            self.dialog.after(0, self._update_progress_ui, message, percentage)
-            
+            self.dialog.after(0, self._update_progress_ui, message, percentage, status)
+
+    def is_cancelled(self) -> bool:
+        """Check if user has requested cancellation."""
+        return self.cancelled
+
     def close(self):
         """Close the progress dialog."""
         if self.dialog and self.dialog.winfo_exists():
             self.dialog.destroy()
-            
+
     def run_with_progress(self, task: Callable, *args, **kwargs):
         """
         Run a task in background thread while showing progress.
-        
+
         Args:
             task: Callable to run in background
             *args: Arguments to pass to task
             **kwargs: Keyword arguments to pass to task
-            
+
         Returns:
             The result of the task
         """
         result = None
         exception = None
-        
+
         def run_task():
             nonlocal result, exception
             try:
@@ -161,16 +189,16 @@ class ProgressDialog:
             finally:
                 # Close dialog on main thread
                 self.dialog.after(0, self.close)
-                
+
         # Start task in background thread
         thread = threading.Thread(target=run_task, daemon=True)
         thread.start()
-        
+
         # Show dialog and wait
         self.dialog.wait_window()
-        
+
         # Re-raise any exception that occurred
         if exception:
             raise exception
-            
+
         return result

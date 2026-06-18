@@ -16,19 +16,109 @@ logger = logging.getLogger(__name__)
 
 
 class DialogHelper:
-    # Class-level references
+    # Class-level references (for static usage)
     translator = None
     gui_manager = None
 
+    def __init__(self, root=None, translator=None, gui_manager=None):
+        """
+        Initialize DialogHelper instance.
+        
+        Args:
+            root: Optional root window for dialogs
+            translator: Optional translator instance
+            gui_manager: Optional GUI manager for theming
+            
+        Note: If not provided, will use class-level values set via set_translator/set_gui_manager
+        """
+        self._root = root
+        self._translator = translator or self.__class__.translator
+        self._gui_manager = gui_manager or self.__class__.gui_manager
+    
     @classmethod
     def set_translator(cls, translator):
-        """Set the translation manager."""
+        """Set the class-level translation manager."""
         cls.translator = translator
 
     @classmethod
     def set_gui_manager(cls, gui_manager):
-        """Set the GUI manager for theming."""
+        """Set the class-level GUI manager for theming."""
         cls.gui_manager = gui_manager
+    
+    def show_error(self, title, message):
+        """
+        Instance method: Show error dialog using instance's root and translator.
+        
+        Args:
+            title: Dialog title
+            message: Error message
+        """
+        if self._root is None:
+            raise ValueError("DialogHelper instance requires root window for instance methods")
+        return self.__class__.show_message(
+            self._root, 
+            title, 
+            message, 
+            message_type="error",
+            translator=self._translator
+        )
+    
+    def show_info(self, title, message):
+        """
+        Instance method: Show info dialog using instance's root and translator.
+        
+        Args:
+            title: Dialog title
+            message: Info message
+        """
+        if self._root is None:
+            raise ValueError("DialogHelper instance requires root window for instance methods")
+        return self.__class__.show_message(
+            self._root, 
+            title, 
+            message, 
+            message_type="info",
+            translator=self._translator
+        )
+    
+    def show_warning(self, title, message):
+        """
+        Instance method: Show warning dialog using instance's root and translator.
+        
+        Args:
+            title: Dialog title
+            message: Warning message
+        """
+        if self._root is None:
+            raise ValueError("DialogHelper instance requires root window for instance methods")
+        return self.__class__.show_message(
+            self._root, 
+            title, 
+            message, 
+            message_type="warning",
+            translator=self._translator
+        )
+    
+    def show_question(self, title, message):
+        """
+        Instance method: Show question dialog using instance's root and translator.
+        
+        Args:
+            title: Dialog title
+            message: Question message
+            
+        Returns:
+            bool: True if Yes, False if No
+        """
+        if self._root is None:
+            raise ValueError("DialogHelper instance requires root window for instance methods")
+        return self.__class__.confirm_dialog(
+            self._root,
+            title,
+            message,
+            yes_text=self.__class__.t("Yes"),
+            no_text=self.__class__.t("No"),
+        )
 
     @classmethod
     def t(cls, text):
@@ -436,10 +526,22 @@ class DialogHelper:
         return dialog
 
     @staticmethod
-    def show_message(parent, title, message, message_type="info"):
-        """Show a message dialog with an OK button."""
+    def show_message(parent, title, message, message_type="info", translator=None):
+        """
+        Show a message dialog with an OK button.
+        
+        Args:
+            parent: Parent window
+            title: Dialog title
+            message: Message text
+            message_type: Type of message ('info', 'error', 'warning', 'success', 'question')
+            translator: Optional translator instance (uses class-level if not provided)
+        """
         # Check thread safety
         DialogHelper._check_main_thread("show_message")
+        
+        # Use provided translator or fall back to class-level
+        _translator = translator or DialogHelper.translator
 
         dialog = tk.Toplevel(parent)
         dialog.title(title)
@@ -480,17 +582,21 @@ class DialogHelper:
 
         # Use modern button if gui_manager available
         gui_manager = DialogHelper.gui_manager
+        
+        # Translate button text using instance or class translator
+        ok_text = _translator.translate("OK") if _translator else "OK"
+        
         if gui_manager:
             ok_button = gui_manager.create_modern_button(
                 button_frame,
-                text=DialogHelper.t("OK"),
+                text=ok_text,
                 color=gui_manager.theme_colors["accent_blue"],
                 command=dialog.destroy,
             )
             ok_button.pack(padx=5, pady=5)
         else:
             ok_button = ttk.Button(
-                button_frame, text=DialogHelper.t("OK"), command=dialog.destroy
+                button_frame, text=ok_text, command=dialog.destroy
             )
             ok_button.pack(padx=5, pady=5)
 
@@ -819,7 +925,6 @@ class DialogHelper:
             DialogHelper.center_dialog(
                 rejection_dialog,
                 parent_dialog,
-                size_ratio=0.5,
                 max_width=800,
                 max_height=800,
             )

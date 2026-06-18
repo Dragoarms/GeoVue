@@ -5,6 +5,19 @@ import json
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
+from enum import Enum
+
+
+class EnumSafeJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles Enum objects by converting them to their values.
+    
+    This is a safety net for cases where enum objects (like DataType, NullHandling)
+    accidentally end up in the settings dict without being converted via to_dict().
+    """
+    def default(self, obj):
+        if isinstance(obj, Enum):
+            return obj.value
+        return super().default(obj)
 
 
 class ConfigManager:
@@ -18,6 +31,21 @@ class ConfigManager:
     USER_SETTINGS_KEYS = [
         "language",
         "theme",
+        "classifications",
+        "tags",
+        "viz_columns",  # Visualization column configuration - logging review dialog
+        "viz_column_width_ratio",  # Width ratio for viz columns (0.0-1.0)
+        "viz_column_height",  # Default column height for landscape mode
+        "viz_column_font_size",  # Font size for viz column text
+        "viz_header_font_size",  # Font size for viz column headers
+        "viz_value_font_size",  # Font size for viz column values
+        "viz_decimal_places",  # Decimal places for viz column numeric values
+        "grid_show_outlines",  # Show/hide cell outlines
+        "grid_outline_width",  # Cell outline width in pixels
+        "grid_show_cell_labels",  # Show/hide hole ID and depth labels
+        "grid_show_classification_labels",  # Show/hide classification labels
+        "grid_classification_label_position",  # "top-right" or "top-left"
+        "color_maps",  # Color map presets for data visualizations
         "program_initialized",
         "storage_type",
         "local_folder_path",
@@ -34,7 +62,7 @@ class ConfigManager:
         "local_folder_debug_images",
         "shared_folder_path",
         "shared_folder_register_excel_path",
-        "shared_folder_drillhole_data_csv",
+        "shared_folder_datasets",  # Folder containing drillhole CSVs (replaces single CSV path)
         "shared_folder_approved_folder",
         "shared_folder_processed_originals",
         "shared_folder_rejected_folder",
@@ -44,6 +72,7 @@ class ConfigManager:
         "shared_folder_extracted_compartments_folder",
         "shared_folder_approved_compartments_folder",
         "shared_folder_review_compartments_folder",
+        "shared_folder_cross_sections",  # Folder containing section PDFs (Section Tool integration)
         "output_format",
         "jpeg_quality",
         "enable_blur_detection",
@@ -79,7 +108,55 @@ class ConfigManager:
         "static_zoom_height",
         "static_zoom_region_size",
         "zoom_region_size",
-
+        "auto_loop_mode",
+        "auto_loop_min_markers",
+        "auto_loop_require_filename_metadata",
+        # Drillhole Correlation settings
+        "correlation_dialog_width",
+        "correlation_dialog_height",
+        "correlation_default_section_width",
+        "correlation_minimap_bg_color",
+        "correlation_collar_color",
+        "correlation_assay_collar_color",
+        "correlation_no_assay_collar_color",
+        "correlation_collar_size",
+        "correlation_selected_color",
+        "correlation_selected_size",
+        "correlation_line_color",
+        "correlation_line_width",
+        "correlation_box_color",
+        "correlation_zoom_default",
+        "correlation_zoom_min",
+        "correlation_zoom_max",
+        "correlation_column_width",
+        "correlation_column_spacing",
+        "correlation_cell_height",
+        "correlation_data_viz_cell_height",
+        # Data visualization settings
+        "correlation_data_column_width",
+        "correlation_data_column_min_width",
+        "correlation_data_column_max_width",
+        "correlation_thumbnail_width",
+        "correlation_thumbnail_min_width",
+        "correlation_thumbnail_max_width",
+        "correlation_lazy_thumbnail_margin_px",
+        "correlation_lazy_thumbnail_batch_size",
+        "correlation_verbose_interval_logging",
+        "correlation_debug_minimap",
+        "correlation_color_bar_width",
+        "correlation_image_mode",
+        "correlation_show_images",
+        "correlation_viz_columns",
+        # DataCoordinator settings
+        "geological_data_sources",
+        # Column settings dialog
+        "column_schemas",
+        "register_column_settings",
+        # QAQC settings
+        "qaqc_rules",  # User-defined QAQC validation rules
+        # Snowflake connection
+        "snowflake_user",  # User's Snowflake login email
+        "snowflake_custom_tables",  # User-added Snowflake table definitions [{database, schema, table, geovue_name, enabled}]
     ]
 
     def __init__(self, default_config_path: str):
@@ -153,6 +230,9 @@ class ConfigManager:
             "flag_blurry_images": False,
             "blurry_threshold_percentage": 10.0,
             "save_blur_visualizations": True,
+            "auto_loop_mode": False,
+            "auto_loop_min_markers": 20,
+            "auto_loop_require_filename_metadata": True,
             "compartment_count": 20,
             "compartment_interval": 1,
             "compartment_spacing_mm": 3.0,
@@ -169,7 +249,7 @@ class ConfigManager:
             "static_zoom_height": 400,
             "static_zoom_region_size": 100,
             "zoom_region_size": 100,
-            "valid_hole_prefixes": ["BA", "NB", "SB", "KM"],
+            "valid_hole_prefixes": ["BA", "NB", "SB", "KM", "OK", "BB", "BT"],
             "enable_prefix_validation": True,
             "shared_folder_path": "",
             "storage_type": "",  # "cloud" or "local" or "both"
@@ -182,6 +262,8 @@ class ConfigManager:
             "shared_folder_drill_traces": "",
             "shared_folder_register_path": "",
             "shared_folder_register_data_folder": "",
+            "shared_folder_cross_sections": "",
+            "compartment_pattern": r"([A-Z]{2}\d{4})_CC_(\d+)(?:_(Wet|Dry))?(?:_.*)?\.(?:png|tiff|jpg)$",
             "review_toggles": [
                 "Bad Image",
                 "BIFf",
@@ -190,6 +272,68 @@ class ConfigManager:
                 "+ QZ",
                 "+ CHH/M",
             ],
+            "viz_columns": [
+                {"column": "Fe_pct_BEST", "color_map": "fe_grade"},
+                {"column": "SiO2_pct_BEST", "color_map": "sio2_grade"},
+                {"column": "Al2O3_pct_BEST", "color_map": "al2o3_grade"},
+                {"column": "Logged_pct_CHHM", "color_map": "fe_grade"}
+            ],
+            # Correlation dialog settings
+            "correlation_column_width": 200,
+            "correlation_column_spacing": 20,
+            "correlation_cell_height": 100,
+            "correlation_data_viz_cell_height": 10,  # 10px per meter for pure data viz
+            "correlation_zoom_default": 1.0,
+            "correlation_zoom_min": 0.1,
+            "correlation_zoom_max": 5.0,
+            "correlation_collar_color": "#3498DB",
+            "correlation_assay_collar_color": "#2ECC71",
+            "correlation_no_assay_collar_color": "#F1C40F",
+            # Correlation dialog Data visualization settings
+            "correlation_data_column_width": 70,
+            "correlation_data_column_min_width": 50,
+            "correlation_data_column_max_width": 260,
+            "correlation_thumbnail_width": 160,
+            "correlation_thumbnail_min_width": 40,
+            "correlation_thumbnail_max_width": 420,
+            "correlation_lazy_thumbnail_margin_px": 250,
+            "correlation_lazy_thumbnail_batch_size": 16,
+            "correlation_verbose_interval_logging": False,
+            "correlation_debug_minimap": False,
+            "correlation_color_bar_width": 20,
+            "correlation_image_mode": "thumbnail",
+            "correlation_show_images": False,  # Show images in drillhole columns
+            "correlation_viz_columns": [
+                {
+                    "column": "Fe_pct_BEST",
+                    "color_map": "fe_grade",
+                    "type": "bar",
+                    "scale_mode": "raw",
+                    "min_value": 0.0,
+                    "max_value": 70.0,
+                    "auto_scale": True
+                },
+                {
+                    "column": "SiO2_pct_BEST",
+                    "color_map": "sio2_grade",
+                    "type": "bar",
+                    "scale_mode": "raw",
+                    "min_value": 0.0,
+                    "max_value": 100.0,
+                    "auto_scale": True
+                },
+                {
+                    "column": "Al2O3_pct_BEST",
+                    "color_map": "al2o3_grade",
+                    "type": "bar",
+                    "scale_mode": "raw",
+                    "min_value": 0.0,
+                    "max_value": 30.0,
+                    "auto_scale": True
+                }
+            ],
+            # Color map presets (persisted)
+            "color_maps": {},
         }
 
         # Save the default settings
@@ -217,11 +361,13 @@ class ConfigManager:
             self.user_settings_path.parent.mkdir(parents=True, exist_ok=True)
 
             with open(self.user_settings_path, "w") as f:
-                json.dump(settings, f, indent=4)
+                # Use EnumSafeJSONEncoder to handle any enum objects that weren't
+                # converted via to_dict() - this is a safety net
+                json.dump(settings, f, indent=4, cls=EnumSafeJSONEncoder)
 
-            self.logger.debug(f"✅ Saved user settings to {self.user_settings_path}")
+            self.logger.debug(f"Saved user settings to {self.user_settings_path}")
         except Exception as e:
-            self.logger.error(f"❌ Error saving user settings: {e}")
+            self.logger.error(f"Error saving user settings: {e}")
             raise
 
     def get(self, key: str, default=None):

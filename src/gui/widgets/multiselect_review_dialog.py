@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import ttk
 import threading
 from pathlib import Path
-from typing import Dict, List, Callable, Optional, Set
+from typing import Dict, List, Callable, Optional, Set, Any
 from concurrent.futures import ThreadPoolExecutor, Future
 import logging
 import shutil
@@ -68,9 +68,12 @@ class MultiSelectReviewDialog:
         self.dialog = DialogHelper.create_dialog(
             self.parent,
             DialogHelper.t("Select Holes for Review"),
-            width=600,
-            height=500,
         )
+
+        # Apply theme to dialog if gui_manager available
+        if self.gui_manager:
+            self.gui_manager.configure_ttk_styles(self.dialog)
+            self.dialog.configure(bg=self.theme_colors.get("background", "#1e1e1e"))
 
         # Main frame
         main_frame = ttk.Frame(self.dialog)
@@ -83,9 +86,9 @@ class MultiSelectReviewDialog:
         self.selection_label = tk.Label(
             header_frame,
             text=self._get_selection_text(),
-            font=self.fonts["default"],
-            bg=self.theme_colors["bg"],
-            fg=self.theme_colors["fg"],
+            font=self.fonts.get("normal"),
+            bg=self.theme_colors.get("background", "white"),
+            fg=self.theme_colors.get("text", "black"),
         )
         self.selection_label.pack(side=tk.LEFT)
 
@@ -93,24 +96,48 @@ class MultiSelectReviewDialog:
         button_frame = ttk.Frame(header_frame)
         button_frame.pack(side=tk.RIGHT)
 
-        select_all_btn = ttk.Button(
-            button_frame, text=DialogHelper.t("Select All"), command=self._select_all
-        )
-        select_all_btn.pack(side=tk.LEFT, padx=2)
+        # Use modern buttons if gui_manager available
+        if self.gui_manager:
+            select_all_btn = self.gui_manager.create_modern_button(
+                button_frame,
+                text="Select All",
+                color=self.theme_colors.get("accent_blue", "#3a7ca5"),
+                command=self._select_all,
+            )
+            select_all_btn.pack(side=tk.LEFT, padx=2)
 
-        deselect_all_btn = ttk.Button(
-            button_frame,
-            text=DialogHelper.t("Deselect All"),
-            command=self._deselect_all,
-        )
-        deselect_all_btn.pack(side=tk.LEFT, padx=2)
+            deselect_all_btn = self.gui_manager.create_modern_button(
+                button_frame,
+                text="Deselect All",
+                color=self.theme_colors.get("secondary_bg", "#252526"),
+                command=self._deselect_all,
+            )
+            deselect_all_btn.pack(side=tk.LEFT, padx=2)
+        else:
+            select_all_btn = ttk.Button(
+                button_frame,
+                text=DialogHelper.t("Select All"),
+                command=self._select_all,
+            )
+            select_all_btn.pack(side=tk.LEFT, padx=2)
+
+            deselect_all_btn = ttk.Button(
+                button_frame,
+                text=DialogHelper.t("Deselect All"),
+                command=self._deselect_all,
+            )
+            deselect_all_btn.pack(side=tk.LEFT, padx=2)
 
         # Scrollable list area
         list_frame = ttk.Frame(main_frame)
         list_frame.pack(fill=tk.BOTH, expand=True)
 
         # Canvas and scrollbar
-        canvas = tk.Canvas(list_frame, bg=self.theme_colors["bg"], highlightthickness=0)
+        canvas = tk.Canvas(
+            list_frame,
+            bg=self.theme_colors.get("background", "white"),
+            highlightthickness=0,
+        )
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
 
@@ -140,17 +167,36 @@ class MultiSelectReviewDialog:
         bottom_frame = ttk.Frame(main_frame)
         bottom_frame.pack(fill=tk.X, pady=(10, 0))
 
-        process_btn = ttk.Button(
-            bottom_frame,
-            text=DialogHelper.t("Process") + " ✓",
-            command=self._on_process,
-        )
-        process_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        # Use modern buttons if gui_manager available
+        if self.gui_manager:
+            process_btn = self.gui_manager.create_modern_button(
+                bottom_frame,
+                text="Process",
+                color=self.theme_colors.get("accent_green", "#4a8259"),
+                command=self._on_process,
+                icon="✔",
+            )
+            process_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
-        cancel_btn = ttk.Button(
-            bottom_frame, text=DialogHelper.t("Cancel"), command=self._on_cancel
-        )
-        cancel_btn.pack(side=tk.RIGHT)
+            cancel_btn = self.gui_manager.create_modern_button(
+                bottom_frame,
+                text="Cancel",
+                color=self.theme_colors.get("accent_red", "#9e4a4a"),
+                command=self._on_cancel,
+            )
+            cancel_btn.pack(side=tk.RIGHT)
+        else:
+            process_btn = ttk.Button(
+                bottom_frame,
+                text=DialogHelper.t("Process") + " ✔",
+                command=self._on_process,
+            )
+            process_btn.pack(side=tk.RIGHT, padx=(5, 0))
+
+            cancel_btn = ttk.Button(
+                bottom_frame, text=DialogHelper.t("Cancel"), command=self._on_cancel
+            )
+            cancel_btn.pack(side=tk.RIGHT)
 
         # Center dialog
         DialogHelper.center_dialog(self.dialog, self.parent)
@@ -175,9 +221,9 @@ class MultiSelectReviewDialog:
             project_label = tk.Label(
                 self.items_frame,
                 text=f"--- {project} ---",
-                font=self.fonts["bold"],
-                bg=self.theme_colors["bg"],
-                fg=self.theme_colors["accent"],
+                font=self.fonts.get("heading"),
+                bg=self.theme_colors.get("background", "white"),
+                fg=self.theme_colors.get("accent_blue", "blue"),
             )
             project_label.grid(
                 row=row, column=0, columnspan=3, sticky="w", pady=(10, 5)
@@ -197,13 +243,13 @@ class MultiSelectReviewDialog:
                 cb.grid(row=row, column=0, sticky="w", padx=(20, 5))
                 self.checkbuttons[hole_id] = cb
 
-                # Hole label
+                # Hole label - simplified without immediate file count
                 hole_label = tk.Label(
                     self.items_frame,
-                    text=f"{hole_id} ({len(paths)} {DialogHelper.t('files')})",
-                    font=self.fonts["default"],
-                    bg=self.theme_colors["bg"],
-                    fg=self.theme_colors["fg"],
+                    text=f"{hole_id} ({len(paths)} files)",  # Don't translate each time
+                    font=self.fonts.get("normal"),
+                    bg=self.theme_colors.get("background", "white"),
+                    fg=self.theme_colors.get("text", "black"),
                 )
                 hole_label.grid(row=row, column=1, sticky="w", padx=5)
 
@@ -211,9 +257,9 @@ class MultiSelectReviewDialog:
                 avail_label = tk.Label(
                     self.items_frame,
                     text="",
-                    font=self.fonts["small"],
-                    bg=self.theme_colors["bg"],
-                    fg=self.theme_colors["secondary"],
+                    font=self.fonts.get("small"),
+                    bg=self.theme_colors.get("background", "white"),
+                    fg=self.theme_colors.get("secondary_text", "gray"),
                 )
                 avail_label.grid(row=row, column=2, sticky="w", padx=5)
                 self.availability_labels[hole_id] = avail_label
@@ -329,7 +375,7 @@ class MultiSelectReviewDialog:
                 # All available
                 text = DialogHelper.t("Available!")
                 self.availability_labels[hole_id].config(
-                    text=text, fg=self.theme_colors["success"]
+                    text=text, fg=self.theme_colors.get("accent_green", "green")
                 )
                 status["checking"] = False
             else:
@@ -337,7 +383,7 @@ class MultiSelectReviewDialog:
                 text = DialogHelper.t("{available} of {total} available")
                 text = text.format(available=status["available"], total=status["total"])
                 self.availability_labels[hole_id].config(
-                    text=text, fg=self.theme_colors["warning"]
+                    text=text, fg=self.theme_colors.get("accent_yellow", "orange")
                 )
 
     def _select_all(self):
@@ -372,7 +418,9 @@ class MultiSelectReviewDialog:
         if not selected:
             # Show warning
             msg = DialogHelper.t("No fully available holes selected")
-            DialogHelper.show_warning(self.dialog, msg)
+            DialogHelper.show_message(
+                self.dialog, DialogHelper.t("Warning"), msg, message_type="warning"
+            )
             return
 
         # Move selected holes to local folder
@@ -387,7 +435,12 @@ class MultiSelectReviewDialog:
         except Exception as e:
             logger.error("Error moving holes to local: %s", e)
             msg = DialogHelper.t("Error moving files: {error}")
-            DialogHelper.show_error(self.dialog, msg.format(error=str(e)))
+            DialogHelper.show_message(
+                self.dialog,
+                DialogHelper.t("Error"),
+                msg.format(error=str(e)),
+                message_type="error",
+            )
 
     def _move_holes_to_local(self, selected: Dict[str, List[Path]]):
         """Move selected holes from shared to local review folder."""

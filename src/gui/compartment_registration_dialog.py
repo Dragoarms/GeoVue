@@ -46,6 +46,10 @@ class CompartmentRegistrationDialog:
     MODE_MISSING_BOUNDARIES = 1
     MODE_ADJUST_BOUNDARIES = 2
 
+    # Class-level adjustment history (shared across instances in session)
+    adjustment_history = []
+    MAX_HISTORY = 5  # Track last 5 images
+
     def __init__(
         self,
         parent,
@@ -71,8 +75,14 @@ class CompartmentRegistrationDialog:
         scale_data=None,
         boundary_analysis=None,
         app=None,
+        initial_mode=None,
     ):
-        """Initialize the unified compartment registration dialog."""
+        """Initialize the unified compartment registration dialog.
+
+        Args:
+            initial_mode: Starting mode (MODE_METADATA, MODE_MISSING_BOUNDARIES, MODE_ADJUST_BOUNDARIES).
+                         If None, defaults to MODE_METADATA.
+        """
 
         # 1. FIRST - Basic initialization
         self.parent = parent
@@ -240,17 +250,66 @@ class CompartmentRegistrationDialog:
         )
 
         # 12. Initialize UI state variables
-        self.current_mode = self.MODE_METADATA  # Start in metadata mode
+        # Determine appropriate starting mode based on available data
+        self.logger.debug("=== MODE DETERMINATION START ===")
+        self.logger.debug(f"Metadata passed: {metadata}")
+        self.logger.debug(f"Missing markers passed: {missing_marker_ids}")
+        self.logger.debug(
+            f"Detected boundaries count: {len(detected_boundaries) if detected_boundaries else 0}"
+        )
+        self.logger.debug(f"Initial mode parameter: {initial_mode}")
+
+        try:
+            determined_mode = (
+                self._determine_initial_mode()
+            )  # No arguments - uses self attributes
+            self.logger.debug(
+                f"Mode determined by _determine_initial_mode: {determined_mode}"
+            )
+        except Exception as e:
+            self.logger.error(f"Error in _determine_initial_mode: {e}", exc_info=True)
+            determined_mode = self.MODE_METADATA
+
+        # Allow manual override with initial_mode parameter
+        if initial_mode is not None:
+            self.logger.debug(
+                f"Overriding determined mode {determined_mode} with initial_mode parameter: {initial_mode}"
+            )
+            self.current_mode = initial_mode
+        else:
+            self.current_mode = determined_mode
+
+        self.logger.debug(f"Final current_mode set to: {self.current_mode}")
+        self.logger.debug(
+            f"Mode names: METADATA={self.MODE_METADATA}, MISSING={self.MODE_MISSING_BOUNDARIES}, ADJUST={self.MODE_ADJUST_BOUNDARIES}"
+        )
+        self.logger.debug("=== MODE DETERMINATION END ===")
+
         self.current_index = 0
         self.result_boundaries = {}
         self.annotation_complete = False
         self.temp_point = None
         self.show_walls = False
 
-        # 13. Initialize UI string variables
-        self.hole_id = tk.StringVar(value=self.metadata.get("hole_id", ""))
-        self.depth_from = tk.StringVar(value=str(self.metadata.get("depth_from", "")))
-        self.depth_to = tk.StringVar(value=str(self.metadata.get("depth_to", "")))
+        # 13. Initialize StringVar objects for metadata fields
+        self.hole_id = tk.StringVar(
+            value=self.metadata.get("hole_id", "") if self.metadata else ""
+        )
+
+        # Ensure depth values are integers when converting to string
+        depth_from_val = self.metadata.get("depth_from") if self.metadata else None
+        if depth_from_val is not None:
+            # Handle both int and float values, convert to int
+            self.depth_from = tk.StringVar(value=str(int(depth_from_val)))
+        else:
+            self.depth_from = tk.StringVar(value="")
+
+        depth_to_val = self.metadata.get("depth_to") if self.metadata else None
+        if depth_to_val is not None:
+            # Handle both int and float values, convert to int
+            self.depth_to = tk.StringVar(value=str(int(depth_to_val)))
+        else:
+            self.depth_to = tk.StringVar(value="")
 
         # Also update increment button state when interval changes
         self.interval_var.trace_add(
@@ -355,6 +414,12 @@ class CompartmentRegistrationDialog:
         # Update mode display
         self._update_mode_indicator()
 
+        # Show interpolate button if starting in missing boundaries mode
+        if self.current_mode == self.MODE_MISSING_BOUNDARIES and hasattr(
+            self, "interpolate_button"
+        ):
+            self.interpolate_button.pack(side=tk.RIGHT, padx=5)
+
     def _register_traces(self):
         """Register variable traces after GUI is initialized - enhanced version."""
         # Original traces
@@ -380,6 +445,244 @@ class CompartmentRegistrationDialog:
         self._update_compartment_labels()
         self._update_metadata_display()
         self._update_existing_data_visualization()
+
+    def _determine_initial_mode(self):
+        """Intelligently determine the initial mode based on available data."""
+        # Extract metadata values
+        hole_id = self.metadata.get("hole_id") if self.metadata else None
+        depth_from = self.metadata.get("depth_from") if self.metadata else None
+        depth_to = self.metadata.get("depth_to") if self.metadata else None
+
+        has_complete_metadata = all(
+            [hole_id, depth_from is not None, depth_to is not None]
+        )
+
+        self.logger.debug("_determine_initial_mode called")
+        self.logger.debug(f"  hole_id: {hole_id}")
+        self.logger.debug(f"  depth_from: {depth_from}")
+        self.logger.debug(f"  depth_to: {depth_to}")
+        self.logger.debug(f"  has_complete_metadata: {has_complete_metadata}")
+
+        # Check if we have real missing markers (after filtering)
+        # Filter out corner markers as they are handled separately
+        actual_missing = [
+            m for m in self.missing_marker_ids if m not in [0, 1, 2, 3]
+        ]  # Corner markers
+
+        self.logger.debug(f"  original missing_marker_ids: {self.missing_marker_ids}")
+        self.logger.debug(f"  actual missing (non-corner): {actual_missing}")
+
+        # Check boundaries quality
+        has_complete_boundaries = False
+        if self.detected_boundaries:
+            self.logger.debug(
+                f"  Have {len(self.detected_boundaries)} boundaries, checking quality..."
+            )
+            boundaries_ok = self._check_boundaries_quality(self.detected_boundaries)
+            self.logger.debug(f"  boundaries_ok: {boundaries_ok}")
+            has_complete_boundaries = boundaries_ok
+        else:
+            self.logger.debug("  No boundaries detected")
+
+        self.logger.debug(f"  has_complete_boundaries: {has_complete_boundaries}")
+
+        # Decision logic
+        if not has_complete_metadata:
+            self.logger.info("Starting in METADATA mode - need to enter metadata")
+            return self.MODE_METADATA
+        elif not has_complete_boundaries or (
+            actual_missing and len(actual_missing) > 0
+        ):
+            # If boundaries are missing/incomplete OR we have missing non-corner markers
+            # Start in missing boundaries mode to add them
+            self.logger.info(
+                f"Starting in MISSING_BOUNDARIES mode - boundaries incomplete or {len(actual_missing)} non-corner markers missing"
+            )
+            return self.MODE_MISSING_BOUNDARIES
+        else:
+            # Everything looks good, but we might still want to allow adjustments
+            # Check if boundaries need fine-tuning even if complete
+            if self.detected_boundaries and self._check_boundaries_quality(
+                self.detected_boundaries
+            ):
+                # Boundaries are complete and good quality, show final mode for confirmation
+                self.logger.info(
+                    "Starting in ADJUST_BOUNDARIES mode - all data complete; entering fine-tune mode"
+                )
+                return self.MODE_ADJUST_BOUNDARIES
+            else:
+                # Boundaries exist but might need adjustment
+                self.logger.info(
+                    "Starting in ADJUST_BOUNDARIES mode - boundaries may need fine-tuning"
+                )
+                return self.MODE_ADJUST_BOUNDARIES
+
+    def _check_boundaries_quality(self, boundaries):
+        """
+        Check if boundaries are properly ordered and spaced.
+        Accounts for natural variation in compartment spacing (up to 20% of compartment width)
+        and honors spacing overrides from config.
+
+        Args:
+            boundaries: List of boundary tuples (x1, y1, x2, y2)
+
+        Returns:
+            bool: True if boundaries appear to be in good order
+        """
+        self.logger.debug(
+            f"_check_boundaries_quality called with {len(boundaries) if boundaries else 0} boundaries"
+        )
+
+        if not boundaries or len(boundaries) < 20:
+            self.logger.debug(
+                f"  Not enough boundaries: {len(boundaries) if boundaries else 0}"
+            )
+            return False
+
+        try:
+            # Sort boundaries by x position while preserving original indices
+            indexed_boundaries = [(i, b) for i, b in enumerate(boundaries)]
+            sorted_indexed = sorted(indexed_boundaries, key=lambda item: item[1][0])
+
+            # Get config values
+            config_spacing_mm = self.config.get("compartment_spacing_mm", 3.0)
+            spacing_overrides = self.config.get("compartment_spacing_overrides", {})
+
+            # Get scale data
+            scale_px_per_cm = None
+            if hasattr(self, "scale_data") and self.scale_data:
+                scale_px_per_cm = self.scale_data.get("scale_px_per_cm")
+
+            # Check if we have boundary_to_marker mapping populated
+            has_marker_mapping = (
+                hasattr(self, "boundary_to_marker")
+                and self.boundary_to_marker
+                and len(self.boundary_to_marker) > 0
+            )
+
+            # If no scale data OR no marker mapping, use lenient statistical check
+            if not scale_px_per_cm or not has_marker_mapping:
+                self.logger.debug(
+                    f"  Using statistical validation (scale_data={scale_px_per_cm is not None}, "
+                    f"marker_mapping={has_marker_mapping})"
+                )
+
+                # Calculate gaps
+                gaps = []
+                prev_x2 = None
+                for _, (x1, y1, x2, y2) in sorted_indexed:
+                    if prev_x2 is not None:
+                        gap = x1 - prev_x2
+                        if gap >= 0:
+                            gaps.append(gap)
+                    prev_x2 = x2
+
+                if not gaps:
+                    return True
+
+                # Use mean + generous tolerance to account for overrides we can't see yet
+                avg_gap = np.mean(gaps)
+                std_gap = np.std(gaps) if len(gaps) > 1 else 0
+
+                # Very lenient: accept anything within 3 std dev OR up to 2x the average
+                # This accommodates the 10-11 override (5mm vs 3mm default = 1.67x)
+                max_allowed = max(avg_gap + 3 * std_gap, avg_gap * 2.0)
+                min_allowed = max(0, avg_gap - 3 * std_gap)
+
+                self.logger.debug(
+                    f"  Gap statistics: avg={avg_gap:.1f}px, std={std_gap:.1f}px, "
+                    f"range={min_allowed:.1f}-{max_allowed:.1f}px"
+                )
+
+                # Check for overlaps and extreme outliers only
+                prev_x2 = None
+                for _, (x1, y1, x2, y2) in sorted_indexed:
+                    if prev_x2 is not None:
+                        # Strict overlap check
+                        if x1 < prev_x2 - 5:
+                            self.logger.debug(
+                                f"  Overlap detected: prev_x2={prev_x2}, x1={x1}"
+                            )
+                            return False
+
+                        # Lenient gap check
+                        gap = x1 - prev_x2
+                        if gap > max_allowed or gap < min_allowed:
+                            self.logger.debug(
+                                f"  Gap {gap:.1f}px outside statistical range "
+                                f"{min_allowed:.1f}-{max_allowed:.1f}px"
+                            )
+                            return False
+
+                    prev_x2 = x2
+
+                self.logger.debug("  Statistical validation passed")
+                return True
+
+            # We have both scale data AND marker mapping - use strict per-gap validation
+            self.logger.debug("  Using per-gap validation with config overrides")
+
+            tolerance_factor = 3  # 300% tolerance to be safe
+
+            # Helper function to get expected spacing for a gap
+            def get_expected_spacing_px(prev_idx, curr_idx):
+                """Get expected spacing in pixels between two boundaries."""
+                prev_marker = self.boundary_to_marker.get(prev_idx)
+                curr_marker = self.boundary_to_marker.get(curr_idx)
+
+                if prev_marker is None or curr_marker is None:
+                    return (config_spacing_mm / 10.0) * scale_px_per_cm
+
+                prev_comp = prev_marker - 3
+                curr_comp = curr_marker - 3
+
+                # Check for override
+                override_key = f"{prev_comp}-{curr_comp}"
+                spacing_mm = spacing_overrides.get(override_key, config_spacing_mm)
+
+                return (spacing_mm / 10.0) * scale_px_per_cm
+
+            # Validate each gap
+            prev_x2 = None
+            prev_idx = None
+
+            for orig_idx, (x1, y1, x2, y2) in sorted_indexed:
+                if prev_x2 is not None and x1 < prev_x2 - 5:
+                    self.logger.debug(f"  Overlap detected: prev_x2={prev_x2}, x1={x1}")
+                    return False
+
+                if prev_x2 is not None and prev_idx is not None:
+                    gap = x1 - prev_x2
+                    expected_gap_px = get_expected_spacing_px(prev_idx, orig_idx)
+
+                    max_gap = expected_gap_px * (1 + tolerance_factor)
+                    min_gap = expected_gap_px * (1 - tolerance_factor)
+
+                    if gap > max_gap or gap < min_gap:
+                        prev_marker = self.boundary_to_marker.get(prev_idx, "?")
+                        curr_marker = self.boundary_to_marker.get(orig_idx, "?")
+                        prev_comp = (
+                            prev_marker - 3 if isinstance(prev_marker, int) else "?"
+                        )
+                        curr_comp = (
+                            curr_marker - 3 if isinstance(curr_marker, int) else "?"
+                        )
+
+                        self.logger.debug(
+                            f"  Gap {prev_comp}-{curr_comp} outside tolerance: "
+                            f"{gap:.1f}px (expected {expected_gap_px:.1f}px ± {tolerance_factor*100:.0f}%)"
+                        )
+                        return False
+
+                prev_x2 = x2
+                prev_idx = orig_idx
+
+            self.logger.debug("  Per-gap validation passed")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"  Error in boundary quality check: {e}")
+            return False
 
     def _calculate_average_compartment_width(self):
         """Calculate the average width of detected compartments."""
@@ -524,6 +827,13 @@ class CompartmentRegistrationDialog:
         """Real-time validation for depth_from and auto-update depth_to."""
         depth_str = self.depth_from.get().strip()
 
+        # Handle float strings (e.g., "60.0" -> "60")
+        if "." in depth_str:
+            try:
+                depth_str = str(int(float(depth_str)))
+            except ValueError:
+                pass
+
         # Remove non-digits
         cleaned = "".join(c for c in depth_str if c.isdigit())
 
@@ -558,6 +868,13 @@ class CompartmentRegistrationDialog:
     def _validate_depth_to_realtime(self, *args):
         """Real-time validation for depth_to."""
         depth_str = self.depth_to.get().strip()
+
+        # Handle float strings (e.g., "80.0" -> "80")
+        if "." in depth_str:
+            try:
+                depth_str = str(int(float(depth_str)))
+            except ValueError:
+                pass
 
         # Remove non-digits
         cleaned = "".join(c for c in depth_str if c.isdigit())
@@ -1032,12 +1349,14 @@ class CompartmentRegistrationDialog:
         depth_label.pack(side=tk.LEFT, padx=(0, 5))
 
         # Use themed entry for depth_from with validation
+        # Don't use placeholder if StringVar already has a value
+        depth_from_placeholder = None if self.depth_from.get() else "0"
         self.depth_from_entry = self.gui_manager.create_entry_with_validation(
             row_frame,
             textvariable=self.depth_from,
             validate_func=self._validate_depth_from_realtime,
             width=5,
-            placeholder="0",
+            placeholder=depth_from_placeholder,
         )
         self.depth_from_entry.pack(side=tk.LEFT)
 
@@ -1050,12 +1369,14 @@ class CompartmentRegistrationDialog:
         depth_separator.pack(side=tk.LEFT, padx=3)
 
         # Use themed entry for depth_to with validation
+        # Don't use placeholder if StringVar already has a value
+        depth_to_placeholder = None if self.depth_to.get() else "20"
         self.depth_to_entry = self.gui_manager.create_entry_with_validation(
             row_frame,
             textvariable=self.depth_to,
             validate_func=self._validate_depth_to_realtime,
             width=5,
-            placeholder="20",
+            placeholder=depth_to_placeholder,
         )
         self.depth_to_entry.pack(side=tk.LEFT, padx=(0, 15))
 
@@ -1558,7 +1879,8 @@ class CompartmentRegistrationDialog:
                 )
 
             # Update and show zoom windows
-            self._update_static_zoom_views()
+            # self._update_static_zoom_views()
+            self._hide_zoom_windows()
 
             # Ensure we have focus for keyboard input
             self.dialog.after(50, lambda: self.canvas.focus_set())
@@ -2110,8 +2432,12 @@ class CompartmentRegistrationDialog:
             left_zoom_x = canvas_x + left_canvas_x
             right_zoom_x = canvas_x + right_canvas_x - self.zoom_width
 
-            # Center vertically on the extracted area
-            zoom_y = canvas_y + center_canvas_y - (self.zoom_height // 2)
+            # Position zoom windows ABOVE the compartments instead of centered on them
+            # Move up by zoom height + extra offset so they don't obscure compartments
+            vertical_offset = self.zoom_height + 50  # Offset above compartments
+            zoom_y = (
+                canvas_y + center_canvas_y - (self.zoom_height // 2) - vertical_offset
+            )
 
             # Ensure zoom windows stay on the same screen as dialog
             margin = 10
@@ -2225,6 +2551,10 @@ class CompartmentRegistrationDialog:
         # Store current mode
         self.current_mode = new_mode
         self.logger.debug(f"Mode switched to: {self.current_mode}")
+
+        # Auto-apply consistent adjustments when entering adjustment mode
+        if new_mode == self.MODE_ADJUST_BOUNDARIES:
+            self._auto_apply_pattern_adjustments()
 
         # Update mode indicator and buttons
         self._update_mode_indicator()
@@ -2825,6 +3155,49 @@ class CompartmentRegistrationDialog:
         # Apply adjustments
         self._apply_adjustments()
 
+    def _auto_apply_pattern_adjustments(self):
+        """
+        Check adjustment history and auto-apply if pattern detected.
+        """
+        if len(CompartmentRegistrationDialog.adjustment_history) >= 3:
+            # Check last 3 adjustments for consistency
+            recent = CompartmentRegistrationDialog.adjustment_history[-3:]
+
+            # Check left offset consistency
+            left_values = [adj.get("left_offset", 0) for adj in recent]
+            if (
+                all(abs(val - left_values[0]) <= 2 for val in left_values)
+                and abs(left_values[0]) > 1
+            ):
+                # Apply the average
+                avg_left = sum(left_values) / len(left_values)
+                self.left_height_offset = int(avg_left)
+                self.logger.info(
+                    f"Auto-applying left offset pattern: {self.left_height_offset}"
+                )
+
+            # Check right offset consistency
+            right_values = [adj.get("right_offset", 0) for adj in recent]
+            if (
+                all(abs(val - right_values[0]) <= 2 for val in right_values)
+                and abs(right_values[0]) > 1
+            ):
+                # Apply the average
+                avg_right = sum(right_values) / len(right_values)
+                self.right_height_offset = int(avg_right)
+                self.logger.info(
+                    f"Auto-applying right offset pattern: {self.right_height_offset}"
+                )
+
+            # Update visualization if any patterns were applied
+            if self.left_height_offset != 0 or self.right_height_offset != 0:
+                self.status_var.set(
+                    f"Auto-applied adjustments: Left={self.left_height_offset}, Right={self.right_height_offset}"
+                )
+                self._update_visualization()
+                self._update_static_zoom_views()
+                self._apply_adjustments()
+
     def _adjust_side_height(self, side, delta):
         """
         Adjust the height of a specific side of the boundary.
@@ -2908,13 +3281,28 @@ class CompartmentRegistrationDialog:
                 self.result_boundaries[marker_id] = (x1, new_y1, x2, new_y2)
 
     def _apply_adjustments(self):
-        """Apply current boundary adjustments and refresh the visualization."""
+        """Apply the current boundary adjustments to detected boundaries."""
         try:
+            # Record adjustment to class history if meaningful (not zeros)
+            if abs(self.left_height_offset) > 1 or abs(self.right_height_offset) > 1:
+                adjustment_record = {
+                    "left_offset": self.left_height_offset,
+                    "right_offset": self.right_height_offset,
+                }
+                CompartmentRegistrationDialog.adjustment_history.append(
+                    adjustment_record
+                )
+                # Keep only last N adjustments
+                if (
+                    len(CompartmentRegistrationDialog.adjustment_history)
+                    > self.MAX_HISTORY
+                ):
+                    CompartmentRegistrationDialog.adjustment_history.pop(0)
+
             self.logger.debug(
                 f"Applying adjustments - top_y: {self.top_y}, bottom_y: {self.bottom_y}, "
                 f"left_offset: {self.left_height_offset}, right_offset: {self.right_height_offset}"
             )
-
             # Store the original boundaries for comparison
             original_boundaries = (
                 self.detected_boundaries.copy() if self.detected_boundaries else []
@@ -3475,14 +3863,12 @@ class CompartmentRegistrationDialog:
         # Get vertical constraints
         vertical_constraints = (self.top_y, self.bottom_y)
 
-        # Call interpolation method
-        interpolation_result = self.interpolate_missing_boundaries(
-            detected_boundaries=boundaries,
+        # Call interpolation method on boundary manager
+        interpolation_result = self.boundary_manager.interpolate_missing_boundaries(
             vertical_constraints=vertical_constraints,
             scale_px_per_cm=scale_px_per_cm,
             config=self.config,
-            image_shape=image_shape,
-            boundary_to_marker=boundary_to_marker,
+            image_width=image_shape[1],
         )
         self.logger.debug(
             "  gap_analysis: %s", interpolation_result.get("gap_analysis")
@@ -3848,32 +4234,47 @@ class CompartmentRegistrationDialog:
                 new_bounds.append((x1n, top_y, x2n, bottom_y))
                 new_ids.append(marker)
 
-        # 5) Edge‐cases: before first & after last
+        # 5) Edge-cases: before first & after last
         if existing:
             first_mid, first_x1 = existing[0][0], existing[0][1]
-            # left‐side
+            # left-side: extrapolate leftward from first detected marker
             for m in range(first_mid - 1, min_mid - 1, -1):
                 if m not in truly_missing:
                     continue
-                # each left step uses default_sp
-                x2n = first_x1 - (first_mid - m) * (comp_w + default_sp)
+                # Calculate how many steps LEFT of first detected
+                steps_left = first_mid - m
+                # Right edge is: first_x1 - spacing - (steps-1)*(width+spacing)
+                # For immediate neighbor (steps=1): x2n = first_x1 - spacing
+                x2n = first_x1 - default_sp - (steps_left - 1) * (comp_w + default_sp)
                 x1n = x2n - comp_w
-                if x2n <= 0:
+                if x1n < 0:
+                    self.logger.warning(
+                        f"Marker {m} would be off-screen left (x1={x1n}), skipping"
+                    )
                     break
                 new_bounds.insert(0, (x1n, top_y, x2n, bottom_y))
                 new_ids.insert(0, m)
+                self.logger.debug(f"Interpolated left edge marker {m}: ({x1n}, {top_y}, {x2n}, {bottom_y})")
 
-            # right‐side
+            # right-side: extrapolate rightward from last detected marker
             last_mid, last_x2 = existing[-1][0], existing[-1][2]
             for m in range(last_mid + 1, max_mid + 1):
                 if m not in truly_missing:
                     continue
-                x1n = last_x2 + (m - last_mid) * (comp_w + default_sp)
+                # Calculate how many steps RIGHT of last detected
+                steps_right = m - last_mid
+                # Left edge is: last_x2 + spacing + (steps-1)*(width+spacing)
+                # For immediate neighbor (steps=1): x1n = last_x2 + spacing
+                x1n = last_x2 + default_sp + (steps_right - 1) * (comp_w + default_sp)
                 x2n = x1n + comp_w
-                if x1n >= image_shape[1]:
+                if x2n > image_shape[1]:
+                    self.logger.warning(
+                        f"Marker {m} would be off-screen right (x2={x2n}), skipping"
+                    )
                     break
                 new_bounds.append((x1n, top_y, x2n, bottom_y))
                 new_ids.append(m)
+                self.logger.debug(f"Interpolated right edge marker {m}: ({x1n}, {top_y}, {x2n}, {bottom_y})")
 
         self.logger.info(
             f"Built {len(new_bounds)} interpolated boxes for markers {new_ids}"
@@ -4590,7 +4991,8 @@ class CompartmentRegistrationDialog:
 
         else:  # Compartment marker
             # Calculate the compartment boundaries for preview
-            half_width = self.config.get("compartment_width_cm", 2.0) // 2
+            # Use the average width in PIXELS, not cm!
+            half_width = self.avg_width // 2 if hasattr(self, "avg_width") else 50
             x1 = max(0, x - half_width)
             x2 = min(img_width - 1, x + half_width)
             would_overlap = self._would_overlap_existing(x)
@@ -4648,13 +5050,15 @@ class CompartmentRegistrationDialog:
                     warning_size = cv2.getTextSize(
                         warning_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
                     )[0]
+                    # Ensure all coordinates are Python int, not numpy
+                    pt1_x = int(float(mid_x) - warning_size[0] // 2 - 5)
+                    pt1_y = int(float(mid_y) - 30 - warning_size[1])
+                    pt2_x = int(float(mid_x) + warning_size[0] // 2 + 5)
+                    pt2_y = int(float(mid_y) - 20)
                     cv2.rectangle(
                         viz_image,
-                        (
-                            int(mid_x) - warning_size[0] // 2 - 5,
-                            int(mid_y) - 30 - warning_size[1],
-                        ),
-                        (int(mid_x) + warning_size[0] // 2 + 5, int(mid_y) - 20),
+                        (pt1_x, pt1_y),
+                        (pt2_x, pt2_y),
                         (0, 0, 0),
                         -1,
                     )
@@ -4672,16 +5076,15 @@ class CompartmentRegistrationDialog:
                 text_size = cv2.getTextSize(
                     f"{depth_label}m", cv2.FONT_HERSHEY_SIMPLEX, 1.5, 3
                 )[0]
+                # Ensure all coordinates are Python int, not numpy
+                pt1_x = int(float(mid_x) - text_size[0] // 2 - 5)
+                pt1_y = int(float(mid_y) - text_size[1] // 2 - 5)
+                pt2_x = int(float(mid_x) + text_size[0] // 2 + 5)
+                pt2_y = int(float(mid_y) + text_size[1] // 2 + 5)
                 cv2.rectangle(
                     viz_image,
-                    (
-                        int(mid_x) - text_size[0] // 2 - 5,
-                        int(mid_y) - text_size[1] // 2 - 5,
-                    ),
-                    (
-                        int(mid_x) + text_size[0] // 2 + 5,
-                        int(mid_y) + text_size[1] // 2 + 5,
-                    ),
+                    (pt1_x, pt1_y),
+                    (pt2_x, pt2_y),
                     (0, 0, 0),
                     -1,
                 )
@@ -5570,9 +5973,71 @@ class CompartmentRegistrationDialog:
                 # Clean up resources before closing
                 self._cleanup_zoom_lens()
 
+                # Calculate actual rotation angle from boundary slopes
+                # This is the rotation needed to align the tray horizontally
+                img_width = self.source_image.shape[1] if self.source_image is not None else 1
+                slope_dy = self.right_height_offset - self.left_height_offset
+                calculated_rotation = -np.arctan2(slope_dy, img_width) * 180 / np.pi
+                self.rotation_angle = calculated_rotation
+
+                self.logger.info(f"Calculated rotation from slopes: {calculated_rotation:.3f}° (left_offset={self.left_height_offset}, right_offset={self.right_height_offset})")
+
+                # Apply rotation to high-res image if rotation is significant
+                transformed_image = None
+                transformation_applied = False
+                cumulative_rotation = 0.0
+
+                if self.high_res_image is not None and abs(calculated_rotation) > 0.01:
+                    try:
+                        # Get scale factor from working to original
+                        scale_factor = 1.0
+                        if hasattr(self, "scale_data") and self.scale_data:
+                            scale_relationships = self.scale_data.get("scale_relationships", {})
+                            scale_info = scale_relationships.get(("working", "original"), {"scale": 1.0})
+                            scale_factor = scale_info["scale"]
+
+                        # Calculate rotation center at the center of the image
+                        h, w = self.high_res_image.shape[:2]
+                        center = (w // 2, h // 2)
+
+                        # Create rotation matrix for the high-res image
+                        rotation_matrix = cv2.getRotationMatrix2D(center, calculated_rotation, 1.0)
+
+                        # Calculate new image dimensions to avoid cropping
+                        cos = np.abs(rotation_matrix[0, 0])
+                        sin = np.abs(rotation_matrix[0, 1])
+                        new_w = int(h * sin + w * cos)
+                        new_h = int(h * cos + w * sin)
+
+                        # Adjust the rotation matrix for the new dimensions
+                        rotation_matrix[0, 2] += (new_w - w) / 2
+                        rotation_matrix[1, 2] += (new_h - h) / 2
+
+                        # Apply the rotation
+                        transformed_image = cv2.warpAffine(
+                            self.high_res_image,
+                            rotation_matrix,
+                            (new_w, new_h),
+                            flags=cv2.INTER_LINEAR,
+                            borderMode=cv2.BORDER_CONSTANT,
+                            borderValue=(0, 0, 0)
+                        )
+
+                        transformation_applied = True
+                        cumulative_rotation = calculated_rotation
+                        self.logger.info(f"Applied rotation to high-res image: {calculated_rotation:.3f}° (new size: {new_w}x{new_h})")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to apply rotation to high-res image: {e}")
+                        import traceback
+                        self.logger.error(traceback.format_exc())
+                        transformed_image = None
+                        transformation_applied = False
+
                 # Create final results
                 self.final_results = {
                     "result_boundaries": self.result_boundaries,
+                    "boundaries": self.detected_boundaries,
                     "top_boundary": self.top_y,
                     "bottom_boundary": self.bottom_y,
                     "left_height_offset": self.left_height_offset,
@@ -5587,7 +6052,26 @@ class CompartmentRegistrationDialog:
                     "depth_from": int(self.depth_from.get().strip()),
                     "depth_to": int(self.depth_to.get().strip()),
                     "compartment_interval": self.interval_var.get(),
+                    # Include transformation data - NOW ACTUALLY SET
+                    "transformation_applied": transformation_applied,
+                    "transformed_image": transformed_image,
+                    "cumulative_rotation": cumulative_rotation,
+                    # Store original shape for boundary transformation
+                    "original_shape": self.high_res_image.shape if self.high_res_image is not None else None,
+                    "transformation_matrix": (
+                        self.transformation_matrix
+                        if hasattr(self, "transformation_matrix")
+                        else None
+                    ),
+                    "cumulative_offset_y": (
+                        self.cumulative_offset_y
+                        if hasattr(self, "cumulative_offset_y")
+                        else 0.0
+                    ),
                 }
+
+                # Clean up ALL resources before closing
+                self._cleanup_all_resources()
 
                 # Close the dialog
                 self.dialog.destroy()
@@ -5595,6 +6079,11 @@ class CompartmentRegistrationDialog:
         except Exception as e:
             self.logger.error(f"Error in continue operation: {str(e)}")
             self.logger.error(traceback.format_exc())
+            # Ensure cleanup even on error
+            try:
+                self._cleanup_all_resources()
+            except:
+                pass
 
     def _on_reject(self):
         """Handle reject button click - signal rejection to the caller."""
@@ -5618,7 +6107,7 @@ class CompartmentRegistrationDialog:
 
             # Define cleanup callback
             def cleanup_resources():
-                self._cleanup_zoom_lens()
+                self._cleanup_all_resources()
 
             # Use standardized handler
             result = DialogHelper.handle_rejection(
@@ -5658,8 +6147,8 @@ class CompartmentRegistrationDialog:
                 yes_text=DialogHelper.t("Stop Processing"),
                 no_text=DialogHelper.t("Continue"),
             ):
-                # Clean up resources before closing
-                self._cleanup_zoom_lens()
+                # Clean up ALL resources before closing
+                self._cleanup_all_resources()
 
                 # Set a quit flag in the results
                 self.final_results = {
@@ -5695,13 +6184,25 @@ class CompartmentRegistrationDialog:
                 # Clear result and close dialog
                 self.result_boundaries = {}
 
-                # Clean up resources before closing
-                self._cleanup_zoom_lens()
+                # Set final_results with cancelled flag so caller knows to skip processing
+                self.final_results = {
+                    "cancelled": True,
+                    "message": "User cancelled registration",
+                }
+
+                # Clean up ALL resources before closing
+                self._cleanup_all_resources()
 
                 # Use destroy() to ensure the dialog closes
                 self.dialog.destroy()
         except Exception as e:
             self.logger.error(f"Error in cancel operation: {str(e)}")
+
+            # Set cancelled flag even on error
+            self.final_results = {
+                "cancelled": True,
+                "message": f"Cancelled with error: {str(e)}",
+            }
 
             # Still try to close the dialog
             try:
@@ -5751,35 +6252,60 @@ class CompartmentRegistrationDialog:
 
     def _cleanup_all_resources(self):
         """Clean up all resources to prevent memory leaks."""
-        # Clean up zoom lens windows
-        self._cleanup_zoom_lens()
+        try:
+            self.logger.debug("Starting comprehensive resource cleanup")
 
-        # Clean up any image references
-        if hasattr(self, "photo_image"):
-            self.photo_image = None
+            # Clean up zoom lens windows
+            self._cleanup_zoom_lens()
 
-        if hasattr(self, "_zoom_img_ref"):
-            self._zoom_img_ref = None
+            # Clean up ALL image references - this is critical
+            if hasattr(self, "source_image"):
+                self.source_image = None
 
-        if hasattr(self, "_zoom_img_flipped"):
-            self._zoom_img_flipped = None
+            if hasattr(self, "display_image"):
+                self.display_image = None
 
-        # Clean up canvas references
-        for attr_name in dir(self):
-            if attr_name.startswith("_canvas"):
-                setattr(self, attr_name, None)
+            if hasattr(self, "high_res_image"):
+                self.high_res_image = None
+
+            if hasattr(self, "photo_image"):
+                self.photo_image = None
+
+            if hasattr(self, "current_viz"):
+                self.current_viz = None
+
+            if hasattr(self, "_zoom_img_ref"):
+                self._zoom_img_ref = None
+
+            if hasattr(self, "_zoom_img_flipped"):
+                self._zoom_img_flipped = None
+
+            # Clean up canvas references
+            for attr_name in dir(self):
+                if attr_name.startswith("_canvas"):
+                    setattr(self, attr_name, None)
+
+            # Force garbage collection
+            import gc
+
+            gc.collect()
+
+            self.logger.debug("Resource cleanup completed")
+
+        except Exception as e:
+            self.logger.warning(f"Error during resource cleanup: {e}")
 
     def _get_monitor_size(self):
         """Get the size of the monitor containing this dialog."""
         try:
             # Try tkinter approach first (most reliable)
             try:
-                if hasattr(self, 'root') and self.root:
+                if hasattr(self, "root") and self.root:
                     width = self.root.winfo_screenwidth()
                     height = self.root.winfo_screenheight()
                     if width > 0 and height > 0:
                         return width, height
-                elif hasattr(self, 'dialog') and self.dialog:
+                elif hasattr(self, "dialog") and self.dialog:
                     width = self.dialog.winfo_screenwidth()
                     height = self.dialog.winfo_screenheight()
                     if width > 0 and height > 0:
@@ -5789,6 +6315,7 @@ class CompartmentRegistrationDialog:
 
             # Platform-specific monitor detection as fallback
             import platform
+
             if platform.system() == "Windows":
                 try:
                     import ctypes
@@ -5800,7 +6327,7 @@ class CompartmentRegistrationDialog:
                             ("cbSize", wintypes.DWORD),
                             ("rcMonitor", wintypes.RECT),
                             ("rcWork", wintypes.RECT),
-                            ("dwFlags", wintypes.DWORD)
+                            ("dwFlags", wintypes.DWORD),
                         ]
 
                     # Get primary monitor info
@@ -5911,6 +6438,33 @@ class CompartmentRegistrationDialog:
             # Wait for dialog to close
             self.dialog.wait_window()
 
+            # Debug logging for transformation attributes
+            self.logger.info("=== TRANSFORMATION DEBUG ===")
+            self.logger.info(
+                f"Has transformation_applied: {hasattr(self, 'transformation_applied')}"
+            )
+            if hasattr(self, "transformation_applied"):
+                self.logger.info(
+                    f"transformation_applied = {self.transformation_applied}"
+                )
+
+            self.logger.info(
+                f"Has transformation_matrix: {hasattr(self, 'transformation_matrix')}"
+            )
+            if hasattr(self, "transformation_matrix"):
+                self.logger.info(
+                    f"transformation_matrix is None: {self.transformation_matrix is None}"
+                )
+
+            self.logger.info(
+                f"Has cumulative_offset_y: {hasattr(self, 'cumulative_offset_y')}"
+            )
+            if hasattr(self, "cumulative_offset_y"):
+                self.logger.info(f"cumulative_offset_y = {self.cumulative_offset_y}")
+
+            self.logger.info(f"Has image_aligner: {hasattr(self, 'image_aligner')}")
+            self.logger.info("=== END TRANSFORMATION DEBUG ===")
+
             # Scale transformation data to original image coordinates
             scaled_transformation_matrix = None
             scaled_cumulative_offset_y = None
@@ -5953,6 +6507,18 @@ class CompartmentRegistrationDialog:
             if hasattr(self, "final_results"):
                 return self.final_results
             else:
+                # Check if dialog was destroyed without explicit approval
+                # If result_boundaries is empty and we don't have final_results,
+                # this was likely a cancellation via X button or unexpected closure
+                if not self.result_boundaries:
+                    self.logger.warning(
+                        "Dialog closed without explicit approval - treating as cancelled"
+                    )
+                    return {
+                        "cancelled": True,
+                        "message": "Dialog closed without completing workflow",
+                    }
+                
                 # Create a default result dict
                 result = {
                     "result_boundaries": self.result_boundaries,
@@ -5979,14 +6545,26 @@ class CompartmentRegistrationDialog:
                         else None
                     ),
                     "compartment_interval": self.interval_var.get(),
-                    "transformation_matrix": scaled_transformation_matrix if scaled_transformation_matrix is not None else [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-                    "cumulative_offset_y": scaled_cumulative_offset_y if scaled_cumulative_offset_y is not None else 0.0,
+                    "transformation_matrix": (
+                        scaled_transformation_matrix
+                        if scaled_transformation_matrix is not None
+                        else [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+                    ),
+                    "cumulative_offset_y": (
+                        scaled_cumulative_offset_y
+                        if scaled_cumulative_offset_y is not None
+                        else 0.0
+                    ),
                     "transformation_applied": (
                         self.transformation_applied
                         if hasattr(self, "transformation_applied")
                         else False
                     ),
-                    "transform_center": scaled_transform_center if scaled_transform_center is not None else [0.0, 0.0],
+                    "transform_center": (
+                        scaled_transform_center
+                        if scaled_transform_center is not None
+                        else [0.0, 0.0]
+                    ),
                 }
                 return result
 

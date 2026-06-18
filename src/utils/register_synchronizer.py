@@ -176,72 +176,47 @@ class RegisterSynchronizer:
 
     def check_and_merge_user_registers(self) -> Dict[str, Any]:
         """
-        Check for multiple user registers and merge if needed.
+        Check for multiple user registers.
+
+        This method NO LONGER performs merges. Each user's register is preserved
+        independently. Use json_manager.export_consolidated_compartments_csv()
+        to get a consolidated view across all users.
 
         Returns:
-            Dictionary with merge results or None if no merge performed
+            Dictionary indicating no merge is needed (preserves all user data)
         """
         if not self.json_manager:
             return {"success": False, "error": "No JSON manager available"}
 
-        # Check if there are multiple user files
-        has_multiple_users = False
-        base_path = str(self.json_manager.base_path)
-
-        for file_type in ["compartment", "original", "review", "corners"]:
-            user_files = JSONRegisterManager.get_all_user_files_static(
-                base_path, file_type
-            )
-            if len(user_files) > 1:
-                has_multiple_users = True
-                break
-
-        if not has_multiple_users:
-            return {"success": True, "merge_performed": False}
-
-        # Get summary of all user data
-        summary = JSONRegisterManager.get_data_summary_static(base_path)
-
-        # Return summary for GUI to display
-        return {
-            "success": True,
-            "merge_needed": True,
-            "summary": summary,
-            "has_multiple_users": has_multiple_users,
-        }
-
-    def perform_user_merge(self, progress_callback=None) -> Dict[str, Any]:
-        """
-        Perform the actual merge of user registers.
-
-        Args:
-            progress_callback: Optional callback for progress updates
-
-        Returns:
-            Dictionary with merge statistics
-        """
-        if not self.json_manager:
-            return {"success": False, "error": "No JSON manager available"}
-
+        # Check if multiple users exist (for logging only)
         try:
-            if progress_callback:
-                progress_callback("Starting merge...", 10)
+            all_users = set()
+            base_path = str(self.json_manager.base_path)
 
-            # Use the JSON manager's efficient merge method
-            merge_stats = self.json_manager.merge_all_user_registers_efficient(
-                file_manager=self.file_manager,
-                progress_callback=progress_callback,
-                confirm_callback=None,  # No confirmation needed here, already done in GUI
-            )
+            for file_type in ["compartment", "original", "review", "corners"]:
+                user_files = JSONRegisterManager.get_all_user_files_static(
+                    base_path, file_type
+                )
+                for file_path in user_files:
+                    user = self.json_manager._extract_user_from_filename(
+                        file_path.stem, file_type
+                    )
+                    if user:
+                        all_users.add(user)
 
-            if progress_callback:
-                progress_callback("Merge complete", 100)
-
-            return {"success": True, "stats": merge_stats}
+            if len(all_users) > 1:
+                self.logger.info(
+                    f"Multiple user registers detected: {sorted(all_users)}. "
+                    "Each user's data is preserved separately - no merge performed."
+                )
+            else:
+                self.logger.info(f"Single user register detected")
 
         except Exception as e:
-            self.logger.error(f"Error during merge: {str(e)}")
-            return {"success": False, "error": str(e)}
+            self.logger.warning(f"Error checking for multiple users: {e}")
+
+        # Always return success with no merge needed - user data is preserved
+        return {"success": True, "merge_performed": False, "merge_needed": False}
 
     # ===== SYNCHRONIZATION OPERATIONS =====
 
@@ -251,6 +226,31 @@ class RegisterSynchronizer:
 
         Returns:
             Dictionary with synchronization results
+        """
+        # TEMPORARILY DISABLED - Return empty success results
+        self.logger.info("RegisterSynchronizer synchronization disabled")
+
+        results = {
+            "success": True,
+            "compartments_added": 0,
+            "missing_compartments": 0,
+            "originals_added": 0,
+            "originals_updated": 0,
+            "missing_files_compartments": 0,
+            "missing_files_originals": 0,
+            "hex_colors_calculated": 0,
+            "hex_colors_failed": 0,
+            "files_renamed": 0,
+            "rename_failed": 0,
+            "errors": [],
+        }
+
+        # Report completion if callback exists
+        self._report_progress("Synchronization disabled", 100)
+
+        return results
+
+        # ORIGINAL CODE BELOW (DISABLED)
         """
         # Log path configuration for debugging
         self.log_path_configuration()
@@ -333,6 +333,7 @@ class RegisterSynchronizer:
             results["errors"].append(str(e))
 
         return results
+                """
 
     def _sync_compartment_images(self) -> Dict[str, int]:
         """
@@ -416,6 +417,39 @@ class RegisterSynchronizer:
                                             final_status = f"OK_{wet_dry}"
                                         else:
                                             final_status = photo_status
+
+                                        # Calculate/cache image properties (hex color, etc.)
+                                        if self.json_manager and self.file_manager:
+                                            try:
+                                                # Get full image path
+                                                img_path = hole_path / filename
+
+                                                # Extract UID from image
+                                                uid = self.file_manager.extract_uid_from_any_image(
+                                                    str(img_path)
+                                                )
+
+                                                if uid:
+                                                    # Get or calculate properties
+                                                    img_props = self.json_manager.get_or_calculate_image_properties(
+                                                        uid=uid,
+                                                        hole_id=hole_id,
+                                                        depth_from=depth_from,
+                                                        depth_to=depth_to,
+                                                        filename=filename,
+                                                        image_path=str(img_path),
+                                                        file_manager=self.file_manager,
+                                                        force_recalculate=False,  # Only recalculate if file changed
+                                                    )
+
+                                                    self.logger.debug(
+                                                        f"Calculated image properties for {filename}: "
+                                                        f"Valid={img_props.get('Has_Valid_Color')}"
+                                                    )
+                                            except Exception as e:
+                                                self.logger.warning(
+                                                    f"Could not calculate image properties for {filename}: {e}"
+                                                )
 
                                         # Add to batch
                                         self.compartment_updates.append(

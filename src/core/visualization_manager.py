@@ -853,57 +853,48 @@ class VisualizationManager:
         # Step 2: Calculate fine skew angle
         skew_angle = self._calculate_skew_angle(markers, compartment_ids)
 
-        if abs(skew_angle) > 0.01:
-            # Apply skew correction
-            h, w = image.shape[:2]
-            center = (w // 2, h // 2)
-            skew_matrix = cv2.getRotationMatrix2D(center, skew_angle, 1.0)
+        # Always apply skew correction (even for tiny angles) to ensure
+        # marker positions are accurate after correction
+        h, w = image.shape[:2]
+        center = (w // 2, h // 2)
+        skew_matrix = cv2.getRotationMatrix2D(center, skew_angle, 1.0)
 
-            corrected_image = cv2.warpAffine(
-                image,
-                skew_matrix,
-                (w, h),
-                flags=cv2.INTER_LANCZOS4,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=(255, 255, 255),
-            )
+        corrected_image = cv2.warpAffine(
+            image,
+            skew_matrix,
+            (w, h),
+            flags=cv2.INTER_LANCZOS4,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255),
+        )
 
-            # Create new version
-            transform = ImageTransform(
-                transform_type=ImageTransformType.SKEW_CORRECT,
-                timestamp=datetime.now(),
-                parameters={"skew_angle": skew_angle, "total_angle": skew_angle},
-                description=f"Fine skew correction: {skew_angle:.2f}°",
-            )
+        # Create new version
+        transform = ImageTransform(
+            transform_type=ImageTransformType.SKEW_CORRECT,
+            timestamp=datetime.now(),
+            parameters={"skew_angle": skew_angle, "total_angle": skew_angle},
+            description=f"Fine skew correction: {skew_angle:.2f}°",
+        )
 
-            corrected_key = f"{version_key}_skew_corrected"
-            self.versions[corrected_key] = ImageVersion(
-                image=corrected_image,
-                version_name=corrected_key,
-                parent_version=version_key,
-                transforms=self.versions[version_key].transforms + [transform],
-                scale_factor_from_original=self.versions[
-                    version_key
-                ].scale_factor_from_original,
-            )
+        corrected_key = f"{version_key}_skew_corrected"
+        self.versions[corrected_key] = ImageVersion(
+            image=corrected_image,
+            version_name=corrected_key,
+            parent_version=version_key,
+            transforms=self.versions[version_key].transforms + [transform],
+            scale_factor_from_original=self.versions[
+                version_key
+            ].scale_factor_from_original,
+        )
 
-            self._inherit_scale_relationships(corrected_key, version_key)
+        self._inherit_scale_relationships(corrected_key, version_key)
 
-            return {
-                "image": corrected_image,
-                "rotation_matrix": skew_matrix,
-                "rotation_angle": skew_angle,
-                "version_key": corrected_key,
-                "needs_redetection": abs(skew_angle) > 1.0,
-            }
-
-        # No correction needed
         return {
-            "image": image,
-            "rotation_matrix": np.eye(2, 3, dtype=np.float32),
-            "rotation_angle": 0.0,
-            "version_key": version_key,
-            "needs_redetection": False,
+            "image": corrected_image,
+            "rotation_matrix": skew_matrix,
+            "rotation_angle": skew_angle,
+            "version_key": corrected_key,
+            "needs_redetection": True,  # Always re-detect for accurate positions
         }
 
     def correct_marker_geometry(
@@ -1179,9 +1170,134 @@ class VisualizationManager:
         self, markers: Dict[int, np.ndarray], compartment_ids: List[int]
     ) -> float:
         """
-        Calculate fine skew angle by fitting a line through compartment markers.
+        Calculate skew angle using hierarchical marker pair strategy.
+
+        Priority order:
+        1. Corner marker pairs (0,1 or 2,3) - most reliable
+        2. Opposite compartment pairs - good baseline
+        3. Line fit through all compartment markers - fallback
 
         Returns: Skew angle in degrees
+        """
+        # Try corner marker pairs first (most reliable)
+        angle = self._try_corner_marker_alignment(markers)
+        if angle is not None:
+            self.logger.info(f"Skew angle from corner markers: {angle:.2f}°")
+            return angle
+
+        # Try opposite compartment marker pairs
+        angle = self._try_compartment_pair_alignment(markers, compartment_ids)
+        if angle is not None:
+            self.logger.info(f"Skew angle from compartment pairs: {angle:.2f}°")
+            return angle
+
+        # Fallback to line fit through all markers
+        self.logger.warning("Using fallback line-fit method for skew calculation")
+        angle = self._calculate_skew_from_linefit(markers, compartment_ids)
+        if angle is not None:
+            self.logger.info(f"Skew angle from line fit: {angle:.2f}°")
+            return angle
+
+        self.logger.warning("Could not calculate skew angle - insufficient markers")
+        return 0.0
+
+    def _try_corner_marker_alignment(
+        self, markers: Dict[int, np.ndarray]
+    ) -> Optional[float]:
+        """
+        Try to calculate skew from corner marker pairs.
+
+        Corner markers (0=TL, 1=TR, 2=BL, 3=BR) should form horizontal lines.
+        Top pair (0,1) or bottom pair (2,3) can be used.
+
+        Returns: Angle in degrees, or None if corners not available
+        """
+        # Try top corner pair (0, 1)
+        if 0 in markers and 1 in markers:
+            center_0 = np.mean(markers[0], axis=0)
+            center_1 = np.mean(markers[1], axis=0)
+
+            dx = center_1[0] - center_0[0]
+            dy = center_1[1] - center_0[1]
+
+            if abs(dx) > 10:  # Ensure reasonable baseline
+                angle_rad = np.arctan2(dy, dx)
+                angle_deg = np.degrees(angle_rad)
+                self.logger.debug(
+                    f"Corner pair (0,1): dx={dx:.1f}, dy={dy:.1f}, angle={angle_deg:.2f}°"
+                )
+                return self._normalize_angle(angle_deg)
+
+        # Try bottom corner pair (2, 3)
+        if 2 in markers and 3 in markers:
+            center_2 = np.mean(markers[2], axis=0)
+            center_3 = np.mean(markers[3], axis=0)
+
+            dx = center_3[0] - center_2[0]
+            dy = center_3[1] - center_2[1]
+
+            if abs(dx) > 10:  # Ensure reasonable baseline
+                angle_rad = np.arctan2(dy, dx)
+                angle_deg = np.degrees(angle_rad)
+                self.logger.debug(
+                    f"Corner pair (2,3): dx={dx:.1f}, dy={dy:.1f}, angle={angle_deg:.2f}°"
+                )
+                return self._normalize_angle(angle_deg)
+
+        return None
+
+    def _try_compartment_pair_alignment(
+        self, markers: Dict[int, np.ndarray], compartment_ids: List[int]
+    ) -> Optional[float]:
+        """
+        Try to calculate skew from opposite compartment marker pairs.
+
+        Using markers at opposite ends provides better baseline than nearby markers.
+        Tries multiple pairs in order of preference (by separation distance).
+
+        Returns: Angle in degrees, or None if pairs not available
+        """
+        # Define pairs with good separation
+        # Pairs are ordered by preference (maximum separation first)
+        marker_pairs = [
+            (4, 6),  # Both near top - less ideal but acceptable
+        ]
+
+        for marker_a, marker_b in marker_pairs:
+            # Only try pairs where both markers are valid compartment IDs
+            if marker_a not in compartment_ids or marker_b not in compartment_ids:
+                continue
+
+            if marker_a in markers and marker_b in markers:
+                center_a = np.mean(markers[marker_a], axis=0)
+                center_b = np.mean(markers[marker_b], axis=0)
+
+                dx = center_b[0] - center_a[0]
+                dy = center_b[1] - center_a[1]
+
+                # Ensure reasonable baseline (at least 50 pixels separation)
+                distance = np.sqrt(dx**2 + dy**2)
+                if distance > 50:
+                    angle_rad = np.arctan2(dy, dx)
+                    angle_deg = np.degrees(angle_rad)
+                    self.logger.debug(
+                        f"Compartment pair ({marker_a},{marker_b}): "
+                        f"distance={distance:.1f}px, angle={angle_deg:.2f}°"
+                    )
+                    return self._normalize_angle(angle_deg)
+
+        return None
+
+    def _calculate_skew_from_linefit(
+        self, markers: Dict[int, np.ndarray], compartment_ids: List[int]
+    ) -> Optional[float]:
+        """
+        Calculate skew angle by fitting a line through all compartment markers.
+
+        This is the fallback method when marker pairs aren't available.
+        Less reliable because a single bad marker can affect the result.
+
+        Returns: Angle in degrees, or None if insufficient markers
         """
         # Get compartment marker centers (excluding metadata)
         centers = []
@@ -1192,9 +1308,9 @@ class VisualizationManager:
 
         if len(centers) < 4:
             self.logger.warning(
-                f"Only {len(centers)} compartment markers for skew estimation"
+                f"Only {len(centers)} compartment markers for line-fit skew estimation"
             )
-            return 0.0
+            return None
 
         # Sort by marker ID for consistent ordering
         centers.sort(key=lambda x: x[0])
@@ -1211,17 +1327,35 @@ class VisualizationManager:
             angle_rad = np.arctan(slope)
             angle_deg = np.degrees(angle_rad)
 
-            # Normalize to [-90, 90]
-            if angle_deg > 90:
-                angle_deg -= 180
-            elif angle_deg < -90:
-                angle_deg += 180
-
-            return angle_deg
+            return self._normalize_angle(angle_deg)
 
         except Exception as e:
-            self.logger.error(f"Error calculating skew angle: {e}")
-            return 0.0
+            self.logger.error(f"Error calculating skew angle from line fit: {e}")
+            return None
+
+    def _normalize_angle(self, angle_deg: float) -> float:
+        """
+        Normalize angle to [-90, 90] range.
+
+        Args:
+            angle_deg: Angle in degrees
+
+        Returns:
+            Normalized angle in degrees
+        """
+        # Normalize to [-180, 180]
+        while angle_deg > 180:
+            angle_deg -= 360
+        while angle_deg < -180:
+            angle_deg += 360
+
+        # Further normalize to [-90, 90]
+        if angle_deg > 90:
+            angle_deg -= 180
+        elif angle_deg < -90:
+            angle_deg += 180
+
+        return angle_deg
 
     def _analyze_marker_geometry(
         self, corners: np.ndarray, tolerance_pixels: float

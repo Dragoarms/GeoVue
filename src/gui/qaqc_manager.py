@@ -5,6 +5,7 @@ Combines all QAQC functionality into a single organized module.
 
 import os
 import re
+import time
 import shutil
 import threading
 import tkinter as tk
@@ -23,6 +24,13 @@ from PIL import Image, ImageTk
 from gui.dialog_helper import DialogHelper
 from gui.progress_dialog import ProgressDialog
 from gui.widgets.multiselect_review_dialog import MultiSelectReviewDialog
+
+# ML Pipeline integration - optional
+try:
+    from ml_pipeline.predictor import get_predictor, ensure_model_loaded
+    ML_AVAILABLE = True
+except ImportError:
+    ML_AVAILABLE = False
 
 
 # ============================================================================
@@ -54,6 +62,13 @@ class ReviewItem:
     chosen_action: Optional[str] = None
     is_placeholder: bool = False
     source_uid: Optional[str] = None
+    bad_image: bool = False  # Flag for poor quality images
+    file_type: str = (
+        "original"  # "original", "temp", "new", "pending", "review", "approved", "upload_failed"
+    )
+    # ML prediction fields
+    ml_predicted: bool = False  # True if moisture was set by ML model
+    ml_confidence: float = 0.0  # Confidence score from ML model (0.0 to 1.0)
 
     @property
     def image(self) -> Optional[np.ndarray]:
@@ -102,11 +117,122 @@ class QAQCScanner:
         self.HOLE_ID_PATTERN = re.compile(r"^[A-Z]{2}\d{4}$")
         self.PROJECT_CODE_PATTERN = re.compile(r"^[A-Z]{2}$")
         self.COMPARTMENT_FILE_PATTERN = re.compile(
-            r"([A-Z]{2}\d{4})_CC_(\d{3})(?:_temp|_new|_review|_Wet|_Dry)?\.(?:png|tiff|jpg)$",
+            r"([A-Z]{2}\d{4})_CC_(\d+)(?:_temp|_new|_review|_pending_[a-f0-9]+|_Wet|_Dry)?\.(?:png|tiff|jpg)$",
             re.IGNORECASE,
         )
 
         self.compartment_register = {}
+
+        # Cache for compartment scans to avoid re-scanning
+        self._compartment_scan_cache = None
+        self._cache_timestamp = None
+
+    def _get_cached_compartments(
+        self, hole_id: str, expected_depths: List[int]
+    ) -> Dict[int, List[str]]:
+        """
+        Get compartments using cached scan results when possible.
+        Cache is invalidated after 5 minutes or can be manually cleared.
+        """
+
+        # Check if we need to refresh the cache (5-minute timeout)
+        current_time = time.time()
+        cache_expired = (
+            self._cache_timestamp is None
+            or (current_time - self._cache_timestamp) > 300
+        )
+
+        if cache_expired or self._compartment_scan_cache is None:
+            self.logger.info(
+                "Performing comprehensive compartment scan (will cache results)..."
+            )
+
+            # Perform a full scan of all directories once
+            self._compartment_scan_cache = {}
+
+            # Get all compartment locations to scan
+            directories_to_scan = []
+
+            # Add local directories
+            if self.file_manager:
+                local_review = self.file_manager.dir_structure.get(
+                    "review_compartments"
+                )
+                if local_review and os.path.exists(local_review):
+                    directories_to_scan.append(("local_review", local_review))
+
+                local_approved = self.file_manager.dir_structure.get(
+                    "approved_compartments"
+                )
+                if local_approved and os.path.exists(local_approved):
+                    directories_to_scan.append(("local_approved", local_approved))
+
+                # Add shared directories
+                shared_review = self.file_manager.get_shared_path(
+                    "review_compartments", create_if_missing=False
+                )
+                if shared_review and os.path.exists(shared_review):
+                    directories_to_scan.append(("shared_review", shared_review))
+
+                shared_approved = self.file_manager.get_shared_path(
+                    "approved_compartments", create_if_missing=False
+                )
+                if shared_approved and os.path.exists(shared_approved):
+                    directories_to_scan.append(("shared_approved", shared_approved))
+
+            # Scan all directories once and cache by hole_id
+            # Pattern excludes _UPLOADED files but includes _UPLOAD_FAILED
+            pattern = re.compile(
+                r"([A-Z]{2}\d{4})_CC_(\d+)(.*?)(?<!_UPLOADED)\.(?:png|tiff|jpg)$",
+                re.IGNORECASE,
+            )
+
+            for location_name, directory in directories_to_scan:
+                self.logger.debug(f"Scanning {location_name}: {directory}")
+
+                # Walk through directory structure
+                for root, dirs, files in os.walk(directory):
+                    for filename in files:
+                        match = pattern.match(filename)
+                        if match:
+                            file_hole_id = match.group(1)
+                            depth = int(match.group(2))
+                            filepath = os.path.join(root, filename)
+
+                            # Store in cache by hole_id and depth
+                            if file_hole_id not in self._compartment_scan_cache:
+                                self._compartment_scan_cache[file_hole_id] = {}
+                            if depth not in self._compartment_scan_cache[file_hole_id]:
+                                self._compartment_scan_cache[file_hole_id][depth] = []
+
+                            self._compartment_scan_cache[file_hole_id][depth].append(
+                                filepath
+                            )
+
+            self._cache_timestamp = current_time
+            self.logger.info(
+                f"Scan complete. Cached data for {len(self._compartment_scan_cache)} holes"
+            )
+        else:
+            self.logger.debug(
+                f"Using cached scan results (age: {current_time - self._cache_timestamp:.1f}s)"
+            )
+
+        # Extract results for this specific hole from cache
+        existing_compartments = {}
+        if hole_id in self._compartment_scan_cache:
+            hole_data = self._compartment_scan_cache[hole_id]
+            for depth in expected_depths:
+                if depth in hole_data:
+                    existing_compartments[depth] = hole_data[depth]
+
+        return existing_compartments
+
+    def clear_scan_cache(self):
+        """Clear the compartment scan cache to force a fresh scan."""
+        self._compartment_scan_cache = None
+        self._cache_timestamp = None
+        self.logger.info("Compartment scan cache cleared")
 
     def load_register_into_memory(self) -> Dict[str, pd.DataFrame]:
         """Load compartment register efficiently."""
@@ -130,7 +256,7 @@ class QAQCScanner:
     def analyze_compartment_files(self, hole_id: str) -> Dict[str, Any]:
         """
         Comprehensively analyze all compartment files for a hole across all locations.
-        Leverages existing duplicate handler and file manager methods.
+        Uses the existing compartment scan cache to avoid re-scanning.
 
         Returns a detailed analysis including duplicates, misplaced files, and review status.
         """
@@ -147,22 +273,66 @@ class QAQCScanner:
             "recommendations": [],
         }
 
-        # Use duplicate handler's existing method to scan for compartments
-        if hasattr(self.file_manager, "duplicate_handler"):
-            duplicate_handler = self.file_manager.duplicate_handler
-        else:
-            # Create temporary duplicate handler instance
-            from gui.duplicate_handler import DuplicateHandler
-
-            duplicate_handler = DuplicateHandler(self.file_manager)
-
         # Get expected depths based on original images in register
         expected_depths = self._get_expected_depths_from_register(hole_id)
 
-        # Use duplicate handler's scan method
-        existing_compartments = duplicate_handler._scan_for_existing_compartments(
-            hole_id, expected_depths
-        )
+        # PERFORMANCE FIX: Use the compartment scan cache directly instead of
+        # calling duplicate_handler which triggers a full directory re-scan
+        existing_compartments = {}
+        if self._compartment_scan_cache and hole_id in self._compartment_scan_cache:
+            # Extract from cache
+            hole_data = self._compartment_scan_cache[hole_id]
+            for depth in expected_depths:
+                if depth in hole_data:
+                    existing_compartments[depth] = hole_data[depth]
+            self.logger.debug(
+                f"Using compartment scan cache for analysis ({len(existing_compartments)} depths)"
+            )
+        else:
+            # Fallback: trigger a cache refresh if needed
+            self.logger.warning(
+                f"Cache miss in analyze_compartment_files for {hole_id}, triggering scan"
+            )
+            # Don't call duplicate_handler - just use our own cache method
+            existing_compartments = self._get_cached_compartments(
+                hole_id, expected_depths
+            )
+
+        # Also explicitly scan approved folder to ensure all files are found
+        if self.file_manager:
+            approved_path = self.file_manager.get_shared_path(
+                "approved_compartments", create_if_missing=False
+            )
+            if approved_path:
+                from pathlib import Path
+
+                approved_path = (
+                    Path(approved_path)
+                    if not isinstance(approved_path, Path)
+                    else approved_path
+                )
+                project_code = hole_id[:2].upper() if len(hole_id) >= 2 else ""
+                hole_approved_path = approved_path / project_code / hole_id
+                if hole_approved_path.exists():
+                    for file in hole_approved_path.iterdir():
+                        if file.is_file():
+                            match = self.COMPARTMENT_FILE_PATTERN.match(file.name)
+                            if match:
+                                depth = int(match.group(2))
+                                if depth in expected_depths:
+                                    filepath = str(file)
+                                    if depth not in existing_compartments:
+                                        existing_compartments[depth] = []
+                                    # Only add if not already in list
+                                    if filepath not in existing_compartments[depth]:
+                                        existing_compartments[depth].append(filepath)
+                                        self.logger.debug(
+                                            f"Added approved file: {file.name}"
+                                        )
+
+        # Sort file paths for consistent ordering
+        for depth in existing_compartments:
+            existing_compartments[depth] = sorted(existing_compartments[depth])
 
         # Analyze each found compartment
         for depth, file_paths in existing_compartments.items():
@@ -206,7 +376,6 @@ class QAQCScanner:
 
         return analysis
 
-    # In qaqc_manager.py, QAQCScanner class
     def scan_local_review_folder(
         self, temp_review_path: str
     ) -> Dict[str, List[ReviewItem]]:
@@ -265,12 +434,478 @@ class QAQCScanner:
                         source_uid=source_uid,
                     )
 
+                    # Mark if this is a temp or new file
+                    if "_temp" in file.lower():
+                        review_item.file_type = "temp"
+                    elif "_new" in file.lower():
+                        review_item.file_type = "new"
+                    elif "_pending_" in file.lower():
+                        review_item.file_type = "pending"
+                    else:
+                        review_item.file_type = "original"
+
                     # Add to hole's list
                     if hole_id not in review_items_by_hole:
                         review_items_by_hole[hole_id] = []
                     review_items_by_hole[hole_id].append(review_item)
 
         return review_items_by_hole
+
+    def scan_local_approved_duplicates(self) -> Dict[str, List[ReviewItem]]:
+        """
+        Scan local approved_compartments for files that also exist in shared approved.
+        These duplicates need QAQC review to decide which to keep.
+        
+        Returns:
+            Dict mapping hole_id -> list of ReviewItems needing review
+        """
+        review_items_by_hole = {}
+        
+        if not self.file_manager:
+            return review_items_by_hole
+        
+        local_approved = self.file_manager.dir_structure.get("approved_compartments")
+        shared_approved = self.file_manager.get_shared_path("approved_compartments", create_if_missing=False)
+        
+        if not local_approved or not shared_approved:
+            self.logger.debug("Local or shared approved paths not configured")
+            return review_items_by_hole
+        
+        if not os.path.exists(local_approved) or not os.path.exists(shared_approved):
+            return review_items_by_hole
+        
+        self.logger.info("Scanning local approved for duplicates with shared...")
+        
+        local_path = Path(local_approved)
+        shared_path = Path(shared_approved)
+        
+        # Pattern for compartment files (exclude _UPLOADED)
+        pattern = re.compile(
+            r"([A-Z]{2}\d{4})_CC_(\d+)_(Wet|Dry)\.(?:png|jpg|tiff)$",
+            re.IGNORECASE
+        )
+        
+        duplicate_count = 0
+        
+        # Walk through local approved
+        for project_dir in os.listdir(local_path):
+            project_local = local_path / project_dir
+            project_shared = shared_path / project_dir
+            
+            if not project_local.is_dir():
+                continue
+                
+            for hole_dir in os.listdir(project_local):
+                hole_local = project_local / hole_dir
+                hole_shared = project_shared / hole_dir
+                
+                if not hole_local.is_dir():
+                    continue
+                
+                for filename in os.listdir(hole_local):
+                    match = pattern.match(filename)
+                    if not match:
+                        continue
+                    
+                    local_file = hole_local / filename
+                    shared_file = hole_shared / filename
+                    
+                    # Check if same file exists in shared
+                    if shared_file.exists():
+                        hole_id = match.group(1)
+                        depth = int(match.group(2))
+                        moisture = match.group(3)
+                        
+                        # Get register status
+                        register_status = self.get_register_status(hole_id, depth)
+                        
+                        # Extract UID
+                        source_uid = None
+                        if self.file_manager:
+                            source_uid = self.file_manager.extract_uid_from_any_image(str(local_file))
+                        
+                        # Create review item for the LOCAL file (it's the duplicate)
+                        review_item = ReviewItem(
+                            filename=filename,
+                            hole_id=hole_id,
+                            depth_from=depth - self.compartment_interval,
+                            depth_to=depth,
+                            compartment_depth=depth,
+                            image_path=str(local_file),
+                            register_status=register_status,
+                            moisture=moisture,
+                            quality="OK",
+                            source_uid=source_uid,
+                        )
+                        review_item.file_type = "local_approved_duplicate"
+                        review_item.is_reviewed = True  # Already has Wet/Dry
+                        
+                        # Store shared file info for comparison
+                        review_item.shared_path = str(shared_file)
+                        review_item.local_size = local_file.stat().st_size
+                        review_item.shared_size = shared_file.stat().st_size
+                        
+                        if hole_id not in review_items_by_hole:
+                            review_items_by_hole[hole_id] = []
+                        review_items_by_hole[hole_id].append(review_item)
+                        duplicate_count += 1
+        
+        self.logger.info(f"Found {duplicate_count} local/shared duplicates across {len(review_items_by_hole)} holes")
+        return review_items_by_hole
+
+    def scan_all_compartments_for_hole(self, hole_id: str) -> List[ReviewItem]:
+        """Scan ALL compartment files for a hole including approved ones for comparison."""
+        all_items = []
+        seen_paths = set()
+
+        # Check if we have cached results first
+        current_time = time.time()
+        cache_expired = (
+            self._cache_timestamp is None
+            or (current_time - self._cache_timestamp) > 300
+        )
+
+        # If cache is valid and contains this hole, use cached paths
+        if (
+            not cache_expired
+            and self._compartment_scan_cache
+            and hole_id in self._compartment_scan_cache
+        ):
+            self.logger.debug(
+                f"Using cached scan results for {hole_id} (age: {current_time - self._cache_timestamp:.1f}s)"
+            )
+            cached_data = self._compartment_scan_cache[hole_id]
+
+            # Build ReviewItems from cached paths
+            for depth, file_paths in cached_data.items():
+                for filepath in file_paths:
+                    if filepath in seen_paths:
+                        continue
+
+                    filename = os.path.basename(filepath)
+
+                    # Determine moisture status from filename
+                    moisture = "unknown"
+                    quality = "unreviewed"
+                    is_reviewed = False
+
+                    if "_Wet" in filename and "_UPLOAD" not in filename:
+                        moisture = "Wet"
+                        quality = "OK"
+                        is_reviewed = True
+                    elif "_Dry" in filename and "_UPLOAD" not in filename:
+                        moisture = "Dry"
+                        quality = "OK"
+                        is_reviewed = True
+                    elif "_UPLOAD_FAILED" in filename:
+                        if "_Wet_UPLOAD_FAILED" in filename:
+                            moisture = "Wet"
+                            quality = "OK"
+                            is_reviewed = True
+                        elif "_Dry_UPLOAD_FAILED" in filename:
+                            moisture = "Dry"
+                            quality = "OK"
+                            is_reviewed = True
+
+                    # Determine file type
+                    file_type = "original"
+                    if "_temp" in filename.lower():
+                        file_type = "temp"
+                    elif "_new" in filename.lower():
+                        file_type = "new"
+                    elif "_pending_" in filename.lower():
+                        file_type = "pending"
+                    elif "_review" in filename.lower():
+                        file_type = "review"
+                    elif "_UPLOAD_FAILED" in filename:
+                        file_type = "upload_failed"
+                    elif "_Wet" in filename or "_Dry" in filename:
+                        file_type = "approved"
+                    elif "Approved Compartment Images" in filepath:
+                        file_type = "in_approved_unclassified"
+
+                    # Get register status
+                    register_status = self.get_register_status(hole_id, depth)
+
+                    # Extract UID if available
+                    source_uid = None
+                    if self.file_manager:
+                        source_uid = self.file_manager.extract_uid_from_any_image(
+                            filepath
+                        )
+
+                    review_item = ReviewItem(
+                        filename=filename,
+                        hole_id=hole_id,
+                        depth_from=depth - self.compartment_interval,
+                        depth_to=depth,
+                        compartment_depth=depth,
+                        image_path=filepath,
+                        register_status=register_status,
+                        moisture=moisture,
+                        quality=quality,
+                        is_reviewed=is_reviewed,
+                        source_uid=source_uid,
+                        file_type=file_type,
+                    )
+
+                    all_items.append(review_item)
+                    seen_paths.add(filepath)
+
+            # Sort results
+            all_items.sort(
+                key=lambda x: (
+                    x.depth_to,
+                    0 if x.file_type == "approved" else 1,
+                    x.filename,
+                )
+            )
+
+            self.logger.info(
+                f"Found {len(all_items)} total compartments for {hole_id} (from cache): "
+                f"{len([i for i in all_items if i.file_type == 'approved'])} approved, "
+                f"{len([i for i in all_items if 'new' in i.file_type])} new, "
+                f"{len([i for i in all_items if 'temp' in i.file_type])} temp, "
+                f"{len([i for i in all_items if i.file_type == 'upload_failed'])} upload_failed"
+            )
+
+            # Apply ML predictions to unclassified items (from cache)
+            self._apply_ml_predictions(all_items)
+
+            return all_items
+
+        # Cache miss or expired - perform full scan
+        self.logger.info(f"Cache miss for {hole_id}, performing full directory scan...")
+
+        # Comprehensive pattern to catch all compartment files EXCEPT _UPLOADED
+        pattern = re.compile(
+            rf"^{re.escape(hole_id)}_CC_(\d{{3}})(.*?)(?<!_UPLOADED)\.(?:png|tiff|jpg)$",
+            re.IGNORECASE,
+        )
+
+        locations_to_scan = []
+
+        if self.file_manager:
+            project_code = hole_id[:2].upper() if len(hole_id) >= 2 else ""
+
+            # Local temp review
+            local_temp = self.file_manager.get_hole_dir("temp_review", hole_id)
+            if local_temp and os.path.exists(local_temp):
+                locations_to_scan.append(("local_review", local_temp, "review"))
+
+            # Local approved
+            local_approved = self.file_manager.get_hole_dir(
+                "approved_compartments", hole_id
+            )
+            if local_approved and os.path.exists(local_approved):
+                locations_to_scan.append(("local_approved", local_approved, "approved"))
+
+            # Shared review
+            shared_review = self.file_manager.get_shared_path(
+                "review_compartments", create_if_missing=False
+            )
+            if shared_review:
+                shared_review_hole = os.path.join(shared_review, project_code, hole_id)
+                if os.path.exists(shared_review_hole):
+                    locations_to_scan.append(
+                        ("shared_review", shared_review_hole, "review")
+                    )
+
+            # Shared approved - IMPORTANT for seeing existing classifications
+            shared_approved = self.file_manager.get_shared_path(
+                "approved_compartments", create_if_missing=False
+            )
+            if shared_approved:
+                shared_approved_hole = os.path.join(
+                    shared_approved, project_code, hole_id
+                )
+                if os.path.exists(shared_approved_hole):
+                    locations_to_scan.append(
+                        ("shared_approved", shared_approved_hole, "approved")
+                    )
+
+        # Scan each location
+        for location_name, location_path, location_type in locations_to_scan:
+            self.logger.debug(f"Scanning {location_name}: {location_path}")
+
+            try:
+                for filename in os.listdir(location_path):
+                    # Skip _UPLOADED files explicitly
+                    if "_UPLOADED" in filename and not "_UPLOAD_FAILED" in filename:
+                        self.logger.debug(f"Skipping backup file: {filename}")
+                        continue
+
+                    filepath = os.path.join(location_path, filename)
+
+                    # Skip if already processed
+                    if filepath in seen_paths:
+                        continue
+
+                    # Skip directories
+                    if os.path.isdir(filepath):
+                        continue
+
+                    match = pattern.match(filename)
+                    if match:
+                        depth = int(match.group(1))
+                        suffix = match.group(2) or ""
+
+                        # Determine moisture status from filename
+                        moisture = "unknown"
+                        quality = "unreviewed"
+                        is_reviewed = False
+
+                        if "_Wet" in suffix and "_UPLOAD" not in suffix:
+                            moisture = "Wet"
+                            quality = "OK"
+                            is_reviewed = True
+                        elif "_Dry" in suffix and "_UPLOAD" not in suffix:
+                            moisture = "Dry"
+                            quality = "OK"
+                            is_reviewed = True
+                        elif "_UPLOAD_FAILED" in suffix:
+                            # Handle upload failed files - check for wet/dry before _UPLOAD_FAILED
+                            if "_Wet_UPLOAD_FAILED" in suffix:
+                                moisture = "Wet"
+                                quality = "OK"
+                                is_reviewed = True
+                            elif "_Dry_UPLOAD_FAILED" in suffix:
+                                moisture = "Dry"
+                                quality = "OK"
+                                is_reviewed = True
+
+                        # Get register status
+                        register_status = self.get_register_status(hole_id, depth)
+
+                        # Extract UID if available
+                        source_uid = None
+                        if self.file_manager:
+                            source_uid = self.file_manager.extract_uid_from_any_image(
+                                filepath
+                            )
+
+                        # Create review item
+                        review_item = ReviewItem(
+                            filename=filename,
+                            hole_id=hole_id,
+                            depth_from=depth - self.compartment_interval,
+                            depth_to=depth,
+                            compartment_depth=depth,
+                            image_path=filepath,
+                            register_status=register_status,
+                            moisture=moisture,
+                            quality=quality,
+                            is_reviewed=is_reviewed,
+                            source_uid=source_uid,
+                        )
+
+                        # Set file type based on suffix and location
+                        if "_temp" in suffix.lower():
+                            review_item.file_type = "temp"
+                        elif "_new" in suffix.lower():
+                            review_item.file_type = "new"
+                        elif "_pending_" in suffix.lower():
+                            review_item.file_type = "pending"
+                        elif "_review" in suffix.lower():
+                            review_item.file_type = "review"
+                        elif "_UPLOAD_FAILED" in suffix:
+                            review_item.file_type = "upload_failed"
+                        elif "_Wet" in suffix or "_Dry" in suffix:
+                            review_item.file_type = "approved"  # Already approved
+                        elif location_type == "approved":
+                            review_item.file_type = "in_approved_unclassified"
+                        elif location_type == "review":
+                            review_item.file_type = "unclassified"
+                        else:
+                            review_item.file_type = "unknown"
+
+                        all_items.append(review_item)
+                        seen_paths.add(filepath)
+
+                        self.logger.debug(
+                            f"Added {filename}: depth={depth}, moisture={moisture}, "
+                            f"type={review_item.file_type}, location={location_name}"
+                        )
+
+            except Exception as e:
+                self.logger.error(f"Error scanning {location_name}: {e}")
+
+        # Sort by depth then by file type (approved items first for reference)
+        all_items.sort(
+            key=lambda x: (
+                x.depth_to,
+                0 if x.file_type == "approved" else 1,
+                x.filename,
+            )
+        )
+
+        self.logger.info(
+            f"Found {len(all_items)} total compartments for {hole_id}: "
+            f"{len([i for i in all_items if i.file_type == 'approved'])} approved, "
+            f"{len([i for i in all_items if 'new' in i.file_type])} new, "
+            f"{len([i for i in all_items if 'temp' in i.file_type])} temp, "
+            f"{len([i for i in all_items if i.file_type == 'upload_failed'])} upload_failed"
+        )
+
+        # Apply ML predictions to unclassified items
+        self._apply_ml_predictions(all_items)
+
+        return all_items
+
+    def _apply_ml_predictions(self, items: List[ReviewItem]) -> None:
+        """
+        Apply ML wet/dry predictions to unclassified items.
+
+        Modifies items in-place, setting moisture, ml_predicted, and ml_confidence
+        for items that are currently unclassified.
+        """
+        if not ML_AVAILABLE:
+            return
+
+        # Get unclassified items
+        unclassified = [
+            item for item in items
+            if item.moisture == "unknown"
+            and item.image_path
+            and os.path.exists(item.image_path)
+        ]
+
+        if not unclassified:
+            return
+
+        try:
+            # Ensure model is loaded
+            if not ensure_model_loaded():
+                self.logger.warning("ML model not available for predictions")
+                return
+
+            predictor = get_predictor()
+
+            self.logger.info(f"Running ML predictions on {len(unclassified)} unclassified items...")
+
+            image_paths = [item.image_path for item in unclassified]
+            batch_results = predictor.predict_batch(image_paths)
+
+            for item, (label, confidence) in zip(unclassified, batch_results):
+                if label in ("Wet", "Dry"):
+                    item.moisture = label
+                    item.ml_predicted = True
+                    item.ml_confidence = confidence
+                    item.quality = "OK"
+
+            # Log summary
+            ml_predicted = [i for i in items if i.ml_predicted]
+            wet_count = sum(1 for i in ml_predicted if i.moisture == "Wet")
+            dry_count = sum(1 for i in ml_predicted if i.moisture == "Dry")
+            high_conf = sum(1 for i in ml_predicted if i.ml_confidence >= 0.90)
+
+            self.logger.info(
+                f"ML Predictions applied: {wet_count} Wet, {dry_count} Dry "
+                f"({high_conf} high confidence, {len(ml_predicted) - high_conf} need review)"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error applying ML predictions: {e}")
 
     def scan_shared_folders_for_review(self) -> Dict[str, List[str]]:
         """Scan shared folders for compartments needing review."""
@@ -280,16 +915,30 @@ class QAQCScanner:
         review_path = self.file_manager.get_shared_path(
             "review_compartments", create_if_missing=False
         )
+        self.logger.info(f"Checking shared review path: {review_path}")
         if review_path and os.path.exists(review_path):
+            self.logger.info(f"Scanning review folder: {review_path}")
             self._scan_shared_folder(review_path, items_by_hole, "review")
+            self.logger.info(f"Items after review scan: {len(items_by_hole)}")
+        else:
+            self.logger.info("Review path doesn't exist or not configured")
 
         # Check approved folder
         approved_path = self.file_manager.get_shared_path(
             "approved_compartments", create_if_missing=False
         )
+        self.logger.info(f"Checking shared approved path: {approved_path}")
         if approved_path and os.path.exists(approved_path):
+            self.logger.info(f"Scanning approved folder: {approved_path}")
+            initial_count = len(items_by_hole)
             self._scan_shared_folder(approved_path, items_by_hole, "approved")
+            self.logger.info(
+                f"Found {len(items_by_hole) - initial_count} additional items in approved"
+            )
+        else:
+            self.logger.info("Approved path doesn't exist or not configured")
 
+        self.logger.info(f"Total items found: {len(items_by_hole)}")
         return items_by_hole
 
     def _scan_shared_folder(
@@ -443,26 +1092,13 @@ class QAQCScanner:
 
     def _needs_review_check(self, file_infos: List[Dict], register_status: str) -> bool:
         """Check if compartment needs review based on files and register."""
-        # No files at all
+        # PEP-8: keep logic simple and aligned with UI duplicate rules.
+        # Only flag when there is at least one UNREVIEWED file at this depth.
+        # Do NOT flag when only approved Wet/Dry exist (even if both are present).
         if not file_infos:
             return False
-
-        # Check register status
-        if register_status in QAQCConstants.NEEDS_REVIEW_STATUSES:
-            return True
-
-        # Check if any unreviewed files
-        if any(not f["is_reviewed"] for f in file_infos):
-            return True
-
-        # Check for conflicts (multiple wet or dry)
-        wet_count = sum(1 for f in file_infos if f["moisture"] == "Wet")
-        dry_count = sum(1 for f in file_infos if f["moisture"] == "Dry")
-
-        if wet_count > 1 or dry_count > 1:
-            return True
-
-        return False
+        has_unreviewed = any(not f.get("is_reviewed", False) for f in file_infos)
+        return bool(has_unreviewed)
 
     def _generate_recommendations(self, analysis: Dict) -> List[str]:
         """Generate recommendations based on analysis."""
@@ -523,7 +1159,7 @@ class QAQCProcessor:
         self.logger = logger
 
         self.COMPARTMENT_FILE_PATTERN = re.compile(
-            r"([A-Z]{2}\d{4})_CC_(\d{3})(?:_temp|_new|_review|_Wet|_Dry)?\.(?:png|tiff|jpg)$",
+            r"([A-Z]{2}\d{4})_CC_(\d+)(?:_temp|_new|_review|_pending_[a-f0-9]+|_Wet|_Dry)?(?<!_UPLOADED)\.(?:png|tiff|jpg)$",
             re.IGNORECASE,
         )
 
@@ -568,21 +1204,67 @@ class QAQCProcessor:
         """Batch save reviewed compartments."""
         for item in items:
             try:
-                # Check if file already has the correct suffix
+                # Check current state
                 current_suffix = None
+                is_pending = "_pending_" in item.filename.lower()
                 if "_Wet" in item.filename:
                     current_suffix = "Wet"
                 elif "_Dry" in item.filename:
                     current_suffix = "Dry"
+                
+                # Pending files from auto-loop always need processing
+                if is_pending:
+                    self.logger.info(f"Processing pending file from auto-loop: {item.filename}")
 
-                # Check if file is in temp_review folder
+                # Check if this is an approved file being changed or deleted
+                is_approved_file = (
+                    hasattr(item, "file_type") and item.file_type == "approved"
+                )
+                is_being_deleted = item.quality == "Missing"
+                is_being_changed = current_suffix and current_suffix != item.moisture
+
+                # Handle deletion of approved files
+                if is_approved_file and is_being_deleted:
+                    try:
+                        os.remove(item.image_path)
+                        self.logger.info(f"Deleted approved file: {item.filename}")
+                        self.stats["processed"] += 1
+                        continue
+                    except Exception as e:
+                        self.logger.error(
+                            f"Failed to delete approved file {item.filename}: {e}"
+                        )
+                        continue
+
+                # Handle change of classification for approved files
+                if is_approved_file and is_being_changed:
+                    # Delete the old file
+                    try:
+                        os.remove(item.image_path)
+                        self.logger.info(
+                            f"Removed old approved file for reclassification: {item.filename}"
+                        )
+                    except Exception as e:
+                        self.logger.warning(f"Could not remove old file: {e}")
+
+                    # Continue to save with new classification
+                    self.logger.info(
+                        f"Reclassifying from {current_suffix} to {item.moisture}"
+                    )
+
+                # Check if file is in temp_review folder or is a pending auto-loop file
                 is_in_temp_review = (
                     "temp_review" in item.image_path
                     or "Compartment Images for Review" in item.image_path
+                    or is_pending  # Pending files always need processing
                 )
 
-                # Skip ONLY if already has correct suffix AND is NOT in temp review
-                if current_suffix == item.moisture and not is_in_temp_review:
+                # Skip ONLY if already has correct suffix AND is NOT in temp review AND not being changed
+                if (
+                    current_suffix == item.moisture
+                    and not is_in_temp_review
+                    and not is_being_changed
+                ):
                     self.logger.info(
                         f"File already has correct suffix and is in correct location: {item.filename}"
                     )
@@ -612,6 +1294,21 @@ class QAQCProcessor:
                     source_uid=item.source_uid,
                 )
 
+                # Clean up source file if it was successfully saved and is in temp_review
+                if result.get("local_path") and is_in_temp_review:
+                    try:
+                        if os.path.exists(item.image_path) and os.path.abspath(
+                            item.image_path
+                        ) != os.path.abspath(result["local_path"]):
+                            os.remove(item.image_path)
+                            self.logger.info(
+                                f"Cleaned up temp source file: {item.image_path}"
+                            )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Could not clean up temp source file {item.image_path}: {e}"
+                        )
+
                 # Update stats
                 if result.get("local_path"):
                     self.stats["saved_locally"] += 1
@@ -640,6 +1337,10 @@ class QAQCProcessor:
             else:
                 photo_status = item.quality
 
+            # Append "_Bad" suffix if image quality is poor
+            if item.bad_image and photo_status not in ["Missing", "Empty"]:
+                photo_status += "_Bad"
+
             update = {
                 "hole_id": item.hole_id,
                 "depth_from": int(item.depth_from),
@@ -663,6 +1364,12 @@ class QAQCProcessor:
             except Exception as e:
                 self.logger.error(f"Error batch updating register: {e}")
                 self.stats["register_failed"] += len(updates)
+
+    def _extract_pending_uid(self, filename: str) -> Optional[str]:
+        """Extract UID from pending filename like 'KM0335_CC_021_pending_45ecbec5.png'."""
+        import re
+        match = re.search(r"_pending_([a-f0-9]+)\.", filename.lower())
+        return match.group(1) if match else None
 
     def _batch_delete_files(self, file_paths: List[str]):
         """Batch delete files."""
@@ -964,6 +1671,7 @@ class QAQCGridCanvas:
         self.scanner = None  # Reference to scanner for register status lookup
 
         self.layout_mode = "grid"  # "grid", "vertical", or "duplicate_resolution"
+        self.sort_mode = "depth"   # "depth", "wet_dry", "confidence"
 
         # Add new attributes for layout and rotation
         self.image_rotation = 0  # Current rotation angle
@@ -979,6 +1687,12 @@ class QAQCGridCanvas:
         self.clicked_cell = None
         self.cells_in_drag = set()
 
+        # Auto-scroll while dragging
+        self.auto_scroll_timer = None
+        self.auto_scroll_speed = 0  # Starts at 0, accelerates
+        self.auto_scroll_direction = None  # 'up' or 'down'
+        self.scroll_edge_threshold = 50  # pixels from edge to trigger scroll
+
         # Bind events
         self.canvas.bind("<Configure>", self._on_canvas_configure)
         self.canvas.bind("<Button-1>", self._on_mouse_down)
@@ -987,18 +1701,41 @@ class QAQCGridCanvas:
         self.canvas.bind("<Control-MouseWheel>", self._on_ctrl_mousewheel)
         self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
-    def load_items(self, review_items: List[ReviewItem], hole_id: str):
-        """Load review items with duplicate-first workflow."""
+    def load_items(
+        self, review_items: List[ReviewItem], hole_id: str, reset_states: bool = False
+    ):
+        """
+        Load review items with duplicate-first workflow.
+
+        Args:
+            review_items: List of items to display
+            hole_id: The hole ID being displayed
+            reset_states: If True, clear all classifications. If False, preserve existing states.
+        """
+        # Check if this is a new hole (different hole_id)
+        is_new_hole = hole_id != self.hole_id
+
         self.hole_id = hole_id
-        self.review_items = sorted(review_items, key=lambda x: x.depth_to)
+        self.review_items = list(review_items)
+        self._apply_sort()
 
         # Calculate optimal cell size before loading
         self._calculate_optimal_cell_size()
 
-        # Initialize states (preserve existing if reloading)
-        if not hasattr(self, "item_states") or len(self.item_states) != len(
-            self.review_items
-        ):
+        # Reset item_states only if:
+        # 1. Explicitly requested (reset_states=True), OR
+        # 2. Loading a new hole (different hole_id), OR
+        # 3. Number of items changed (can't preserve old states)
+        should_reset = (
+            reset_states
+            or is_new_hole
+            or len(self.item_states) != len(self.review_items)
+        )
+
+        if should_reset:
+            self.logger.debug(
+                f"Resetting item_states (reset_states={reset_states}, is_new_hole={is_new_hole})"
+            )
             self.item_states = {}
             for i, item in enumerate(self.review_items):
                 # Pre-load state from item's moisture status
@@ -1010,7 +1747,18 @@ class QAQCGridCanvas:
                     "moisture": moisture,
                     "delete": False,
                     "bad_image": False,
+                    "original_moisture": moisture,  # Track original state for change detection
+                    "file_type": getattr(item, "file_type", "unknown"),
+                    "ml_predicted": getattr(item, "ml_predicted", False),
+                    "ml_confidence": getattr(item, "ml_confidence", 0.0),
                 }
+
+                self.logger.debug(
+                    f"Item {i}: {item.filename} - moisture={moisture}, "
+                    f"type={getattr(item, 'file_type', 'unknown')}"
+                )
+        else:
+            self.logger.debug("Preserving existing item_states (UI change only)")
 
         # Clear existing display only
         self.canvas.delete("all")
@@ -1021,23 +1769,49 @@ class QAQCGridCanvas:
         self.row_backgrounds.clear()
         self.selected_cells.clear()
 
-        # Group items by depth to find duplicates
+        # Group items by depth to find duplicates - ensure all files are included
         self.depth_groups = {}
+        seen_files = {}  # Track files we've seen to avoid missing any
+
         for idx, item in enumerate(self.review_items):
             depth = item.depth_to
+
+            # Create unique key for this file to ensure we don't miss any
+            file_key = f"{item.hole_id}_{depth}_{item.filename}"
+
             if depth not in self.depth_groups:
                 self.depth_groups[depth] = []
-            self.depth_groups[depth].append(idx)
+                seen_files[depth] = set()
 
-        # Check if we have duplicates
-        self.has_duplicates = any(
-            len(indices) > 1 for indices in self.depth_groups.values()
-        )
-        self.duplicate_depths = {
-            depth: indices
-            for depth, indices in self.depth_groups.items()
-            if len(indices) > 1
-        }
+            # Add this item if we haven't seen this exact file
+            if file_key not in seen_files[depth]:
+                self.depth_groups[depth].append(idx)
+                seen_files[depth].add(file_key)
+
+        # Check if we have duplicates (redefined):
+        # Only flag as duplicates when there is at least one UNREVIEWED item at that depth.
+        # - If only approved Wet/Dry exist (and no unreviewed), do NOT flag as duplicate.
+        # - If approved Wet and Dry exist AND there is a new unreviewed, flag and show all.
+        # - If one approved exists and one unreviewed exists, flag and show both.
+        self.duplicate_depths = {}
+        for depth, indices in self.depth_groups.items():
+            approved_idxs = []
+            unreviewed_idxs = []
+            for idx in indices:
+                item = self.review_items[idx]
+                # Treat 'approved' by either explicit file_type or is_reviewed flag
+                is_approved = (
+                    getattr(item, "is_reviewed", False)
+                    or self.item_states[idx].get("file_type") == "approved"
+                )
+                if is_approved:
+                    approved_idxs.append(idx)
+                else:
+                    unreviewed_idxs.append(idx)
+            # Only mark duplicate when at least one unreviewed is present AND there is something else to compare to
+            if unreviewed_idxs and (approved_idxs or len(unreviewed_idxs) > 1):
+                self.duplicate_depths[depth] = indices
+        self.has_duplicates = bool(self.duplicate_depths)
 
         # Determine which layout to use
         if self.has_duplicates and not getattr(self, "duplicates_resolved", False):
@@ -1048,6 +1822,18 @@ class QAQCGridCanvas:
             self._load_vertical_layout_with_duplicates()
         else:
             # Standard grid layout
+            # Hide approved-only rows (no unreviewed present at that depth)
+            depths_with_unreviewed = set()
+            for depth, indices in self.depth_groups.items():
+                if any(
+                    not getattr(self.review_items[i], "is_reviewed", False)
+                    and self.item_states[i].get("file_type") != "approved"
+                    for i in indices
+                ):
+                    depths_with_unreviewed.add(depth)
+            self._depths_with_unreviewed = (
+                depths_with_unreviewed  # cache for _load_grid_layout
+            )
             self.cols_per_row = max(
                 3, (self.parent.winfo_width() - 100) // (self.cell_width + self.padding)
             )
@@ -1059,6 +1845,75 @@ class QAQCGridCanvas:
         # Update status table if available
         if hasattr(self.parent.master, "update_status_table"):
             self.parent.master.update_status_table()
+
+    def _apply_sort(self):
+        """Sort self.review_items in-place according to self.sort_mode."""
+        MOISTURE_ORDER = {"wet": 0, "Wet": 0, "dry": 1, "Dry": 1, "unknown": 2}
+
+        if self.sort_mode == "wet_dry":
+            # Primary: wet first, dry second, unknown last; secondary: depth
+            self.review_items.sort(
+                key=lambda x: (
+                    MOISTURE_ORDER.get(x.moisture, 2),
+                    x.depth_to,
+                )
+            )
+        elif self.sort_mode == "confidence":
+            # Primary: lowest confidence first (needs most attention); secondary: depth
+            self.review_items.sort(
+                key=lambda x: (
+                    x.ml_confidence if x.ml_predicted else 1.1,
+                    x.depth_to,
+                )
+            )
+        else:
+            # Default: depth ascending
+            self.review_items.sort(key=lambda x: x.depth_to)
+
+    def set_sort_mode(self, mode: str):
+        """
+        Change sort mode and re-render, preserving existing item_states.
+
+        States are keyed by index, so we remap by filename before/after sorting.
+        """
+        if mode == self.sort_mode:
+            return
+
+        self.sort_mode = mode
+
+        if not self.review_items:
+            return
+
+        # Snapshot states by filename so they survive re-indexing
+        states_by_filename = {
+            self.review_items[idx].filename: state
+            for idx, state in self.item_states.items()
+            if idx < len(self.review_items)
+        }
+
+        self._apply_sort()
+
+        # Rebuild item_states with new indices
+        self.item_states = {}
+        for new_idx, item in enumerate(self.review_items):
+            if item.filename in states_by_filename:
+                self.item_states[new_idx] = states_by_filename[item.filename]
+            else:
+                # Fallback: rebuild from item data
+                moisture = item.moisture if item.moisture in ["Wet", "Dry"] else None
+                if moisture:
+                    moisture = moisture.lower()
+                self.item_states[new_idx] = {
+                    "moisture": moisture,
+                    "delete": False,
+                    "bad_image": False,
+                    "original_moisture": moisture,
+                    "file_type": getattr(item, "file_type", "unknown"),
+                    "ml_predicted": getattr(item, "ml_predicted", False),
+                    "ml_confidence": getattr(item, "ml_confidence", 0.0),
+                }
+
+        self._render_items()
 
     def _calculate_optimal_cell_size(self):
         """Calculate optimal cell size based on all loaded images."""
@@ -1273,6 +2128,14 @@ class QAQCGridCanvas:
 
         # Only show depths with duplicates
         for depth, indices in sorted(self.duplicate_depths.items()):
+            # Log what we're displaying
+            self.logger.info(f"Displaying {len(indices)} items at depth {depth}m:")
+            for idx in indices:
+                item = self.review_items[idx]
+                self.logger.info(
+                    f"  - {item.filename} from {os.path.dirname(item.image_path)}"
+                )
+
             # Create row background
             bg_rect = self.canvas.create_rectangle(
                 0,
@@ -1398,10 +2261,20 @@ class QAQCGridCanvas:
             items_to_show.append((idx, item))
 
         # Create grid
-        for i, (idx, item) in enumerate(items_to_show):
-            row = i // self.cols_per_row
-            col = i % self.cols_per_row
+        grid_i = 0
+        for idx, item in items_to_show:
+            depth = getattr(item, "depth_to", None)
+            # Skip approved-only items when the depth has no unreviewed images
+            if depth is not None and hasattr(self, "_depths_with_unreviewed"):
+                if (
+                    self.item_states[idx].get("file_type") == "approved"
+                    and depth not in self._depths_with_unreviewed
+                ):
+                    continue
+            row = grid_i // self.cols_per_row
+            col = grid_i % self.cols_per_row
             self._create_grid_cell(row, col, idx, item)
+            grid_i += 1
 
     def _create_grid_cell(self, row: int, col: int, idx: int, item: ReviewItem):
         """Create a single grid cell."""
@@ -1485,6 +2358,10 @@ class QAQCGridCanvas:
             if img is None:
                 return None, None
 
+            # Calculate average hex color if not already done
+            if not item.average_hex_color and img is not None:
+                item.average_hex_color = self._calculate_average_hex_color(img)
+
             # Convert to PIL
             if len(img.shape) == 2:
                 img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
@@ -1515,6 +2392,28 @@ class QAQCGridCanvas:
             self.logger.error(f"Failed to prepare image: {e}")
             return None, None
 
+    def _calculate_average_hex_color(self, img: np.ndarray) -> str:
+        """Calculate the average color of an image and return as hex string."""
+        try:
+            # Convert BGR to RGB if needed
+            if len(img.shape) == 3 and img.shape[2] == 3:
+                rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            else:
+                rgb_img = img
+
+            # Calculate mean color
+            mean_color = np.mean(rgb_img.reshape(-1, 3), axis=0).astype(int)
+
+            # Convert to hex
+            hex_color = "#{:02x}{:02x}{:02x}".format(
+                mean_color[0], mean_color[1], mean_color[2]
+            )
+
+            return hex_color
+        except Exception as e:
+            self.logger.error(f"Error calculating average hex color: {e}")
+            return ""
+
     def _update_cell_visual(self, row: int, col: int):
         """Update visual appearance of a cell with classification text."""
         if (row, col) not in self.cells or (row, col) not in self.cell_ids:
@@ -1525,8 +2424,17 @@ class QAQCGridCanvas:
         idx = cell["idx"]
         state = self.item_states[idx]
 
+        # Check if this is an approved item (for visual distinction only)
+        is_approved = state.get("file_type") == "approved"
+
         # Determine border appearance
         selected = cell.get("selected", False)
+
+        # Add subtle visual indicator for approved items
+        if is_approved:
+            # Slightly different background to show it's already approved
+            bg_color = "#2a3a2a"  # Subtle difference
+            self.canvas.itemconfig(ids.get("bg"), fill=bg_color)
 
         # Priority: selection > classification > default
         if selected:
@@ -1555,8 +2463,16 @@ class QAQCGridCanvas:
 
         # Build classification text
         text_parts = []
+        is_ml_prediction = state.get("ml_predicted", False)
+        ml_confidence = state.get("ml_confidence", 0.0)
+
         if state["moisture"]:
-            text_parts.append(state["moisture"].upper())
+            moisture_text = state["moisture"].upper()
+            # Add confidence percentage for ML predictions
+            if is_ml_prediction and ml_confidence > 0:
+                confidence_pct = int(ml_confidence * 100)
+                moisture_text = f"{moisture_text} {confidence_pct}%"
+            text_parts.append(moisture_text)
         if state["delete"]:
             text_parts.append("DELETE")
         if state["bad_image"]:
@@ -1567,12 +2483,23 @@ class QAQCGridCanvas:
             x = ids["x"] + self.cell_width - 10
             y = ids["y"] + 10
 
+            # Choose text color based on ML prediction and confidence
+            if is_ml_prediction:
+                if ml_confidence >= 0.90:
+                    text_color = "#90EE90"  # Light green for high confidence
+                elif ml_confidence >= 0.70:
+                    text_color = "#FFD700"  # Gold for medium confidence
+                else:
+                    text_color = "#FFA500"  # Orange for low confidence
+            else:
+                text_color = "white"  # White for user-confirmed
+
             # Create text with background
             text_id = self.canvas.create_text(
                 x,
                 y,
                 text=text,
-                fill="white",
+                fill=text_color,
                 font=("Arial", 10, "bold"),
                 anchor="ne",
                 tags=f"class_text_{row}_{col}",
@@ -1653,6 +2580,9 @@ class QAQCGridCanvas:
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
 
+        # Check if near edge and start auto-scrolling
+        self._check_edge_scroll(event.y)
+
         # Draw the action box
         if self.selection_box:
             self.canvas.delete(self.selection_box)
@@ -1685,8 +2615,69 @@ class QAQCGridCanvas:
             self.drag_start[0], self.drag_start[1], canvas_x, canvas_y
         )
 
+    def _check_edge_scroll(self, mouse_y):
+        """Check if mouse is near edge and trigger auto-scrolling."""
+        canvas_height = self.canvas.winfo_height()
+
+        # Check if near top edge
+        if mouse_y < self.scroll_edge_threshold:
+            if self.auto_scroll_direction != "up":
+                self.auto_scroll_direction = "up"
+                self.auto_scroll_speed = 0  # Reset speed when changing direction
+            self._start_auto_scroll()
+        # Check if near bottom edge
+        elif mouse_y > (canvas_height - self.scroll_edge_threshold):
+            if self.auto_scroll_direction != "down":
+                self.auto_scroll_direction = "down"
+                self.auto_scroll_speed = 0  # Reset speed when changing direction
+            self._start_auto_scroll()
+        else:
+            # Not near edge, stop scrolling
+            self._stop_auto_scroll()
+
+    def _start_auto_scroll(self):
+        """Start or continue auto-scrolling."""
+        if self.auto_scroll_timer is None:
+            self._perform_auto_scroll()
+
+    def _stop_auto_scroll(self):
+        """Stop auto-scrolling."""
+        if self.auto_scroll_timer:
+            self.canvas.after_cancel(self.auto_scroll_timer)
+            self.auto_scroll_timer = None
+        self.auto_scroll_speed = 0
+        self.auto_scroll_direction = None
+
+    def _perform_auto_scroll(self):
+        """Perform one step of auto-scrolling with acceleration."""
+        if self.auto_scroll_direction is None:
+            return
+
+        # Accelerate: start slow, increase to max
+        max_speed = 5  # Maximum scroll units per step
+        acceleration = 0.05  # How fast to accelerate
+
+        self.auto_scroll_speed = min(self.auto_scroll_speed + acceleration, max_speed)
+
+        # Calculate scroll amount (minimum 1 unit)
+        scroll_amount = max(1, int(self.auto_scroll_speed))
+
+        # Scroll in the appropriate direction
+        if self.auto_scroll_direction == "up":
+            self.canvas.yview_scroll(-scroll_amount, "units")
+        elif self.auto_scroll_direction == "down":
+            self.canvas.yview_scroll(scroll_amount, "units")
+
+        # Schedule next scroll with faster interval as speed increases
+        # Start at 50ms, decrease to 10ms as speed increases
+        interval = max(10, int(50 - (self.auto_scroll_speed * 2)))
+        self.auto_scroll_timer = self.canvas.after(interval, self._perform_auto_scroll)
+
     def _on_mouse_release(self, event):
         """Handle mouse release."""
+        # Stop auto-scrolling
+        self._stop_auto_scroll()
+
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
 
@@ -1714,6 +2705,8 @@ class QAQCGridCanvas:
                         else:
                             state["moisture"] = "wet"
                             state["delete"] = False
+                        # Clear ML prediction flag - user has manually classified
+                        state["ml_predicted"] = False
                     elif self.current_mode == "dry":
                         # Toggle dry: if already dry, remove it; otherwise set dry
                         if state["moisture"] == "dry":
@@ -1721,11 +2714,14 @@ class QAQCGridCanvas:
                         else:
                             state["moisture"] = "dry"
                             state["delete"] = False
+                        # Clear ML prediction flag - user has manually classified
+                        state["ml_predicted"] = False
                     elif self.current_mode == "delete":
                         # Toggle delete
                         state["delete"] = not state["delete"]
                         if state["delete"]:
                             state["moisture"] = None
+                        state["ml_predicted"] = False
                     elif self.current_mode == "bad_image":
                         # Toggle bad image flag
                         state["bad_image"] = not state["bad_image"]
@@ -1903,6 +2899,7 @@ class QAQCGridCanvas:
             else:
                 state["moisture"] = "wet"
                 state["delete"] = False
+            state["ml_predicted"] = False  # User manually classified
         elif self.current_mode == "dry":
             # Toggle dry classification
             if state["moisture"] == "dry":
@@ -1910,11 +2907,13 @@ class QAQCGridCanvas:
             else:
                 state["moisture"] = "dry"
                 state["delete"] = False
+            state["ml_predicted"] = False  # User manually classified
         elif self.current_mode == "delete":
             # Toggle delete
             state["delete"] = not state["delete"]
             if state["delete"]:
                 state["moisture"] = None
+            state["ml_predicted"] = False
         elif self.current_mode == "bad_image":
             # Toggle bad image flag (doesn't affect moisture)
             state["bad_image"] = not state["bad_image"]
@@ -1940,12 +2939,15 @@ class QAQCGridCanvas:
             if action == "wet":
                 state["moisture"] = "wet"
                 state["delete"] = False
+                state["ml_predicted"] = False  # User manually classified
             elif action == "dry":
                 state["moisture"] = "dry"
                 state["delete"] = False
+                state["ml_predicted"] = False  # User manually classified
             elif action == "delete":
                 state["delete"] = True
                 state["moisture"] = None
+                state["ml_predicted"] = False
 
             self._update_cell_visual(row, col)
 
@@ -2019,6 +3021,9 @@ class QAQCGridCanvas:
         for idx, item in enumerate(self.review_items):
             state = self.item_states[idx]
 
+            # Transfer bad_image state to the item
+            item.bad_image = state.get("bad_image", False)
+
             if state["delete"]:
                 item.quality = "Missing"
                 item.is_reviewed = True
@@ -2058,9 +3063,15 @@ class QAQCGridCanvas:
         return counts
 
     def _on_mousewheel(self, event):
-        """Handle mouse wheel scrolling."""
+        # Ignore if canvas has been destroyed
+        if not hasattr(self, "canvas") or not str(self.canvas):
+            return
         if not (event.state & 0x0004):  # Not Ctrl
-            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            try:
+                self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except tk.TclError:
+                return
+
 
     def _on_ctrl_mousewheel(self, event):
         """Handle Ctrl+MouseWheel for zooming."""
@@ -2080,7 +3091,7 @@ class QAQCGridCanvas:
             # Reload with new scale
             self.load_items(
                 self.review_items, self.hole_id
-            )  # TODO - make sure this doesn't wipe out the selections.
+            )
 
     def _update_scroll_region(self):
         """Update canvas scroll region."""
@@ -2124,10 +3135,154 @@ class QAQCGridReviewDialog:
         self.grid_canvas = None
         self.status_label = None
         self.mode_buttons = {}
+        self.save_btn = None  # Store reference to update text dynamically
+        self.close_btn = None  # Store reference for Close button
+
+        # Queue support for multiple holes
+        self.hole_queue = []  # List of hole_ids to process
+        self.current_hole_index = -1
+        self.items_by_hole = {}  # Store the original dict reference
+        self.hole_processor = None  # Function to lazy-load hole data
+
+    def _reload_hole_data(self, hole_id: str, review_items: List[ReviewItem]):
+        """Reload new hole data into existing window."""
+        # Update window title with queue position
+        queue_info = ""
+        if self.hole_queue:
+            queue_info = f" ({self.current_hole_index + 1}/{len(self.hole_queue)})"
+        self.review_window.title(f"QAQC Grid Review - {hole_id}{queue_info}")
+
+        # Clear and reload grid canvas with reset_states=True (new hole)
+        if self.grid_canvas:
+            self.grid_canvas.load_items(review_items, hole_id, reset_states=True)
+            # Scroll to top of canvas for new hole
+            self.grid_canvas.canvas.yview_moveto(0)
+
+        # Update status
+        self._update_status()
+
+        # Update button labels
+        self._update_button_labels()
+
+        self.logger.info(
+            f"Reloaded window with {len(review_items)} items for {hole_id}"
+        )
+
+    def _cleanup_previous_hole_memory(self):
+        """Clear memory from previously loaded hole to prevent accumulation."""
+        self.logger.debug("Cleaning up previous hole memory...")
+
+        # Clear grid canvas image references
+        if self.grid_canvas:
+            # Clear PhotoImage references
+            if hasattr(self.grid_canvas, "image_refs"):
+                self.grid_canvas.image_refs.clear()
+
+            # Unload images from ReviewItems
+            if hasattr(self.grid_canvas, "review_items"):
+                for item in self.grid_canvas.review_items:
+                    if hasattr(item, "unload_image"):
+                        item.unload_image()
+
+        # Force garbage collection
+        import gc
+
+        gc.collect()
+
+        self.logger.debug("Memory cleanup complete")
+
+    def _update_button_labels(self):
+        """Update Save button text based on queue position."""
+        if not self.save_btn:
+            return
+
+        # Check if there are more holes after current
+        has_next = (
+            self.hole_queue and self.current_hole_index < len(self.hole_queue) - 1
+        )
+
+        if has_next:
+            new_text = (
+                f"Save & Next ({self.current_hole_index + 1}/{len(self.hole_queue)})"
+            )
+        else:
+            new_text = "Save & Close (Last Hole)"
+
+        self.save_btn.configure(text=new_text)
 
     def show_review_window(self, hole_id: str, review_items: List[ReviewItem]):
         """Show the grid review window."""
-        self._create_window(hole_id, review_items)
+        # If window doesn't exist, create it
+        if not self.review_window or not self.review_window.winfo_exists():
+            self._create_window(hole_id, review_items)
+        else:
+            # Window exists, just reload data
+            self._reload_hole_data(hole_id, review_items)
+
+    def load_hole_queue(self, hole_ids: List[str], processor_callback):
+        """
+        Queue multiple holes for review.
+
+        Args:
+            hole_ids: List of hole IDs to review
+            processor_callback: Function that takes hole_id and returns processed review_items
+        """
+        self.hole_queue = hole_ids
+        self.hole_processor = processor_callback
+        self.current_hole_index = 0
+
+        # Load first hole with progress dialog
+        if self.hole_queue:
+            first_hole = self.hole_queue[0]
+            self._load_first_hole_with_progress(first_hole)
+
+    def _load_first_hole_with_progress(self, hole_id: str):
+        """Load first hole data with progress feedback."""
+        from gui.progress_dialog import ProgressDialog
+
+        # Create progress dialog
+        progress = ProgressDialog(
+            self.parent, "Loading Review", f"Loading {hole_id}..."
+        )
+
+        def load_task():
+            """Task to run in background thread."""
+            # Update progress - scanning
+            progress.update_progress(f"Scanning compartments for {hole_id}...", 30)
+
+            # Process the hole (this is the slow part)
+            review_items = self.hole_processor(hole_id)
+
+            # Update progress - analyzing
+            progress.update_progress(f"Analyzing files for {hole_id}...", 70)
+
+            # Small delay to show final progress
+            import time
+
+            time.sleep(0.2)
+
+            # Update progress - complete
+            progress.update_progress(f"Loading complete", 100)
+
+            return review_items
+
+        try:
+            # Run with progress dialog (blocks until complete)
+            review_items = progress.run_with_progress(load_task)
+
+            # Show window with loaded data
+            if review_items:
+                self.show_review_window(hole_id, review_items)
+            else:
+                self.logger.info(f"No items to review for {hole_id}")
+        except Exception as e:
+            self.logger.error(f"Error loading hole data: {e}")
+            DialogHelper.show_message(
+                self.parent,
+                "Error",
+                f"Failed to load {hole_id}: {str(e)}",
+                message_type="error",
+            )
 
     def _create_window(self, hole_id: str, review_items: List[ReviewItem]):
         """Create the main window."""
@@ -2169,9 +3324,6 @@ class QAQCGridReviewDialog:
         # Create status bar at bottom of left container
         self._create_status_bar(left_container)
 
-        # Create vertical status table on the right
-        self._create_vertical_status_table(main_container)
-
         # Setup keyboard shortcuts
         self._setup_keyboard_shortcuts()
 
@@ -2189,10 +3341,10 @@ class QAQCGridReviewDialog:
         mode_frame = ttk.LabelFrame(toolbar, text="Classification Mode", padding=5)
         mode_frame.pack(side=tk.LEFT, padx=5)
 
-        # Mode buttons
+        # Mode buttons with keyboard shortcuts
         modes = [
             (
-                "Wet",
+                "Wet (1)",
                 "wet",
                 (
                     self.gui_manager.theme_colors["accent_blue"]
@@ -2201,7 +3353,7 @@ class QAQCGridReviewDialog:
                 ),
             ),
             (
-                "Dry",
+                "Dry (2)",
                 "dry",
                 (
                     self.gui_manager.theme_colors["accent_green"]
@@ -2210,7 +3362,7 @@ class QAQCGridReviewDialog:
                 ),
             ),
             (
-                "Delete",
+                "Delete (3)",
                 "delete",
                 (
                     self.gui_manager.theme_colors["accent_red"]
@@ -2219,7 +3371,7 @@ class QAQCGridReviewDialog:
                 ),
             ),
             (
-                "Bad Image",
+                "Bad Image (B)",
                 "bad_image",
                 (
                     self.gui_manager.theme_colors["accent_yellow"]
@@ -2307,6 +3459,30 @@ class QAQCGridReviewDialog:
                 lambda: self._set_layout("column"),
             ).pack(side=tk.LEFT, padx=2)
 
+            # Sort controls
+            sort_frame = ttk.Frame(action_frame)
+            sort_frame.pack(side=tk.LEFT, padx=5)
+
+            ttk.Label(sort_frame, text="Sort:").pack(side=tk.LEFT, padx=2)
+
+            self._sort_var = tk.StringVar(value="Depth")
+            _sort_mode_map = {"Depth": "depth", "Wet/Dry": "wet_dry", "Confidence": "confidence"}
+
+            def _on_sort_changed(value):
+                if self.grid_canvas:
+                    self.grid_canvas.set_sort_mode(_sort_mode_map.get(value, "depth"))
+
+            from gui.widgets.themed_searchable_optionmenu import ThemedSearchableOptionMenu
+            sort_menu = ThemedSearchableOptionMenu(
+                sort_frame,
+                self.gui_manager,
+                items=["Depth", "Wet/Dry", "Confidence"],
+                variable=self._sort_var,
+                width=11,
+                on_change=_on_sort_changed,
+            )
+            sort_menu.pack(side=tk.LEFT, padx=2)
+
             # Size controls
             size_frame = ttk.Frame(action_frame)
             size_frame.pack(side=tk.LEFT, padx=10)
@@ -2359,31 +3535,44 @@ class QAQCGridReviewDialog:
                 side=tk.LEFT, padx=2
             )
 
-        # Save/Cancel on the right
+        # Save/Close buttons on the right
         button_frame = ttk.Frame(toolbar)
         button_frame.pack(side=tk.RIGHT, padx=5)
 
         if self.gui_manager:
-            save_btn = self.gui_manager.create_modern_button(
+            self.save_btn = self.gui_manager.create_modern_button(
                 button_frame,
-                "Save & Close",
+                "Save & Next",  # Will update dynamically
                 self.gui_manager.theme_colors["accent_green"],
-                self._save_and_close,
+                self._save_and_next,
+            )
+            self.close_btn = self.gui_manager.create_modern_button(
+                button_frame,
+                "Close",
+                self.gui_manager.theme_colors["accent_red"],
+                self._close_without_save,
             )
             cancel_btn = self.gui_manager.create_modern_button(
                 button_frame,
                 "Cancel",
-                self.gui_manager.theme_colors["accent_red"],
+                self.gui_manager.theme_colors["secondary_bg"],
                 self._on_close,
             )
         else:
-            save_btn = ttk.Button(
-                button_frame, text="Save & Close", command=self._save_and_close
+            self.save_btn = ttk.Button(
+                button_frame, text="Save & Next", command=self._save_and_next
+            )
+            self.close_btn = ttk.Button(
+                button_frame, text="Close", command=self._close_without_save
             )
             cancel_btn = ttk.Button(button_frame, text="Cancel", command=self._on_close)
 
-        save_btn.pack(side=tk.LEFT, padx=5)
+        self.save_btn.pack(side=tk.LEFT, padx=5)
+        self.close_btn.pack(side=tk.LEFT, padx=5)
         cancel_btn.pack(side=tk.LEFT, padx=5)
+
+        # Update button text based on queue status
+        self._update_button_labels()
 
         # Set initial mode after UI is created
         self.review_window.after(100, lambda: self._set_mode("dry"))
@@ -2738,7 +3927,6 @@ class QAQCGridReviewDialog:
 
         # Update status
         self._update_status()
-        self.update_status_table()
         # ===================================================
 
     # Update load_items to show/hide duplicate button
@@ -2823,12 +4011,69 @@ class QAQCGridReviewDialog:
             self.toggle_classified_btn.configure(text="Show Classified")
 
         self._update_status()
-        self.update_status_table()
 
-    def _save_and_close(self):
-        """Save classifications and close."""
-        if self.close_callback:
-            self.close_callback(cancelled=False)
+    def _save_and_next(self):
+        """Save classifications and proceed to next hole or close."""
+        # Get current hole ID before moving forward
+        current_hole = (
+            self.hole_queue[self.current_hole_index] if self.hole_queue else None
+        )
+
+        # Check if this is the LAST hole in the queue
+        is_last_hole = not self.hole_queue or self.current_hole_index >= len(self.hole_queue) - 1
+        
+        # Log unclassified count for reference (no prompt - user can see status bar)
+        counts = self.grid_canvas.get_status_counts()
+        if counts["unclassified"] > 0:
+            self.logger.info(
+                f"Saving {current_hole} with {counts['unclassified']} unclassified items "
+                f"(will remain in review folder)"
+            )
+
+        # Trigger callback to save current hole
+        if self.close_callback and current_hole:
+            self.close_callback(hole_id=current_hole, cancelled=False)
+
+        # Clean up memory from current hole before loading next
+        self._cleanup_previous_hole_memory()
+
+        # Check if there are more holes in queue
+        if not is_last_hole:
+            # Move to next hole
+            self.current_hole_index += 1
+            next_hole_id = self.hole_queue[self.current_hole_index]
+
+            self.logger.info(
+                f"Loading next hole: {next_hole_id} "
+                f"({self.current_hole_index + 1}/{len(self.hole_queue)})"
+            )
+
+            # Lazy load next hole's data using processor
+            if self.hole_processor:
+                review_items = self.hole_processor(next_hole_id)
+            else:
+                self.logger.error("No hole processor available for lazy loading!")
+                review_items = []
+
+            # Reload window with next hole
+            self._reload_hole_data(next_hole_id, review_items)
+
+            # Update button labels for new position
+            self._update_button_labels()
+        else:
+            # No more holes, close window
+            self.logger.info("All holes reviewed, closing window")
+            self.review_window.destroy()
+
+    def _close_without_save(self):
+        """Close the review window without saving current hole, but keep previous work."""
+        # Don't call callback - we're stopping early
+        self.logger.info("User closed review early - previous holes are saved")
+
+        # Clean up memory
+        self._cleanup_previous_hole_memory()
+
+        # Close window
         self.review_window.destroy()
 
     def _on_close(self):
@@ -2836,11 +4081,16 @@ class QAQCGridReviewDialog:
         response = DialogHelper.confirm_dialog(
             self.review_window,
             "Cancel Review",
-            "Are you sure you want to cancel? Unsaved changes will be lost.",  # TODO - Don't say it will be lost just prompt them to save.
+            "Are you sure you want to cancel? Unsaved changes will be lost.",
         )
         if response:
             if self.close_callback:
-                self.close_callback(cancelled=True)
+                current_hole = (
+                    self.hole_queue[self.current_hole_index]
+                    if self.hole_queue
+                    else None
+                )
+                self.close_callback(hole_id=current_hole, cancelled=True)
             self.review_window.destroy()
 
     def set_close_callback(
@@ -2966,9 +4216,11 @@ class QAQCGridReviewDialog:
             if hasattr(self.grid_canvas, "duplicates_resolved"):
                 self.grid_canvas.duplicates_resolved = False
 
-            # Reload the grid
+            # Reload the grid with reset_states=True (full reset)
             self.grid_canvas.load_items(
-                self.grid_canvas.review_items, self.grid_canvas.hole_id
+                self.grid_canvas.review_items,
+                self.grid_canvas.hole_id,
+                reset_states=True,
             )
 
             # Update status
@@ -3033,10 +4285,16 @@ class QAQCManager:
         """Set reference to main GUI for status updates."""
         self.main_gui = main_gui
 
-    def _move_shared_items_to_local(
-        self, shared_items_by_hole: Dict[str, List[str]]
-    ):  # TODO - ensure that this is using file manager methods to preserve metadata if possible
+    def _move_shared_items_to_local(self, shared_items_by_hole: Dict[str, List[str]]):
         """Use MultiSelectReviewDialog to move selected holes from shared to local."""
+
+        # Show progress in main GUI
+        if self.main_gui:
+            total_files = sum(len(files) for files in shared_items_by_hole.values())
+            self.main_gui.direct_status_update(
+                f"Loading review dialog for {len(shared_items_by_hole)} holes ({total_files} files)...",
+                status_type="info",
+            )
 
         # Convert string paths to Path objects
         items_by_hole_paths = {}
@@ -3096,19 +4354,55 @@ class QAQCManager:
 
         # Step 2: Build review queue from local files
         temp_review_path = self.file_manager.dir_structure["temp_review"]
+        self.logger.info(f"Scanning temp_review path: {temp_review_path}")
+        self.logger.info(f"Path exists: {os.path.exists(temp_review_path)}")
+        if os.path.exists(temp_review_path):
+            items = list(os.listdir(temp_review_path))
+            self.logger.info(f"Items in temp_review: {len(items)}")
+            if items:
+                self.logger.info(f"First few items: {items[:5]}")
         local_review_items = self.scanner.scan_local_review_folder(temp_review_path)
+        self.logger.info(
+            f"Found {len(local_review_items) if local_review_items else 0} local review items"
+        )
+        
+        # Also scan for local approved files that duplicate shared approved
+        local_approved_duplicates = self.scanner.scan_local_approved_duplicates()
+        if local_approved_duplicates:
+            self.logger.info(
+                f"Found {sum(len(v) for v in local_approved_duplicates.values())} "
+                f"local approved duplicates across {len(local_approved_duplicates)} holes"
+            )
+            # Merge into local_review_items
+            for hole_id, items in local_approved_duplicates.items():
+                if hole_id not in local_review_items:
+                    local_review_items[hole_id] = []
+                local_review_items[hole_id].extend(items)
 
         if local_review_items:
             # Process local files by hole
             self._process_review_queue(local_review_items)
         else:
             # Step 3: Check shared folders for items needing review
+            self.logger.info("No local items found, scanning shared folders...")
             shared_review_items = self.scanner.scan_shared_folders_for_review()
+            self.logger.info(
+                f"Found {len(shared_review_items)} holes in shared folders"
+            )
 
             if shared_review_items:
+                # Log what was found
+                for hole_id, paths in list(shared_review_items.items())[:3]:
+                    self.logger.info(f"  - {hole_id}: {len(paths)} files")
+                if len(shared_review_items) > 3:
+                    self.logger.info(
+                        f"  ... and {len(shared_review_items) - 3} more holes"
+                    )
+
                 # Use MultiSelectReviewDialog to move files to local
                 self._move_shared_items_to_local(shared_review_items)
             else:
+                self.logger.info("No shared items found either")
                 self._show_nothing_to_review_message()
 
     def _select_holes_for_processing(
@@ -3143,7 +4437,8 @@ class QAQCManager:
 
     def _show_pre_review_analysis(self, hole_id: str, analysis: Dict) -> Dict[str, Any]:
         """
-        Show analysis results before starting review and get user choices.
+        Log analysis results and auto-continue with smart defaults.
+        No user interaction - just logging and status updates.
 
         Returns:
             Dict with user choices:
@@ -3151,17 +4446,10 @@ class QAQCManager:
             - move_reviewed: bool - whether to move reviewed files to approved
             - move_unreviewed: bool - whether to move unreviewed files to review
         """
-        # Build message
-        message_parts = [f"Analysis for {hole_id}:\n"]
-
         # Summary
         total_depths = len(analysis["compartments_by_depth"])
         duplicate_count = len(analysis["duplicates"])
         needs_review_count = len(analysis["needs_review"])
-
-        message_parts.append(f"• Found {total_depths} depths with compartments")
-        message_parts.append(f"• {duplicate_count} depths have duplicates")
-        message_parts.append(f"• {needs_review_count} depths need review")
 
         # Misplaced files
         reviewed_misplaced = len(
@@ -3171,63 +4459,27 @@ class QAQCManager:
             analysis["misplaced_files"]["unreviewed_in_approved_folder"]
         )
 
-        result = {"continue": True, "move_reviewed": False, "move_unreviewed": False}
+        # Log the analysis
+        self.logger.info(f"Analysis for {hole_id}:")
+        self.logger.info(f"  • Found {total_depths} depths with compartments")
+        self.logger.info(f"  • {duplicate_count} depths have duplicates")
+        self.logger.info(f"  • {needs_review_count} depths need review")
 
-        # First, show summary and ask to continue
-        if reviewed_misplaced > 0 or unreviewed_misplaced > 0:
-            message_parts.append(f"\n⚠️ Found misplaced files:")
-            if reviewed_misplaced > 0:
-                message_parts.append(
-                    f"  • {reviewed_misplaced} reviewed files in review folder"
-                )
-            if unreviewed_misplaced > 0:
-                message_parts.append(
-                    f"  • {unreviewed_misplaced} unreviewed files in approved folder"
-                )
-
-        # Recommendations
-        if analysis["recommendations"]:
-            message_parts.append("\nRecommendations:")
-            for rec in analysis["recommendations"]:
-                message_parts.append(f"• {rec}")
-
-        message_parts.append("\nDo you want to continue with the review?")
-
-        if not DialogHelper.confirm_dialog(
-            self.root, "Pre-Review Analysis", "\n".join(message_parts)
-        ):
-            result["continue"] = False
-            return result
-
-        # Ask about moving reviewed files
         if reviewed_misplaced > 0:
-            move_msg = (
-                f"Found {reviewed_misplaced} reviewed files in the review folder.\n\n"
-                "These files have already been classified (Wet/Dry) and should be in the approved folder.\n\n"
-                "Would you like to automatically move them to the approved folder?"
+            self.logger.info(
+                f"  • {reviewed_misplaced} reviewed files will be auto-moved to approved"
             )
-            result["move_reviewed"] = DialogHelper.confirm_dialog(
-                self.root,
-                "Move Reviewed Files?",
-                move_msg,
-                yes_text="Move Files",
-                no_text="Leave As Is",
+        if unreviewed_misplaced > 0:
+            self.logger.info(
+                f"  • {unreviewed_misplaced} unreviewed files will be auto-moved to review"
             )
 
-        # Ask about moving unreviewed files
-        if unreviewed_misplaced > 0:
-            move_msg = (
-                f"Found {unreviewed_misplaced} unreviewed files in the approved folder.\n\n"
-                "These files have not been classified yet and should be in the review folder.\n\n"
-                "Would you like to automatically move them to the review folder?"
-            )
-            result["move_unreviewed"] = DialogHelper.confirm_dialog(
-                self.root,
-                "Move Unreviewed Files?",
-                move_msg,
-                yes_text="Move Files",
-                no_text="Leave As Is",
-            )
+        # Always continue with smart defaults
+        result = {
+            "continue": True,  # Always continue
+            "move_reviewed": reviewed_misplaced > 0,  # Auto-move if found
+            "move_unreviewed": unreviewed_misplaced > 0,  # Auto-move if found
+        }
 
         return result
 
@@ -3310,27 +4562,43 @@ class QAQCManager:
         return {"moved": moved, "failed": failed}
 
     def _process_review_queue(self, items_by_hole: Dict[str, List[ReviewItem]]):
-        """Process review items one hole at a time with pre-analysis."""
+        """Process review items with all holes queued in a single window."""
         total_holes = len(items_by_hole)
         self.stop_review_process = False
 
-        for idx, (hole_id, review_items) in enumerate(items_by_hole.items()):
-            if self.stop_review_process:
-                self.logger.info("Review process stopped by user")
-                break
+        # Store hole IDs to process
+        hole_ids = list(items_by_hole.keys())
 
-            # Perform pre-review analysis
-            self.logger.info(f"Analyzing files for {hole_id}...")
+        # Create processor function for lazy loading
+        def process_hole(hole_id: str) -> List[ReviewItem]:
+            """Process a single hole and return review items."""
+            if self.stop_review_process:
+                return []
+
+            self.logger.info(f"Processing hole: {hole_id}")
+
+            # Get initial review items
+            review_items = items_by_hole.get(hole_id, [])
+
+            # Perform comprehensive scan
+            all_compartments = self.scanner.scan_all_compartments_for_hole(hole_id)
+            if all_compartments:
+                review_items = all_compartments
+                self.logger.info(
+                    f"Using {len(all_compartments)} items from comprehensive scan"
+                )
+
+            # Perform analysis
             analysis = self.scanner.analyze_compartment_files(hole_id)
 
-            # Show analysis and get user choices
+            # Get user choices for misplaced files
             user_choices = self._show_pre_review_analysis(hole_id, analysis)
 
             if not user_choices["continue"]:
                 self.logger.info(f"User skipped review for {hole_id}")
-                continue
+                return []
 
-            # Handle file movements based on user choices
+            # Handle file movements
             if (
                 user_choices["move_reviewed"]
                 and analysis["misplaced_files"]["reviewed_in_review_folder"]
@@ -3339,13 +4607,10 @@ class QAQCManager:
                 move_results = self._move_misplaced_files(
                     analysis["misplaced_files"]["reviewed_in_review_folder"], "approved"
                 )
-                if move_results["moved"] > 0:
-                    DialogHelper.show_message(
-                        self.root,
-                        "Files Moved",
-                        f"Successfully moved {move_results['moved']} files to approved folder.\n"
-                        f"Failed: {move_results['failed']}",
-                        message_type="info",
+                if move_results["moved"] > 0 and self.main_gui:
+                    self.main_gui.direct_status_update(
+                        f"Moved {move_results['moved']} files to approved",
+                        status_type="success",
                     )
 
             if (
@@ -3357,129 +4622,47 @@ class QAQCManager:
                     analysis["misplaced_files"]["unreviewed_in_approved_folder"],
                     "review",
                 )
-                if move_results["moved"] > 0:
-                    DialogHelper.show_message(
-                        self.root,
-                        "Files Moved",
-                        f"Successfully moved {move_results['moved']} files to review folder.\n"
-                        f"Failed: {move_results['failed']}",
-                        message_type="info",
+                if move_results["moved"] > 0 and self.main_gui:
+                    self.main_gui.direct_status_update(
+                        f"Moved {move_results['moved']} files to review",
+                        status_type="success",
                     )
 
-            # Update status
-            if self.main_gui:
-                self.main_gui.direct_status_update(
-                    f"Processing hole {idx + 1}/{total_holes}: {hole_id}",
-                    status_type="info",
-                )
+            # Return processed items
+            if not review_items:
+                review_items.sort(key=lambda x: x.depth_to)
 
-            # Continue with normal review process...
-            # Sort by depth
-            review_items.sort(key=lambda x: x.depth_to)
+            return review_items
 
-            # Set callback
-            self.dialog.set_close_callback(
-                lambda cancelled=False: self._on_hole_review_complete(
-                    hole_id, cancelled
-                )
-            )
+        # Set callback for when each hole completes
+        self.dialog.set_close_callback(self._on_hole_review_complete)
 
-            # Show review GUI
-            self.dialog.show_review_window(hole_id, review_items)
+        # Queue all holes into dialog (lazy loading via processor)
+        self.dialog.load_hole_queue(hole_ids, process_hole)
 
-            # Wait for dialog to close
-            self.root.wait_window(self.dialog.review_window)
+        # Wait for window to close (only once for all holes)
+        self.root.wait_window(self.dialog.review_window)
 
-    def _on_hole_review_complete(self, hole_id: str, cancelled: bool = False):
+    def _on_hole_review_complete(self, hole_id: str = None, cancelled: bool = False):
         """Handle completion of review for a single hole."""
         if cancelled:
             self.stop_review_process = True
-            self.logger.info(f"Review cancelled for hole {hole_id}")
+            self.logger.info(f"Review cancelled for hole {hole_id or 'unknown'}")
+            return
+
+        if not hole_id:
+            self.logger.warning("No hole_id provided to completion callback")
             return
 
         # Get reviewed and unreviewed items
         reviewed_items = self.dialog.get_reviewed_items()
         unreviewed_items = self.dialog.get_unreviewed_items()
 
-        # Handle unreviewed items
-        move_to_shared = False  # Track user choice
-        if unreviewed_items:
-            # Build message using proper translation format
-            message_parts = [
-                self.t("There are {} unreviewed compartments.", len(unreviewed_items)),
-                "",
-                self.t(
-                    "Would you like to move them to the shared review folder for later processing?"
-                ),
-                "",
-                self.t("Yes - Move to shared folder for team review"),
-                self.t("No - Keep in local folder (may be lost if not backed up)"),
-            ]
-            message = "\n".join(message_parts)
-
-            move_to_shared = DialogHelper.confirm_dialog(
-                self.dialog.review_window,
-                self.t("Unreviewed Compartments"),
-                message,
-                yes_text=self.t("Move to Shared"),
-                no_text=self.t("Keep Local"),
-            )
-
-            if move_to_shared:
-                # Create progress dialog if many items
-                progress_dialog = None
-                if len(unreviewed_items) > 3:
-                    progress_dialog = ProgressDialog(
-                        self.dialog.review_window,
-                        self.t("Moving Files"),
-                        self.t("Moving unreviewed files to shared folder..."),
-                    )
-
-                try:
-                    # Create a wrapper function that converts index to percentage
-                    def progress_callback(index, message):
-                        if progress_dialog:
-                            percentage = (index / len(unreviewed_items)) * 100
-                            progress_dialog.update_progress(message, percentage)
-
-                    moved, failed = self.processor.move_unreviewed_items_to_shared(
-                        unreviewed_items,
-                        progress_callback=(
-                            progress_callback if progress_dialog else None
-                        ),
-                    )
-
-                    if failed > 0:
-                        DialogHelper.show_message(
-                            self.dialog.review_window,
-                            self.t("Partial Success"),
-                            self.t(
-                                "Moved {} files successfully.\n{} files failed to move.",
-                                moved,
-                                failed,
-                            ),
-                            message_type="warning",
-                        )
-                finally:
-                    if progress_dialog:
-                        progress_dialog.close()
-
-        # Check for any other remaining files
-        if move_to_shared:
-            remaining_moved = self.processor.check_and_move_remaining_temp_files(
-                hole_id
-            )
-            if remaining_moved > 0:
-                self.logger.info(
-                    f"Moved {remaining_moved} additional files from temp folder"
-                )
-
         # Process reviewed items
         if reviewed_items:
             self.processor.batch_process_reviewed_items(reviewed_items)
 
             # Clean up successfully processed temp files
-            # Collect temp file paths from reviewed items
             temp_paths = []
             for item in reviewed_items:
                 if item.is_reviewed and item.image_path:
@@ -3496,63 +4679,140 @@ class QAQCManager:
             if temp_paths:
                 self.file_manager.cleanup_temp_compartments(hole_id, temp_paths)
                 self.logger.info(f"Cleaned up {len(temp_paths)} processed temp files")
+            
+            # Track deleted pending UIDs and cleanup orphan pending originals
+            self._cleanup_orphan_pending_originals(hole_id, reviewed_items, unreviewed_items)
 
         # Free memory
         for item in reviewed_items + unreviewed_items:
             item.unload_image()
 
-        # Show summary if we processed anything
-        if reviewed_items or unreviewed_items:
-            self._show_hole_summary(
-                len(reviewed_items),
-                len(unreviewed_items),
-                move_to_shared if unreviewed_items else False,
-            )
+        # Update status with completion info
+        if self.main_gui:
+            if reviewed_items:
+                self.main_gui.direct_status_update(
+                    f"Successfully moved {len(reviewed_items)} files to approved folder",
+                    status_type="success",
+                )
 
-    # def _process_shared_items(self, shared_items_by_hole: Dict[str, List[str]]):
-    #     """Move shared items to local one hole at a time and process."""
-    #     for hole_id, file_paths in shared_items_by_hole.items():
-    #         # Update status
-    #         if self.main_gui:
-    #             self.main_gui.direct_status_update(
-    #                 f"Moving {len(file_paths)} files for {hole_id} to local review...",
-    #                 status_type="info",
-    #             )
+            # Note about unreviewed items (they'll be handled by cloud sync)
+            if unreviewed_items:
+                self.logger.info(
+                    f"{len(unreviewed_items)} unreviewed items will be handled by cloud sync"
+                )
 
-    #         # Move files to local temp_review
-    #         local_paths = self.processor.move_files_to_local(hole_id, file_paths)
-
-    #         if local_paths:
-    #             # Now scan and process as local files
-    #             local_items = self.scanner.scan_specific_files(local_paths)
-
-    #             # Process this hole
-    #             self._process_review_queue({hole_id: local_items})
-
-    def _show_hole_summary(
-        self, reviewed_count: int, unreviewed_count: int, moved_to_shared: bool
+    def _cleanup_orphan_pending_originals(
+        self, 
+        hole_id: str, 
+        reviewed_items: List[ReviewItem], 
+        unreviewed_items: List[ReviewItem]
     ):
-        """Show summary for a single hole."""
-        summary_message = []
-        if reviewed_count > 0:
-            summary_message.append(
-                self.t(f"✓ Reviewed and saved: {reviewed_count} compartments")
+        """
+        Clean up pending originals when all their compartments have been deleted.
+        
+        For each pending UID:
+        - If ANY compartments were approved -> keep original (will be finalized later)
+        - If ALL compartments were deleted -> delete the pending original
+        """
+        import re
+        from collections import defaultdict
+        
+        # Pattern to extract UID from pending filename
+        pending_pattern = re.compile(r"_pending_([a-f0-9]+)\.", re.IGNORECASE)
+        
+        # Safety check: Don't cleanup if there are unreviewed pending items
+        # (they haven't been classified yet - we don't know if user will keep or delete them)
+        unreviewed_pending_uids = set()
+        for item in unreviewed_items:
+            if item.filename:
+                match = pending_pattern.search(item.filename)
+                if match:
+                    unreviewed_pending_uids.add(match.group(1).lower())
+        
+        if unreviewed_pending_uids:
+            self.logger.info(
+                f"Skipping pending original cleanup - {len(unreviewed_pending_uids)} UIDs "
+                f"still have unreviewed compartments: {unreviewed_pending_uids}"
             )
-        if unreviewed_count > 0 and moved_to_shared:
-            summary_message.append(
-                self.t(f"↗ Moved to shared review: {unreviewed_count} compartments")
-            )
-        elif unreviewed_count > 0:
-            summary_message.append(
-                self.t(f"⚠ Left in local folder: {unreviewed_count} compartments")
-            )
-
-        DialogHelper.show_message(
-            self.root,
-            self.t("Hole Review Complete"),
-            "\n".join(summary_message),
-            message_type="info",
-        )
+            return
+        
+        # Track UIDs and their fate (only from reviewed items now)
+        uid_approved = set()  # UIDs with at least one approved compartment
+        uid_deleted = set()   # UIDs where compartments were deleted
+        
+        # Scan ONLY reviewed items to track UID status
+        for item in reviewed_items:
+            if not item.filename:
+                continue
+                
+            match = pending_pattern.search(item.filename)
+            if not match:
+                continue
+                
+            uid = match.group(1).lower()
+            # Check if this pending compartment was approved (has Wet/Dry suffix)
+            if item.is_reviewed and item.moisture in ["wet", "dry", "Wet", "Dry"]:
+                uid_approved.add(uid)
+            elif item.is_reviewed and item.quality == "Missing":
+                # Explicitly deleted by user
+                uid_deleted.add(uid)
+        
+        # Find UIDs where ALL compartments were deleted (none approved)
+        # uid_deleted is now a set, not a dict
+        orphan_uids = uid_deleted - uid_approved
+        
+        for uid in orphan_uids:
+            self.logger.debug(f"UID {uid}: deleted, none approved - orphan original")
+        
+        if not orphan_uids:
+            return
+        
+        # Clean up orphan pending originals
+        pending_originals_dir = self.file_manager.dir_structure.get("pending_originals")
+        if not pending_originals_dir:
+            self.logger.warning("pending_originals directory not configured")
+            return
+        
+        project_code = hole_id[:2].upper()
+        hole_pending_dir = Path(pending_originals_dir) / project_code / hole_id
+        
+        if not hole_pending_dir.exists():
+            self.logger.debug(f"No pending originals directory for {hole_id}")
+            return
+        
+        # Find and delete orphan originals
+        deleted_count = 0
+        for file_path in hole_pending_dir.iterdir():
+            if not file_path.is_file():
+                continue
+            
+            filename = file_path.name
+            # Original pattern: KM0335_0-20_Original_45ecbec5.JPG
+            orig_match = re.search(r"_Original_([a-f0-9]+)\.", filename, re.IGNORECASE)
+            if not orig_match:
+                continue
+            
+            orig_uid = orig_match.group(1).lower()
+            if orig_uid in orphan_uids:
+                try:
+                    file_path.unlink()
+                    deleted_count += 1
+                    self.logger.info(f"Deleted orphan pending original: {filename}")
+                except Exception as e:
+                    self.logger.error(f"Failed to delete orphan original {filename}: {e}")
+        
+        if deleted_count > 0:
+            self.logger.info(f"Cleaned up {deleted_count} orphan pending originals for {hole_id}")
+            
+            # Clean up empty directories
+            try:
+                if hole_pending_dir.exists() and not any(hole_pending_dir.iterdir()):
+                    hole_pending_dir.rmdir()
+                    project_dir = hole_pending_dir.parent
+                    if project_dir.exists() and not any(project_dir.iterdir()):
+                        project_dir.rmdir()
+            except Exception as e:
+                self.logger.debug(f"Could not clean up empty pending directories: {e}")
 
     def _show_nothing_to_review_message(self):
         """Show message when there's nothing to review."""
@@ -3567,20 +4827,25 @@ class QAQCManager:
         """Show final processing summary and update main GUI."""
         summary_message = self.processor.get_summary_message()
 
-        # Update main GUI if available
-        if self.main_gui:
-            self.main_gui.direct_status_update(summary_message, status_type="info")
-
         # Log summary
         self.logger.info(summary_message)
 
-        # Show dialog
-        DialogHelper.show_message(
-            self.root,
-            self.t("QAQC Complete"),
-            self.t(summary_message),
-            message_type="info",
-        )
+        # Update main GUI with final summary
+        if self.main_gui:
+            # Parse the summary to show success/error counts appropriately
+            if (
+                self.processor.stats.get("upload_failed", 0) > 0
+                or self.processor.stats.get("register_failed", 0) > 0
+            ):
+                self.main_gui.direct_status_update(
+                    f"QAQC Complete with errors - Check log for details",
+                    status_type="warning",
+                )
+            else:
+                self.main_gui.direct_status_update(
+                    f"QAQC Complete - {self.processor.stats['processed']} compartments processed",
+                    status_type="success",
+                )
 
 
 # Export main classes

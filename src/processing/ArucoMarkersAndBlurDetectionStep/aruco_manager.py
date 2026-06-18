@@ -419,17 +419,23 @@ class ArucoManager:
         # Try to get scale from metadata first
         if metadata and "scale_px_per_cm" in metadata:
             scale_px_per_cm = metadata["scale_px_per_cm"]
-            self.logger.debug(f"Got scale from metadata: {scale_px_per_cm:.2f} px/cm")
-        # Then try from viz_manager
+            if scale_px_per_cm is not None:
+                self.logger.debug(f"Got scale from metadata: {scale_px_per_cm:.2f} px/cm")
+            else:
+                self.logger.debug("Scale in metadata is None")
+                # Then try from viz_manager
         elif hasattr(
             self.app, "viz_manager"
         ) and self.app.viz_manager.processing_metadata.get("scale_px_per_cm"):
             scale_px_per_cm = self.app.viz_manager.processing_metadata[
                 "scale_px_per_cm"
             ]
-            self.logger.debug(
-                f"Got scale from viz_manager: {scale_px_per_cm:.2f} px/cm"
-            )
+            if scale_px_per_cm is not None:
+                self.logger.debug(
+                    f"Got scale from viz_manager: {scale_px_per_cm:.2f} px/cm"
+                )
+            else:
+                self.logger.debug("Scale in viz_manager is None")
 
         # Calculate pixel dimensions if we have scale
         if scale_px_per_cm and scale_px_per_cm > 0:

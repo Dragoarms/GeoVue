@@ -1,0 +1,19 @@
+{
+  "name": "Al2O3 Grade",
+  "type": "numeric",
+  "description": "Al2O3 grade color scale",
+  "default_color": [200, 200, 200],
+  "null_color": [255, 255, 255],
+  "ranges": [
+    { "min": 0, "max": 0.001, "color": [128, 128, 128], "label": "<0.001" },
+    { "min": 0.001, "max": 1.5, "color": [255, 0, 255], "label": "0.001-1.5" },
+    { "min": 1.5, "max": 2.0, "color": [0, 0, 255], "label": "1.5-2.0" },
+    { "min": 2.0, "max": 2.2, "color": [0, 165, 255], "label": "2.0-2.2" },
+    { "min": 2.2, "max": 2.4, "color": [0, 255, 255], "label": "2.2-2.4" },
+    { "min": 2.4, "max": 3.0, "color": [0, 255, 0], "label": "2.4-3.0" },
+    { "min": 3.0, "max": 3.5, "color": [0, 128, 0], "label": "3.0-3.5" },
+    { "min": 3.5, "max": 6.0, "color": [255, 0, 0], "label": "3.5-6.0" },
+    { "min": 6.0, "max": 10.0, "color": [128, 0, 128], "label": "6.0-10.0" },
+    { "min": 10.0, "max": 1e12, "color": [128, 128, 128], "label": ">10.0" }
+  ]
+}

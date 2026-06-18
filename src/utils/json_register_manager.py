@@ -50,14 +50,22 @@ except ImportError:
 
 # ==================== CUSTOM EXCEPTIONS ====================
 
+
 class JSONRegisterError(Exception):
     """Base exception for all JSON register operations."""
+
     pass
 
 
 class FileOperationError(JSONRegisterError):
     """Raised when file operations fail."""
-    def __init__(self, message: str, file_path: Optional[str] = None, operation: Optional[str] = None):
+
+    def __init__(
+        self,
+        message: str,
+        file_path: Optional[str] = None,
+        operation: Optional[str] = None,
+    ):
         super().__init__(message)
         self.file_path = file_path
         self.operation = operation
@@ -65,7 +73,10 @@ class FileOperationError(JSONRegisterError):
 
 class DataValidationError(JSONRegisterError):
     """Raised when data validation fails."""
-    def __init__(self, message: str, field: Optional[str] = None, value: Optional[Any] = None):
+
+    def __init__(
+        self, message: str, field: Optional[str] = None, value: Optional[Any] = None
+    ):
         super().__init__(message)
         self.field = field
         self.value = value
@@ -73,6 +84,7 @@ class DataValidationError(JSONRegisterError):
 
 class RecordNotFoundError(JSONRegisterError):
     """Raised when a requested record cannot be found."""
+
     def __init__(self, message: str, record_key: Optional[str] = None):
         super().__init__(message)
         self.record_key = record_key
@@ -80,7 +92,13 @@ class RecordNotFoundError(JSONRegisterError):
 
 class LockAcquisitionError(JSONRegisterError):
     """Raised when file locks cannot be acquired."""
-    def __init__(self, message: str, lock_path: Optional[str] = None, timeout: Optional[int] = None):
+
+    def __init__(
+        self,
+        message: str,
+        lock_path: Optional[str] = None,
+        timeout: Optional[int] = None,
+    ):
         super().__init__(message)
         self.lock_path = lock_path
         self.timeout = timeout
@@ -88,7 +106,13 @@ class LockAcquisitionError(JSONRegisterError):
 
 class DataCorruptionError(JSONRegisterError):
     """Raised when data corruption is detected."""
-    def __init__(self, message: str, file_path: Optional[str] = None, backup_available: bool = False):
+
+    def __init__(
+        self,
+        message: str,
+        file_path: Optional[str] = None,
+        backup_available: bool = False,
+    ):
         super().__init__(message)
         self.file_path = file_path
         self.backup_available = backup_available
@@ -96,7 +120,13 @@ class DataCorruptionError(JSONRegisterError):
 
 class ExternalDependencyError(JSONRegisterError):
     """Raised when external dependencies fail."""
-    def __init__(self, message: str, dependency: Optional[str] = None, retry_after: Optional[int] = None):
+
+    def __init__(
+        self,
+        message: str,
+        dependency: Optional[str] = None,
+        retry_after: Optional[int] = None,
+    ):
         super().__init__(message)
         self.dependency = dependency
         self.retry_after = retry_after
@@ -104,19 +134,21 @@ class ExternalDependencyError(JSONRegisterError):
 
 # ==================== UTILITY FUNCTIONS ====================
 
+
 def retry_with_backoff(
     func: Callable,
     max_retries: int = 3,
     base_delay: float = 1.0,
     max_delay: float = 60.0,
     backoff_factor: float = 2.0,
-    exceptions: Tuple = (FileOperationError, LockAcquisitionError)
+    exceptions: Tuple = (FileOperationError, LockAcquisitionError),
 ) -> Callable:
     """Decorator to retry operations with exponential backoff."""
+
     def wrapper(*args, **kwargs):
         delay = base_delay
         last_exception = None
-        
+
         for attempt in range(max_retries + 1):
             try:
                 return func(*args, **kwargs)
@@ -124,31 +156,34 @@ def retry_with_backoff(
                 last_exception = e
                 if attempt == max_retries:
                     break
-                
+
                 # Log retry attempt
-                if hasattr(args[0], 'logger'):
+                if hasattr(args[0], "logger"):
                     args[0].logger.warning(
                         f"Attempt {attempt + 1} failed for {func.__name__}: {str(e)}. "
                         f"Retrying in {delay:.1f}s..."
                     )
-                
+
                 time.sleep(delay)
                 delay = min(delay * backoff_factor, max_delay)
-        
+
         raise last_exception
+
     return wrapper
 
 
-def setup_structured_logger(name: str, base_path: Optional[str] = None) -> structlog.stdlib.BoundLogger:
+def setup_structured_logger(
+    name: str, base_path: Optional[str] = None
+) -> structlog.stdlib.BoundLogger:
     """Setup structured logging with JSON output."""
     if base_path:
         log_file = Path(base_path) / "logs" / f"{name}.log"
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Configure file handler with JSON formatting
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(logging.INFO)
-        
+
         # Configure structlog
         structlog.configure(
             processors=[
@@ -160,27 +195,28 @@ def setup_structured_logger(name: str, base_path: Optional[str] = None) -> struc
                 structlog.processors.StackInfoRenderer(),
                 structlog.processors.format_exc_info,
                 structlog.processors.UnicodeDecoder(),
-                structlog.processors.JSONRenderer()
+                structlog.processors.JSONRenderer(),
             ],
             context_class=dict,
             logger_factory=structlog.stdlib.LoggerFactory(),
             wrapper_class=structlog.stdlib.BoundLogger,
             cache_logger_on_first_use=True,
         )
-        
+
         # Setup Python logging
         logging.basicConfig(
             format="%(message)s",
             stream=sys.stdout,
             level=logging.INFO,
-            handlers=[file_handler]
+            handlers=[file_handler],
         )
-    
+
     return structlog.get_logger(name)
 
 
 class PhotoStatus(Enum):
     """Valid photo status values."""
+
     FOR_REVIEW = "For Review"
     APPROVED = "Approved"
     REJECTED = "Rejected"
@@ -190,6 +226,7 @@ class PhotoStatus(Enum):
 @dataclass
 class CompartmentProcessingMetadata:
     """Data model for compartment processing metadata fields."""
+
     photo_status: str
     processed_date: str
     processed_by: str
@@ -197,19 +234,22 @@ class CompartmentProcessingMetadata:
     image_width_cm: Optional[float] = None
 
     @classmethod
-    def create_default(cls, photo_status: str = PhotoStatus.FOR_REVIEW.value, 
-                      processed_by: Optional[str] = None) -> 'CompartmentProcessingMetadata':
+    def create_default(
+        cls,
+        photo_status: str = PhotoStatus.FOR_REVIEW.value,
+        processed_by: Optional[str] = None,
+    ) -> "CompartmentProcessingMetadata":
         """Create default processing metadata with current timestamp."""
         valid_statuses = {status.value for status in PhotoStatus}
         if photo_status not in valid_statuses:
-            raise ValueError(f"Invalid photo_status: {photo_status}. Must be one of {valid_statuses}")
-        
+            raise ValueError(
+                f"Invalid photo_status: {photo_status}. Must be one of {valid_statuses}"
+            )
+
         timestamp = datetime.now().isoformat()
         username = processed_by or os.getenv("USERNAME", "Unknown")
         return cls(
-            photo_status=photo_status,
-            processed_date=timestamp,
-            processed_by=username
+            photo_status=photo_status, processed_date=timestamp, processed_by=username
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -219,63 +259,75 @@ class CompartmentProcessingMetadata:
             "Processed_Date": self.processed_date,
             "Processed_By": self.processed_by,
             "Comments": self.comments,
-            "Image_Width_Cm": self.image_width_cm
+            "Image_Width_Cm": self.image_width_cm,
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'CompartmentProcessingMetadata':
+    def from_dict(cls, data: Dict[str, Any]) -> "CompartmentProcessingMetadata":
         """Create instance from dictionary data."""
         defaults = cls.create_default(
             photo_status=data.get("Photo_Status", PhotoStatus.FOR_REVIEW.value),
-            processed_by=data.get("Processed_By")
+            processed_by=data.get("Processed_By"),
         )
-        
+
         return cls(
             photo_status=data.get("Photo_Status", defaults.photo_status),
             processed_date=data.get("Processed_Date", defaults.processed_date),
             processed_by=data.get("Processed_By", defaults.processed_by),
             comments=data.get("Comments"),
-            image_width_cm=data.get("Image_Width_Cm")
+            image_width_cm=data.get("Image_Width_Cm"),
         )
 
     def validate(self) -> None:
         """Validate processing metadata fields."""
         if not self.photo_status:
-            raise DataValidationError("photo_status cannot be empty", field="photo_status", value=self.photo_status)
+            raise DataValidationError(
+                "photo_status cannot be empty",
+                field="photo_status",
+                value=self.photo_status,
+            )
         if not self.processed_by:
-            raise DataValidationError("processed_by cannot be empty", field="processed_by", value=self.processed_by)
-        
+            raise DataValidationError(
+                "processed_by cannot be empty",
+                field="processed_by",
+                value=self.processed_by,
+            )
+
         valid_statuses = {status.value for status in PhotoStatus}
         if self.photo_status not in valid_statuses:
             raise DataValidationError(
                 f"Invalid photo_status: {self.photo_status}. Must be one of {valid_statuses}",
                 field="photo_status",
-                value=self.photo_status
+                value=self.photo_status,
             )
-        
+
         # Validate processed_date format
         try:
-            datetime.fromisoformat(self.processed_date.replace('Z', '+00:00'))
+            datetime.fromisoformat(self.processed_date.replace("Z", "+00:00"))
         except (ValueError, AttributeError) as e:
             raise DataValidationError(
                 f"Invalid processed_date format: {self.processed_date}. Expected ISO format.",
                 field="processed_date",
-                value=self.processed_date
+                value=self.processed_date,
             ) from e
-        
+
         # Validate image_width_cm if provided
         if self.image_width_cm is not None:
-            if not isinstance(self.image_width_cm, (int, float)) or self.image_width_cm <= 0:
+            if (
+                not isinstance(self.image_width_cm, (int, float))
+                or self.image_width_cm <= 0
+            ):
                 raise DataValidationError(
                     f"image_width_cm must be a positive number, got: {self.image_width_cm}",
                     field="image_width_cm",
-                    value=self.image_width_cm
+                    value=self.image_width_cm,
                 )
 
 
 @dataclass
 class CornerRecordConfig:
     """Configuration for creating corner records."""
+
     hole_id: str
     depth_from: int
     depth_to: int
@@ -290,51 +342,100 @@ class CornerRecordConfig:
     def validate(self) -> None:
         """Validate corner record configuration."""
         if not self.hole_id or not isinstance(self.hole_id, str):
-            raise DataValidationError("hole_id must be a non-empty string", field="hole_id", value=self.hole_id)
-        
+            raise DataValidationError(
+                "hole_id must be a non-empty string",
+                field="hole_id",
+                value=self.hole_id,
+            )
+
         if not isinstance(self.depth_from, int) or self.depth_from < 0:
-            raise DataValidationError("depth_from must be a non-negative integer", field="depth_from", value=self.depth_from)
-        
+            raise DataValidationError(
+                "depth_from must be a non-negative integer",
+                field="depth_from",
+                value=self.depth_from,
+            )
+
         if not isinstance(self.depth_to, int) or self.depth_to < 0:
-            raise DataValidationError("depth_to must be a non-negative integer", field="depth_to", value=self.depth_to)
-        
+            raise DataValidationError(
+                "depth_to must be a non-negative integer",
+                field="depth_to",
+                value=self.depth_to,
+            )
+
         if self.depth_to <= self.depth_from:
             raise DataValidationError(
                 f"depth_to ({self.depth_to}) must be greater than depth_from ({self.depth_from})",
                 field="depth_to",
-                value=self.depth_to
+                value=self.depth_to,
             )
-        
+
         if not self.original_filename or not isinstance(self.original_filename, str):
-            raise DataValidationError("original_filename must be a non-empty string", field="original_filename", value=self.original_filename)
-        
+            raise DataValidationError(
+                "original_filename must be a non-empty string",
+                field="original_filename",
+                value=self.original_filename,
+            )
+
         if not isinstance(self.compartment_num, int) or self.compartment_num < 1:
-            raise DataValidationError("compartment_num must be a positive integer", field="compartment_num", value=self.compartment_num)
-        
+            raise DataValidationError(
+                "compartment_num must be a positive integer",
+                field="compartment_num",
+                value=self.compartment_num,
+            )
+
         # Validate corners format
         if not isinstance(self.corners, list) or len(self.corners) != 4:
-            raise DataValidationError("corners must be a list of 4 coordinate pairs", field="corners", value=self.corners)
-        
+            raise DataValidationError(
+                "corners must be a list of 4 coordinate pairs",
+                field="corners",
+                value=self.corners,
+            )
+
         for i, corner in enumerate(self.corners):
             if not isinstance(corner, list) or len(corner) != 2:
-                raise DataValidationError(f"corner {i} must be a list of 2 coordinates", field=f"corners[{i}]", value=corner)
+                raise DataValidationError(
+                    f"corner {i} must be a list of 2 coordinates",
+                    field=f"corners[{i}]",
+                    value=corner,
+                )
             if not all(isinstance(coord, int) for coord in corner):
-                raise DataValidationError(f"corner {i} coordinates must be integers", field=f"corners[{i}]", value=corner)
-        
+                raise DataValidationError(
+                    f"corner {i} coordinates must be integers",
+                    field=f"corners[{i}]",
+                    value=corner,
+                )
+
         # Validate optional fields
         if self.scale_px_per_cm is not None:
-            if not isinstance(self.scale_px_per_cm, (int, float)) or self.scale_px_per_cm <= 0:
-                raise DataValidationError("scale_px_per_cm must be a positive number", field="scale_px_per_cm", value=self.scale_px_per_cm)
-        
+            if (
+                not isinstance(self.scale_px_per_cm, (int, float))
+                or self.scale_px_per_cm <= 0
+            ):
+                raise DataValidationError(
+                    "scale_px_per_cm must be a positive number",
+                    field="scale_px_per_cm",
+                    value=self.scale_px_per_cm,
+                )
+
         if self.scale_confidence is not None:
-            if not isinstance(self.scale_confidence, (int, float)) or not (0 <= self.scale_confidence <= 1):
-                raise DataValidationError("scale_confidence must be a number between 0 and 1", field="scale_confidence", value=self.scale_confidence)
-        
+            if not isinstance(self.scale_confidence, (int, float)) or not (
+                0 <= self.scale_confidence <= 1
+            ):
+                raise DataValidationError(
+                    "scale_confidence must be a number between 0 and 1",
+                    field="scale_confidence",
+                    value=self.scale_confidence,
+                )
+
         if self.processing_metadata is not None:
             try:
                 self.processing_metadata.validate()
             except DataValidationError as e:
-                raise DataValidationError(f"processing_metadata validation failed: {e}", field="processing_metadata", value=self.processing_metadata) from e
+                raise DataValidationError(
+                    f"processing_metadata validation failed: {e}",
+                    field="processing_metadata",
+                    value=self.processing_metadata,
+                ) from e
 
 
 class JSONRegisterManager:
@@ -352,6 +453,10 @@ class JSONRegisterManager:
     REVIEW_JSON_BASE = "compartment_reviews"
     COMPARTMENT_CORNERS_JSON_BASE = "compartment_corners"
 
+    # Shared register files (no user suffix - everyone uses same data)
+    IMAGE_PROPERTIES_JSON = "compartment_image_properties.json"
+    MISSING_TRAY_STATUS_JSON = "missing_tray_status.json"
+
     EXCEL_FILE = "Chip_Tray_Register.xlsx"
     DATA_SUBFOLDER = "Register Data (Do not edit)"
 
@@ -365,30 +470,27 @@ class JSONRegisterManager:
     @staticmethod
     def get_user_suffix() -> str:
         """
-        Get a unique suffix for this user/computer combination.
-        Uses username and computer name to create a readable identifier.
+        Get a unique suffix for this user.
+        Uses username only to ensure same user on different machines shares data.
 
         Returns:
-            String suffix like "_JohnDoe_DESKTOP123"
+            String suffix like "_JohnDoe"
         """
         try:
             username = os.getenv("USERNAME", "Unknown").replace(" ", "")
-            computername = socket.gethostname().replace(" ", "").replace("-", "")
 
             # Clean up any problematic characters
             username = "".join(c for c in username if c.isalnum() or c in "_-")
-            computername = "".join(c for c in computername if c.isalnum() or c in "_-")
 
             # Limit length to keep filenames reasonable
             username = username[:20]
-            computername = computername[:20]
 
-            return f"_{username}_{computername}"
+            return f"_{username}"
         except Exception:
-            # Fallback to a hash-based identifier if we can't get clean names
+            # Fallback to a hash-based identifier if we can't get clean username
             try:
-                unique_id = f"{os.getenv('USERNAME', 'user')}_{socket.gethostname()}"
-                short_hash = hashlib.md5(unique_id.encode()).hexdigest()[:8]
+                username = os.getenv("USERNAME", "user")
+                short_hash = hashlib.md5(username.encode()).hexdigest()[:8]
                 return f"_User{short_hash}"
             except Exception:
                 return "_DefaultUser"
@@ -607,7 +709,9 @@ class JSONRegisterManager:
         # Use structured logger if none provided
         if logger is None:
             try:
-                self.logger = setup_structured_logger("json_register_manager", str(base_path))
+                self.logger = setup_structured_logger(
+                    "json_register_manager", str(base_path)
+                )
             except Exception:
                 # Fallback to regular logger if structured logging fails
                 self.logger = logging.getLogger(__name__)
@@ -646,6 +750,10 @@ class JSONRegisterManager:
         self.original_lock = self.original_json_path.with_suffix(".json.lock")
         self.review_lock = self.review_json_path.with_suffix(".json.lock")
         self.corners_lock = self.compartment_corners_json_path.with_suffix(".json.lock")
+
+        # Shared (non-user-suffixed) paths
+        self.missing_tray_status_path = self.data_path / self.MISSING_TRAY_STATUS_JSON
+        self.missing_tray_status_lock = self.missing_tray_status_path.with_suffix(".json.lock")
 
         # Use RLock instead of Lock to prevent deadlocks from nested calls
         self._thread_lock = threading.RLock()
@@ -1017,7 +1125,7 @@ class JSONRegisterManager:
             raise LockAcquisitionError(
                 f"Could not acquire lock for {file_path}",
                 lock_path=str(lock_path),
-                timeout=30
+                timeout=30,
             )
 
         try:
@@ -1116,7 +1224,7 @@ class JSONRegisterManager:
             raise LockAcquisitionError(
                 f"Could not acquire lock for {file_path}",
                 lock_path=str(lock_path),
-                timeout=30
+                timeout=30,
             )
 
         try:
@@ -1125,9 +1233,9 @@ class JSONRegisterManager:
                 raise DataValidationError(
                     f"Data must be a list, got {type(data).__name__}",
                     field="data",
-                    value=type(data)
+                    value=type(data),
                 )
-            
+
             # Validate list contents if not empty
             if data:
                 for i, item in enumerate(data):
@@ -1135,7 +1243,7 @@ class JSONRegisterManager:
                         raise DataValidationError(
                             f"List item {i} must be a dict, got {type(item).__name__}",
                             field=f"data[{i}]",
-                            value=type(item)
+                            value=type(item),
                         )
 
             # Convert Path if needed
@@ -1149,7 +1257,7 @@ class JSONRegisterManager:
                 raise FileOperationError(
                     f"Cannot create directory: {str(e)}",
                     file_path=str(file_path.parent),
-                    operation="mkdir"
+                    operation="mkdir",
                 ) from e
 
             # Create backup if file exists and is valid
@@ -1159,45 +1267,40 @@ class JSONRegisterManager:
                     file_stats = file_path.stat()
                     if file_stats.st_size > 0:
                         backup_path = file_path.with_suffix(".json.backup")
-                        
+
                         # Verify existing file is valid JSON before backing up
                         try:
                             with open(file_path, "r", encoding="utf-8") as f:
                                 existing_data = json.load(f)
-                            
+
                             # Create backup
                             shutil.copy2(file_path, backup_path)
                             backup_created = True
-                            
+
                             self.logger.debug(
-                                "Created backup before write",
-                                file_path=str(file_path),
-                                backup_path=str(backup_path),
-                                original_size=file_stats.st_size
+                                f"Created backup before write - file_path: {file_path}, backup_path: {backup_path}, original_size: {file_stats.st_size}"
                             )
-                            
+
                         except json.JSONDecodeError:
                             self.logger.warning(
                                 "Existing file appears corrupted, proceeding without backup",
-                                file_path=str(file_path)
+                                file_path=str(file_path),
                             )
                         except Exception as backup_error:
                             self.logger.warning(
-                                "Could not create backup file",
-                                file_path=str(file_path),
-                                backup_error=str(backup_error)
+                                f"Could not create backup file - file_path: {file_path}, backup_error: {backup_error}"
                             )
-                            
+
                 except (OSError, PermissionError) as e:
                     self.logger.warning(
                         "Cannot access existing file for backup",
                         file_path=str(file_path),
-                        access_error=str(e)
+                        access_error=str(e),
                     )
 
             # Write to temporary file with atomic operation
             temp_path = file_path.with_suffix(".json.tmp")
-            
+
             try:
                 # Write data to temporary file
                 with open(temp_path, "w", encoding="utf-8") as f:
@@ -1214,24 +1317,24 @@ class JSONRegisterManager:
                 try:
                     with open(temp_path, "r", encoding="utf-8") as f:
                         verified_data = json.load(f)
-                    
+
                     # Validate structure matches expected
                     if not isinstance(verified_data, list):
                         raise DataCorruptionError(
                             "Temporary file validation failed: not a list",
-                            file_path=str(temp_path)
+                            file_path=str(temp_path),
                         )
-                    
+
                     if len(verified_data) != len(data):
                         raise DataCorruptionError(
                             f"Temporary file validation failed: length mismatch {len(verified_data)} != {len(data)}",
-                            file_path=str(temp_path)
+                            file_path=str(temp_path),
                         )
-                        
+
                 except json.JSONDecodeError as e:
                     raise DataCorruptionError(
                         f"Temporary file validation failed: {str(e)}",
-                        file_path=str(temp_path)
+                        file_path=str(temp_path),
                     ) from e
 
                 # Atomic move from temp to final location
@@ -1241,9 +1344,9 @@ class JSONRegisterManager:
                     raise FileOperationError(
                         f"Cannot move temporary file to final location: {str(e)}",
                         file_path=str(file_path),
-                        operation="atomic_move"
+                        operation="atomic_move",
                     ) from e
-                
+
                 self.logger.debug(
                     f"Successfully wrote JSON file: {file_path} (records: {len(data)}, backup: {backup_created})"
                 )
@@ -1257,18 +1360,23 @@ class JSONRegisterManager:
                     self.logger.warning(
                         f"Could not clean up temporary file {temp_path}: {cleanup_error}"
                     )
-                
+
                 # Re-raise the original error
                 raise temp_error
 
-        except (DataValidationError, DataCorruptionError, FileOperationError, LockAcquisitionError):
+        except (
+            DataValidationError,
+            DataCorruptionError,
+            FileOperationError,
+            LockAcquisitionError,
+        ):
             # Re-raise specific exceptions
             raise
         except (OSError, IOError, PermissionError) as e:
             raise FileOperationError(
                 f"File system error during write: {str(e)}",
                 file_path=str(file_path),
-                operation="write"
+                operation="write",
             ) from e
         except Exception as e:
             self.logger.error(
@@ -1277,7 +1385,7 @@ class JSONRegisterManager:
             raise FileOperationError(
                 f"Unexpected error writing JSON file: {str(e)}",
                 file_path=str(file_path),
-                operation="write"
+                operation="write",
             ) from e
 
         finally:
@@ -1340,9 +1448,9 @@ class JSONRegisterManager:
         scale_confidence: Optional[float] = None,
         compartment_data: Optional[Dict[str, List[List[int]]]] = None,
         transformation_matrix: Optional[List[List[float]]] = None,
-        cumulative_offset_y: Optional[float] = None,
+        cumulative_offset_y: Optional[float] = None,  # DEPRECATED - ignored
         transformation_applied: Optional[bool] = None,
-        transform_center: Optional[List[float]] = None,
+        transform_center: Optional[List[float]] = None,  # DEPRECATED - ignored
         uid: Optional[str] = None,
         final_filename: Optional[str] = None,
         is_rejected: Optional[bool] = None,
@@ -1366,6 +1474,8 @@ class JSONRegisterManager:
             compartment_data: Dict with compartment numbers as keys, values are corner coordinates
                             in compact format [[TL], [TR], [BR], [BL]]
                             e.g. {"1": [[0,0], [100,0], [100,100], [0,100]], "2": [...]}
+            cumulative_offset_y: DEPRECATED - kept for backwards compatibility, ignored
+            transform_center: DEPRECATED - kept for backwards compatibility, ignored
         """
         with self._thread_lock:
             try:
@@ -1470,16 +1580,11 @@ class JSONRegisterManager:
                                     and len(transformation_matrix[1]) > 2
                                 ):
                                     cumulative_offset_y = transformation_matrix[1][2]
-                            if cumulative_offset_y is not None:
-                                original_data[i][
-                                    "Cumulative_Offset_Y"
-                                ] = cumulative_offset_y
+                            # Note: Cumulative_Offset_Y and Transform_Center removed (dead fields)
                             if transformation_applied is not None:
                                 original_data[i][
                                     "Transformation_Applied"
                                 ] = transformation_applied
-                            if transform_center is not None:
-                                original_data[i]["Transform_Center"] = transform_center
 
                             break
                         # Fall back to original matching for backward compatibility
@@ -1521,20 +1626,15 @@ class JSONRegisterManager:
                                 ] = total_rotation_angle
 
                             # Add transformation data if provided
+                            # Note: Cumulative_Offset_Y and Transform_Center removed (dead fields)
                             if transformation_matrix is not None:
                                 original_data[i][
                                     "Transformation_Matrix"
                                 ] = transformation_matrix
-                            if cumulative_offset_y is not None:
-                                original_data[i][
-                                    "Cumulative_Offset_Y"
-                                ] = cumulative_offset_y
                             if transformation_applied is not None:
                                 original_data[i][
                                     "Transformation_Applied"
                                 ] = transformation_applied
-                            if transform_center is not None:
-                                original_data[i]["Transform_Center"] = transform_center
 
                             break
 
@@ -1573,6 +1673,7 @@ class JSONRegisterManager:
                             new_record["Total_Rotation_Angle"] = total_rotation_angle
 
                         # Add transformation data - always include defaults
+                        # Note: Cumulative_Offset_Y and Transform_Center removed (dead/unused fields)
                         if transformation_matrix is not None:
                             new_record["Transformation_Matrix"] = transformation_matrix
                         else:
@@ -1581,30 +1682,12 @@ class JSONRegisterManager:
                                 [0.0, 1.0, 0.0],
                             ]
 
-                        if cumulative_offset_y is not None:
-                            new_record["Cumulative_Offset_Y"] = cumulative_offset_y
-                        elif (
-                            transformation_matrix is not None
-                            and len(transformation_matrix) > 1
-                        ):
-                            # Extract from transformation matrix if available
-                            new_record["Cumulative_Offset_Y"] = transformation_matrix[
-                                1
-                            ][2]
-                        else:
-                            new_record["Cumulative_Offset_Y"] = 0.0
-
                         if transformation_applied is not None:
                             new_record["Transformation_Applied"] = (
                                 transformation_applied
                             )
                         else:
                             new_record["Transformation_Applied"] = False
-
-                        if transform_center is not None:
-                            new_record["Transform_Center"] = transform_center
-                        else:
-                            new_record["Transform_Center"] = [0.0, 0.0]
 
                         original_data.append(new_record)
 
@@ -1626,19 +1709,25 @@ class JSONRegisterManager:
                         for comp_num, corners in compartment_data.items():
                             if isinstance(corners, list) and len(corners) == 4:
                                 # Create default processing metadata for new corners
-                                processing_metadata = CompartmentProcessingMetadata.create_default("For Review")
-                                
-                                corner_record = self._create_corner_record_with_processing(
-                                    hole_id=hole_id,
-                                    depth_from=depth_from,
-                                    depth_to=depth_to,
-                                    original_filename=original_filename,
-                                    compartment_num=int(comp_num),
-                                    corners=corners,
-                                    processing_metadata=processing_metadata,
-                                    scale_px_per_cm=scale_px_per_cm,
-                                    scale_confidence=scale_confidence,
-                                    source_image_uid=uid
+                                processing_metadata = (
+                                    CompartmentProcessingMetadata.create_default(
+                                        "For Review"
+                                    )
+                                )
+
+                                corner_record = (
+                                    self._create_corner_record_with_processing(
+                                        hole_id=hole_id,
+                                        depth_from=depth_from,
+                                        depth_to=depth_to,
+                                        original_filename=original_filename,
+                                        compartment_num=int(comp_num),
+                                        corners=corners,
+                                        processing_metadata=processing_metadata,
+                                        scale_px_per_cm=scale_px_per_cm,
+                                        scale_confidence=scale_confidence,
+                                        source_image_uid=uid,
+                                    )
                                 )
 
                                 corners_data.append(corner_record)
@@ -1783,28 +1872,179 @@ class JSONRegisterManager:
                 self.logger.error(f"Error getting record by UID: {e}")
                 return None
 
+    def get_all_corners_by_source_uid(self, uid: str) -> List[Dict[str, Any]]:
+        """
+        Get all compartment corners for a source image by UID.
+
+        Args:
+            uid: Source image UID
+
+        Returns:
+            List of corner records with compartment number, coordinates, and status
+        """
+        with self._thread_lock:
+            try:
+                data = self._read_json_file(
+                    self.compartment_corners_json_path, self.corners_lock
+                )
+
+                results = []
+                for record in data:
+                    if record.get("Source_Image_UID") == uid:
+                        results.append(record.copy())
+
+                # Sort by compartment number
+                results.sort(key=lambda x: x.get("Compartment_Number", 0))
+                return results
+
+            except Exception as e:
+                self.logger.error(f"Error getting corners by source UID: {e}")
+                return []
+
+    def get_compartments_by_source_uid(self, uid: str) -> List[Dict[str, Any]]:
+        """
+        Get all compartment records for a source image by UID.
+
+        Args:
+            uid: Source image UID
+
+        Returns:
+            List of compartment records with Photo_Status and metadata
+        """
+        with self._thread_lock:
+            try:
+                data = self._read_json_file(
+                    self.compartment_json_path, self.compartment_lock
+                )
+
+                results = []
+                for record in data:
+                    if record.get("Source_Image_UID") == uid:
+                        results.append(record.copy())
+
+                # Sort by depth
+                results.sort(key=lambda x: x.get("From", 0))
+                return results
+
+            except Exception as e:
+                self.logger.error(f"Error getting compartments by source UID: {e}")
+                return []
+
+    def get_compartment_wet_dry_status(
+        self, hole_id: str, depth: int, source_uid: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Get the wet/dry status for a compartment from existing approved files.
+
+        Args:
+            hole_id: Hole identifier
+            depth: Compartment depth
+            source_uid: Optional source image UID to filter
+
+        Returns:
+            "Wet", "Dry", or None if not found/classified
+        """
+        with self._thread_lock:
+            try:
+                data = self._read_json_file(
+                    self.compartment_json_path, self.compartment_lock
+                )
+
+                for record in data:
+                    if record.get("HoleID") == hole_id and record.get("From") == depth:
+                        # If source_uid specified, must match
+                        if source_uid and record.get("Source_Image_UID") != source_uid:
+                            continue
+
+                        # Check if approved and has wet/dry in filename or status
+                        photo_status = record.get("Photo_Status", "")
+                        if photo_status == "Approved":
+                            # Check for Wet/Dry suffix in any stored filename
+                            filename = record.get("Final_Filename", "")
+                            if "_Wet" in filename:
+                                return "Wet"
+                            elif "_Dry" in filename:
+                                return "Dry"
+
+                            # Also check Moisture_Status field if present
+                            moisture = record.get("Moisture_Status")
+                            if moisture in ("Wet", "Dry"):
+                                return moisture
+
+                return None
+
+            except Exception as e:
+                self.logger.error(f"Error getting wet/dry status: {e}")
+                return None
+
+    def clean_empty_reviews(self):
+        """Remove reviews with no classification and no comments"""
+        try:
+            with self._get_lock(self.review_json_path):
+                # Load existing data
+                with open(self.review_json_path, "r") as f:
+                    data = json.load(f)
+
+                original_count = len(data.get("reviews", []))
+
+                # Filter out empty reviews
+                cleaned_reviews = []
+                for review in data.get("reviews", []):
+                    # Check for any classification field
+                    has_classification = any(
+                        review.get(field)
+                        for field in ["Classification", "Lithology", "Rock_Type"]
+                    )
+                    has_comments = bool(review.get("Comments"))
+
+                    # Keep if has either classification or comments
+                    if has_classification or has_comments:
+                        cleaned_reviews.append(review)
+
+                # Update data
+                data["reviews"] = cleaned_reviews
+                removed_count = original_count - len(cleaned_reviews)
+
+                if removed_count > 0:
+                    # Save cleaned data
+                    with open(self.review_json_path, "w") as f:
+                        json.dump(data, f, indent=2)
+
+                    self.logger.info(
+                        f"Cleaned {removed_count} empty reviews from register"
+                    )
+                    return removed_count
+
+                return 0
+
+        except Exception as e:
+            self.logger.error(f"Error cleaning empty reviews: {e}")
+            return 0
+
     # === Modular Corner Processing Functions ===
-    
-    def _ensure_corner_processing_fields(self, corner_record: Dict[str, Any]) -> Dict[str, Any]:
+
+    def _ensure_corner_processing_fields(
+        self, corner_record: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
         Ensure corner record has all required processing metadata fields with defaults.
         Maintains backward compatibility with existing corner records.
-        
+
         Args:
             corner_record: Existing corner record dictionary
-            
+
         Returns:
             Corner record with all processing fields ensured
         """
         defaults = CompartmentProcessingMetadata.create_default("For Review").to_dict()
-        
+
         # Add missing processing fields with defaults
         for field, default_value in defaults.items():
             if field not in corner_record:
                 corner_record[field] = default_value
-                
+
         return corner_record
-    
+
     def _create_corner_record_with_processing(
         self,
         hole_id: str,
@@ -1814,13 +2054,17 @@ class JSONRegisterManager:
         compartment_num: int,
         corners: List[List[int]],
         processing_metadata: Optional[CompartmentProcessingMetadata] = None,
-        scale_px_per_cm: Optional[float] = None,
-        scale_confidence: Optional[float] = None,
-        source_image_uid: Optional[str] = None
+        scale_px_per_cm: Optional[float] = None,  # Deprecated - ignored
+        scale_confidence: Optional[float] = None,  # Deprecated - ignored
+        source_image_uid: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create a complete corner record with coordinate and processing data.
-        
+
+        Note: Scale data (scale_px_per_cm, scale_confidence) is now stored only in
+        original_images_register to avoid duplication. These parameters are kept
+        for backwards compatibility but are ignored.
+
         Args:
             hole_id: Hole identifier
             depth_from: Starting depth
@@ -1829,16 +2073,18 @@ class JSONRegisterManager:
             compartment_num: Compartment number
             corners: Corner coordinates [[TL], [TR], [BR], [BL]]
             processing_metadata: Processing metadata or None for defaults
-            scale_px_per_cm: Scale in pixels per cm
-            scale_confidence: Scale detection confidence
+            scale_px_per_cm: DEPRECATED - Scale stored in original_images only
+            scale_confidence: DEPRECATED - Scale stored in original_images only
             source_image_uid: Source image UID
-            
+
         Returns:
-            Complete corner record dictionary
+            Complete corner record dictionary (without Photo_Status or Scale data)
         """
         if processing_metadata is None:
-            processing_metadata = CompartmentProcessingMetadata.create_default("For Review")
-            
+            processing_metadata = CompartmentProcessingMetadata.create_default(
+                "For Review"
+            )
+
         # Core coordinate data
         corner_record = {
             "HoleID": hole_id,
@@ -1855,20 +2101,19 @@ class JSONRegisterManager:
             "Bottom_Left_X": corners[3][0],
             "Bottom_Left_Y": corners[3][1],
         }
-        
-        # Add processing metadata
-        corner_record.update(processing_metadata.to_dict())
-        
-        # Add optional scale data
-        if scale_px_per_cm is not None:
-            corner_record["Scale_PxPerCm"] = scale_px_per_cm
-        if scale_confidence is not None:
-            corner_record["Scale_Confidence"] = scale_confidence
+
+        # Add only relevant processing metadata (NOT Photo_Status - that belongs in compartment_register)
+        # Photo_Status, Image_Width_Cm belong in compartment_register, not corners
+        corner_record["Processed_Date"] = processing_metadata.processed_date
+        corner_record["Processed_By"] = processing_metadata.processed_by
+        corner_record["Comments"] = processing_metadata.comments
+
+        # Add source image UID for linking to original image
         if source_image_uid is not None:
             corner_record["Source_Image_UID"] = source_image_uid
-            
+
         return corner_record
-    
+
     def update_corner_processing_metadata(
         self,
         hole_id: str,
@@ -1876,12 +2121,12 @@ class JSONRegisterManager:
         depth_to: int,
         original_filename: str,
         compartment_num: int,
-        processing_metadata: CompartmentProcessingMetadata
+        processing_metadata: CompartmentProcessingMetadata,
     ) -> bool:
         """
         Update processing metadata for a specific corner record.
         Preserves coordinate and scale data while updating processing fields.
-        
+
         Args:
             hole_id: Hole identifier
             depth_from: Starting depth
@@ -1889,10 +2134,10 @@ class JSONRegisterManager:
             original_filename: Original image filename
             compartment_num: Compartment number
             processing_metadata: New processing metadata
-            
+
         Returns:
             True if update successful
-            
+
         Raises:
             DataValidationError: If input parameters are invalid
             RecordNotFoundError: If the specified record cannot be found
@@ -1900,7 +2145,7 @@ class JSONRegisterManager:
         """
         operation_id = str(uuid.uuid4())[:8]
         record_key = f"{hole_id}_{depth_from}-{depth_to}_comp{compartment_num}"
-        
+
         # Structured logging with context
         log_context = {
             "operation": "update_corner_processing_metadata",
@@ -1910,52 +2155,64 @@ class JSONRegisterManager:
             "depth_to": depth_to,
             "original_filename": original_filename,
             "compartment_num": compartment_num,
-            "record_key": record_key
+            "record_key": record_key,
         }
-        
+
         self.logger.info("Starting corner processing metadata update", **log_context)
-        
+
         # Input validation
         try:
             if not hole_id or not isinstance(hole_id, str):
-                raise DataValidationError("hole_id must be a non-empty string", field="hole_id", value=hole_id)
-            
+                raise DataValidationError(
+                    "hole_id must be a non-empty string", field="hole_id", value=hole_id
+                )
+
             depth_from = int(depth_from)
             depth_to = int(depth_to)
             compartment_num = int(compartment_num)
-            
+
             if depth_from < 0 or depth_to < 0:
-                raise DataValidationError("Depth values must be non-negative", field="depth", value=(depth_from, depth_to))
-            
+                raise DataValidationError(
+                    "Depth values must be non-negative",
+                    field="depth",
+                    value=(depth_from, depth_to),
+                )
+
             if not original_filename or not isinstance(original_filename, str):
-                raise DataValidationError("original_filename must be a non-empty string", field="original_filename", value=original_filename)
-                
+                raise DataValidationError(
+                    "original_filename must be a non-empty string",
+                    field="original_filename",
+                    value=original_filename,
+                )
+
             # Validate processing metadata
             processing_metadata.validate()
-            
+
         except (ValueError, TypeError) as e:
-            raise DataValidationError(f"Invalid input parameters: {str(e)}", field="input_validation") from e
-        
+            raise DataValidationError(
+                f"Invalid input parameters: {str(e)}", field="input_validation"
+            ) from e
+
         with self._thread_lock:
             try:
                 # Read current data with error handling
                 data = self._read_json_file(
                     self.compartment_corners_json_path, self.corners_lock
                 )
-                
+
                 if not isinstance(data, list):
                     raise DataCorruptionError(
                         f"Expected list data structure, got {type(data)}",
-                        file_path=str(self.compartment_corners_json_path)
+                        file_path=str(self.compartment_corners_json_path),
                     )
-                
+
                 # Create backup before modification
                 original_data = [record.copy() for record in data]
-                
+
                 # Find and update the record
                 target_record = None
                 record_index = None
-                
+
                 for i, record in enumerate(data):
                     if (
                         record.get("HoleID") == hole_id
@@ -1967,171 +2224,191 @@ class JSONRegisterManager:
                         target_record = record
                         record_index = i
                         break
-                
+
                 if target_record is None:
                     raise RecordNotFoundError(
-                        f"Corner record not found: {record_key}",
-                        record_key=record_key
+                        f"Corner record not found: {record_key}", record_key=record_key
                     )
-                
+
                 # Preserve existing coordinate data before update
                 preserved_fields = {}
                 coordinate_fields = [
-                    "Top_Left_X", "Top_Left_Y", "Top_Right_X", "Top_Right_Y",
-                    "Bottom_Right_X", "Bottom_Right_Y", "Bottom_Left_X", "Bottom_Left_Y"
+                    "Top_Left_X",
+                    "Top_Left_Y",
+                    "Top_Right_X",
+                    "Top_Right_Y",
+                    "Bottom_Right_X",
+                    "Bottom_Right_Y",
+                    "Bottom_Left_X",
+                    "Bottom_Left_Y",
                 ]
                 for field in coordinate_fields:
                     if field in target_record:
                         preserved_fields[field] = target_record[field]
-                
+
                 # Update processing metadata
                 data[record_index].update(processing_metadata.to_dict())
-                
+
                 # Restore preserved coordinate fields
                 data[record_index].update(preserved_fields)
-                
+
                 # Write updated data with rollback capability
                 try:
                     self._write_json_file(
                         self.compartment_corners_json_path, self.corners_lock, data
                     )
-                    
+
                     self.logger.info(
                         "Successfully updated corner processing metadata",
                         record_updated=True,
-                        **log_context
+                        **log_context,
                     )
                     return True
-                    
+
                 except (OSError, IOError, PermissionError) as e:
                     # Rollback data on write failure
                     try:
                         self._write_json_file(
-                            self.compartment_corners_json_path, self.corners_lock, original_data
+                            self.compartment_corners_json_path,
+                            self.corners_lock,
+                            original_data,
                         )
-                        self.logger.warning("Rolled back data after write failure", **log_context)
+                        self.logger.warning(
+                            "Rolled back data after write failure", **log_context
+                        )
                     except Exception as rollback_error:
                         self.logger.error(
                             "Critical: Failed to rollback data after write failure",
                             rollback_error=str(rollback_error),
-                            **log_context
+                            **log_context,
                         )
-                    
+
                     raise FileOperationError(
                         f"Failed to write updated corner data: {str(e)}",
                         file_path=str(self.compartment_corners_json_path),
-                        operation="write"
+                        operation="write",
                     ) from e
-                    
+
             except (DataCorruptionError, RecordNotFoundError, FileOperationError):
                 # Re-raise specific exceptions with context
                 raise
             except json.JSONDecodeError as e:
                 raise DataCorruptionError(
                     f"JSON data corruption detected: {str(e)}",
-                    file_path=str(self.compartment_corners_json_path)
+                    file_path=str(self.compartment_corners_json_path),
                 ) from e
             except Exception as e:
                 self.logger.error(
                     "Unexpected error during corner processing metadata update",
                     error=str(e),
                     error_type=type(e).__name__,
-                    **log_context
+                    **log_context,
                 )
                 raise FileOperationError(
                     f"Unexpected error updating corner processing metadata: {str(e)}",
-                    operation="update_corner_processing_metadata"
+                    operation="update_corner_processing_metadata",
                 ) from e
-    
+
     def batch_update_corner_processing_metadata(
-        self,
-        updates: List[Dict[str, Any]]
+        self, updates: List[Dict[str, Any]]
     ) -> int:
         """
         Batch update processing metadata for multiple corner records.
-        
+
         Args:
             updates: List of update dictionaries with keys:
                 - hole_id, depth_from, depth_to, original_filename, compartment_num
                 - processing_metadata: CompartmentProcessingMetadata instance
-                
+
         Returns:
             Number of successfully updated records
-            
+
         Raises:
             DataValidationError: If update data is invalid
             FileOperationError: If file operations fail
         """
         operation_id = str(uuid.uuid4())[:8]
-        
+
         log_context = {
-            "operation": "batch_update_corner_processing_metadata", 
+            "operation": "batch_update_corner_processing_metadata",
             "operation_id": operation_id,
-            "batch_size": len(updates) if updates else 0
+            "batch_size": len(updates) if updates else 0,
         }
-        
-        self.logger.info("Starting batch corner processing metadata update", **log_context)
-        
+
+        self.logger.info(
+            "Starting batch corner processing metadata update", **log_context
+        )
+
         # Input validation
         if not isinstance(updates, list):
-            raise DataValidationError("updates must be a list", field="updates", value=type(updates))
-        
+            raise DataValidationError(
+                "updates must be a list", field="updates", value=type(updates)
+            )
+
         if not updates:
             self.logger.warning("Empty updates list provided", **log_context)
             return 0
-        
+
         successful_updates = 0
         failed_updates = []
-        
+
         # Validate all updates before processing
         validated_updates = []
         for i, update in enumerate(updates):
             try:
                 # Validate update structure
-                required_keys = ["hole_id", "depth_from", "depth_to", "original_filename", "compartment_num", "processing_metadata"]
+                required_keys = [
+                    "hole_id",
+                    "depth_from",
+                    "depth_to",
+                    "original_filename",
+                    "compartment_num",
+                    "processing_metadata",
+                ]
                 missing_keys = [key for key in required_keys if key not in update]
                 if missing_keys:
-                    raise DataValidationError(f"Missing required keys: {missing_keys}", field=f"updates[{i}]")
-                
+                    raise DataValidationError(
+                        f"Missing required keys: {missing_keys}", field=f"updates[{i}]"
+                    )
+
                 # Validate and normalize data types
                 normalized_update = {
                     "hole_id": str(update["hole_id"]),
                     "depth_from": int(update["depth_from"]),
-                    "depth_to": int(update["depth_to"]), 
+                    "depth_to": int(update["depth_to"]),
                     "original_filename": str(update["original_filename"]),
                     "compartment_num": int(update["compartment_num"]),
-                    "processing_metadata": update["processing_metadata"]
+                    "processing_metadata": update["processing_metadata"],
                 }
-                
+
                 # Validate processing metadata
-                if not isinstance(normalized_update["processing_metadata"], CompartmentProcessingMetadata):
+                if not isinstance(
+                    normalized_update["processing_metadata"],
+                    CompartmentProcessingMetadata,
+                ):
                     raise DataValidationError(
                         f"processing_metadata must be CompartmentProcessingMetadata instance",
-                        field=f"updates[{i}].processing_metadata"
+                        field=f"updates[{i}].processing_metadata",
                     )
-                
+
                 normalized_update["processing_metadata"].validate()
                 validated_updates.append(normalized_update)
-                
+
             except (ValueError, TypeError, DataValidationError) as e:
-                failed_updates.append({
-                    "index": i,
-                    "update": update,
-                    "error": str(e)
-                })
+                failed_updates.append({"index": i, "update": update, "error": str(e)})
                 self.logger.warning(
                     f"Validation failed for update {i}",
                     update_index=i,
                     validation_error=str(e),
-                    **log_context
+                    **log_context,
                 )
-        
+
         if not validated_updates:
             raise DataValidationError(
                 f"No valid updates found. {len(failed_updates)} validation failures.",
-                field="updates"
+                field="updates",
             )
-        
+
         with self._thread_lock:
             transaction_data = None
             try:
@@ -2139,16 +2416,16 @@ class JSONRegisterManager:
                 data = self._read_json_file(
                     self.compartment_corners_json_path, self.corners_lock
                 )
-                
+
                 if not isinstance(data, list):
                     raise DataCorruptionError(
                         f"Expected list data structure, got {type(data)}",
-                        file_path=str(self.compartment_corners_json_path)
+                        file_path=str(self.compartment_corners_json_path),
                     )
-                
+
                 # Create backup for rollback
                 transaction_data = [record.copy() for record in data]
-                
+
                 # Create lookup for efficient updates
                 record_lookup = {}
                 for i, record in enumerate(data):
@@ -2158,16 +2435,16 @@ class JSONRegisterManager:
                             record.get("Depth_From"),
                             record.get("Depth_To"),
                             record.get("Original_Filename"),
-                            record.get("Compartment_Number")
+                            record.get("Compartment_Number"),
                         )
                         record_lookup[key] = i
                     except KeyError as e:
                         self.logger.warning(
                             f"Skipping malformed record {i}: missing key {e}",
                             record_index=i,
-                            **log_context
+                            **log_context,
                         )
-                
+
                 # Apply validated updates with individual error handling
                 for update in validated_updates:
                     try:
@@ -2176,100 +2453,111 @@ class JSONRegisterManager:
                             update["depth_from"],
                             update["depth_to"],
                             update["original_filename"],
-                            update["compartment_num"]
+                            update["compartment_num"],
                         )
-                        
+
                         if key in record_lookup:
                             record_index = record_lookup[key]
-                            
+
                             # Preserve coordinate data before update
                             coordinate_fields = [
-                                "Top_Left_X", "Top_Left_Y", "Top_Right_X", "Top_Right_Y",
-                                "Bottom_Right_X", "Bottom_Right_Y", "Bottom_Left_X", "Bottom_Left_Y"
+                                "Top_Left_X",
+                                "Top_Left_Y",
+                                "Top_Right_X",
+                                "Top_Right_Y",
+                                "Bottom_Right_X",
+                                "Bottom_Right_Y",
+                                "Bottom_Left_X",
+                                "Bottom_Left_Y",
                             ]
                             preserved_fields = {
                                 field: data[record_index].get(field)
                                 for field in coordinate_fields
                                 if field in data[record_index]
                             }
-                            
+
                             # Apply update
-                            data[record_index].update(update["processing_metadata"].to_dict())
-                            
+                            data[record_index].update(
+                                update["processing_metadata"].to_dict()
+                            )
+
                             # Restore preserved fields
                             data[record_index].update(preserved_fields)
-                            
+
                             successful_updates += 1
                         else:
-                            failed_updates.append({
-                                "update": update,
-                                "error": f"Record not found: {key}"
-                            })
-                            
+                            failed_updates.append(
+                                {"update": update, "error": f"Record not found: {key}"}
+                            )
+
                     except Exception as e:
-                        failed_updates.append({
-                            "update": update,
-                            "error": f"Update failed: {str(e)}"
-                        })
+                        failed_updates.append(
+                            {"update": update, "error": f"Update failed: {str(e)}"}
+                        )
                         self.logger.warning(
                             f"Individual update failed",
                             update_key=key,
                             update_error=str(e),
-                            **log_context
+                            **log_context,
                         )
-                
+
                 # Write updates if any were successful
                 if successful_updates > 0:
                     try:
                         self._write_json_file(
                             self.compartment_corners_json_path, self.corners_lock, data
                         )
-                        
+
                         self.logger.info(
                             "Batch update completed successfully",
                             successful_updates=successful_updates,
                             failed_updates=len(failed_updates),
-                            **log_context
+                            **log_context,
                         )
-                        
+
                     except (OSError, IOError, PermissionError) as e:
                         # Rollback on write failure
                         if transaction_data:
                             try:
                                 self._write_json_file(
-                                    self.compartment_corners_json_path, self.corners_lock, transaction_data
+                                    self.compartment_corners_json_path,
+                                    self.corners_lock,
+                                    transaction_data,
                                 )
-                                self.logger.warning("Rolled back batch update after write failure", **log_context)
+                                self.logger.warning(
+                                    "Rolled back batch update after write failure",
+                                    **log_context,
+                                )
                             except Exception as rollback_error:
                                 self.logger.error(
                                     "Critical: Failed to rollback batch update",
                                     rollback_error=str(rollback_error),
-                                    **log_context
+                                    **log_context,
                                 )
-                        
+
                         raise FileOperationError(
                             f"Failed to write batch corner updates: {str(e)}",
                             file_path=str(self.compartment_corners_json_path),
-                            operation="batch_write"
+                            operation="batch_write",
                         ) from e
-                
+
                 # Log any failed updates
                 if failed_updates:
                     self.logger.warning(
                         f"Batch update had {len(failed_updates)} failures",
                         failed_updates=failed_updates,
-                        **log_context
+                        **log_context,
                     )
-                
+
                 return successful_updates
-                
+
             except (DataCorruptionError, FileOperationError):
                 # Re-raise specific exceptions
                 raise
             except json.JSONDecodeError as e:
                 raise DataCorruptionError(
                     f"JSON data corruption during batch update: {str(e)}",
-                    file_path=str(self.compartment_corners_json_path)
+                    file_path=str(self.compartment_corners_json_path),
                 ) from e
             except Exception as e:
                 self.logger.error(
@@ -2277,31 +2565,31 @@ class JSONRegisterManager:
                     error=str(e),
                     error_type=type(e).__name__,
                     successful_updates=successful_updates,
-                    **log_context
+                    **log_context,
                 )
                 raise FileOperationError(
                     f"Unexpected error in batch corner processing update: {str(e)}",
-                    operation="batch_update_corner_processing_metadata"
+                    operation="batch_update_corner_processing_metadata",
                 ) from e
-    
+
     def get_corner_processing_metadata(
         self,
         hole_id: str,
         depth_from: int,
         depth_to: int,
         original_filename: str,
-        compartment_num: int
+        compartment_num: int,
     ) -> Optional[CompartmentProcessingMetadata]:
         """
         Get processing metadata for a specific corner record.
-        
+
         Args:
             hole_id: Hole identifier
             depth_from: Starting depth
             depth_to: Ending depth
             original_filename: Original image filename
             compartment_num: Compartment number
-            
+
         Returns:
             CompartmentProcessingMetadata instance or None if not found
         """
@@ -2310,11 +2598,11 @@ class JSONRegisterManager:
                 data = self._read_json_file(
                     self.compartment_corners_json_path, self.corners_lock
                 )
-                
+
                 depth_from = int(depth_from)
                 depth_to = int(depth_to)
                 compartment_num = int(compartment_num)
-                
+
                 for record in data:
                     if (
                         record["HoleID"] == hole_id
@@ -2324,9 +2612,9 @@ class JSONRegisterManager:
                         and record["Compartment_Number"] == compartment_num
                     ):
                         return CompartmentProcessingMetadata.from_dict(record)
-                
+
                 return None
-                
+
             except Exception as e:
                 self.logger.error(f"Error getting corner processing metadata: {e}")
                 return None
@@ -2334,7 +2622,7 @@ class JSONRegisterManager:
     def validate_corner_data_consistency(self) -> Dict[str, Any]:
         """
         Validate consistency between corner coordinates and processing metadata.
-        
+
         Returns:
             Dictionary with validation results and statistics
         """
@@ -2344,55 +2632,81 @@ class JSONRegisterManager:
             "records_with_processing_metadata": 0,
             "records_missing_processing_fields": 0,
             "consistency_issues": [],
-            "validation_passed": True
+            "validation_passed": True,
         }
-        
+
         with self._thread_lock:
             try:
                 data = self._read_json_file(
                     self.compartment_corners_json_path, self.corners_lock
                 )
-                
+
                 required_coordinate_fields = [
-                    "Top_Left_X", "Top_Left_Y", "Top_Right_X", "Top_Right_Y",
-                    "Bottom_Right_X", "Bottom_Right_Y", "Bottom_Left_X", "Bottom_Left_Y"
+                    "Top_Left_X",
+                    "Top_Left_Y",
+                    "Top_Right_X",
+                    "Top_Right_Y",
+                    "Bottom_Right_X",
+                    "Bottom_Right_Y",
+                    "Bottom_Left_X",
+                    "Bottom_Left_Y",
                 ]
-                
+
                 required_processing_fields = [
-                    "Photo_Status", "Processed_Date", "Processed_By", "Comments", "Image_Width_Cm"
+                    "Photo_Status",
+                    "Processed_Date",
+                    "Processed_By",
+                    "Comments",
+                    "Image_Width_Cm",
                 ]
-                
+
                 validation_results["total_records"] = len(data)
-                
+
                 for i, record in enumerate(data):
                     record_id = f"{record.get('HoleID', 'Unknown')}_{record.get('Depth_From', 'Unknown')}-{record.get('Depth_To', 'Unknown')}_comp{record.get('Compartment_Number', 'Unknown')}"
-                    
+
                     # Check coordinate fields
-                    has_coordinates = all(field in record for field in required_coordinate_fields)
+                    has_coordinates = all(
+                        field in record for field in required_coordinate_fields
+                    )
                     if has_coordinates:
                         validation_results["records_with_coordinates"] += 1
                     else:
-                        missing_coord_fields = [field for field in required_coordinate_fields if field not in record]
-                        validation_results["consistency_issues"].append({
-                            "record_id": record_id,
-                            "issue": "missing_coordinate_fields",
-                            "missing_fields": missing_coord_fields
-                        })
+                        missing_coord_fields = [
+                            field
+                            for field in required_coordinate_fields
+                            if field not in record
+                        ]
+                        validation_results["consistency_issues"].append(
+                            {
+                                "record_id": record_id,
+                                "issue": "missing_coordinate_fields",
+                                "missing_fields": missing_coord_fields,
+                            }
+                        )
                         validation_results["validation_passed"] = False
-                    
+
                     # Check processing metadata fields
-                    has_processing = all(field in record for field in required_processing_fields)
+                    has_processing = all(
+                        field in record for field in required_processing_fields
+                    )
                     if has_processing:
                         validation_results["records_with_processing_metadata"] += 1
                     else:
-                        missing_proc_fields = [field for field in required_processing_fields if field not in record]
+                        missing_proc_fields = [
+                            field
+                            for field in required_processing_fields
+                            if field not in record
+                        ]
                         validation_results["records_missing_processing_fields"] += 1
-                        validation_results["consistency_issues"].append({
-                            "record_id": record_id,
-                            "issue": "missing_processing_fields",
-                            "missing_fields": missing_proc_fields
-                        })
-                
+                        validation_results["consistency_issues"].append(
+                            {
+                                "record_id": record_id,
+                                "issue": "missing_processing_fields",
+                                "missing_fields": missing_proc_fields,
+                            }
+                        )
+
                 # Log validation summary
                 self.logger.info(
                     f"Corner data validation: {validation_results['total_records']} total records, "
@@ -2400,20 +2714,24 @@ class JSONRegisterManager:
                     f"{validation_results['records_with_processing_metadata']} with processing metadata, "
                     f"{validation_results['records_missing_processing_fields']} missing processing fields"
                 )
-                
+
                 if not validation_results["validation_passed"]:
-                    self.logger.warning(f"Corner data validation found {len(validation_results['consistency_issues'])} issues")
-                
+                    self.logger.warning(
+                        f"Corner data validation found {len(validation_results['consistency_issues'])} issues"
+                    )
+
                 return validation_results
-                
+
             except Exception as e:
                 self.logger.error(f"Error during corner data validation: {e}")
                 validation_results["validation_passed"] = False
-                validation_results["consistency_issues"].append({
-                    "record_id": "VALIDATION_ERROR",
-                    "issue": "validation_exception",
-                    "error": str(e)
-                })
+                validation_results["consistency_issues"].append(
+                    {
+                        "record_id": "VALIDATION_ERROR",
+                        "issue": "validation_exception",
+                        "error": str(e),
+                    }
+                )
                 return validation_results
 
     def get_compartment_corners_from_image(
@@ -2922,6 +3240,7 @@ class JSONRegisterManager:
         reviewed_by: Optional[str] = None,
         comments: Optional[str] = None,
         review_number: Optional[int] = None,
+        compartment_uid: Optional[str] = None,  # Add UID parameter
         **kwargs,
     ) -> bool:
         """
@@ -2972,7 +3291,7 @@ class JSONRegisterManager:
                         break
 
                 if existing_index is not None:
-                    # Update existing review - preserve all existing fields
+                    # Update existing review - preserve and append data
                     if review_number is not None:
                         use_review_number = review_number
                     else:
@@ -2981,17 +3300,59 @@ class JSONRegisterManager:
                     # Start with existing data to preserve all fields
                     updated_review = existing_review.copy()
 
-                    # Update core fields
+                    # Append comments with timestamp instead of replacing
+                    existing_comments = existing_review.get("Comments", "")
+                    if comments and comments.strip():
+                        if existing_comments:
+                            # Append with timestamp separator
+                            timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                            updated_review["Comments"] = (
+                                f"{existing_comments}\n[{timestamp_str}] {comments}"
+                            )
+                        else:
+                            updated_review["Comments"] = comments
+                    else:
+                        updated_review["Comments"] = existing_comments
+
+                    # Handle filter history - append unique filters
+                    existing_filters = existing_review.get("active_filters", "")
+                    new_filters = kwargs.get("active_filters", "")
+                    if new_filters and new_filters != existing_filters:
+                        if existing_filters:
+                            # Combine unique filters
+                            all_filters = set(existing_filters.split(", ")) | set(
+                                new_filters.split(", ")
+                            )
+                            updated_review["active_filters"] = ", ".join(
+                                sorted(all_filters)
+                            )
+                        else:
+                            updated_review["active_filters"] = new_filters
+
+                    # Store filter history
+                    filter_history = existing_review.get("filter_history", [])
+                    if new_filters:
+                        filter_history.append(
+                            {
+                                "filters": new_filters,
+                                "date": timestamp,
+                                "review_number": use_review_number,
+                            }
+                        )
+                    updated_review["filter_history"] = filter_history
+
+                    # Update other core fields
                     updated_review.update(
                         {
                             "Review_Number": use_review_number,
                             "Review_Date": timestamp,
-                            "Comments": comments,
                         }
                     )
 
-                    # Update fields from kwargs (new toggle values)
-                    updated_review.update(kwargs)
+                    # Update fields from kwargs (but don't overwrite comments/filters we just handled)
+                    for key, value in kwargs.items():
+                        if key not in ["Comments", "active_filters"]:
+                            updated_review[key] = value
 
                     # Replace the record
                     data[existing_index] = updated_review
@@ -3016,6 +3377,10 @@ class JSONRegisterManager:
                         "Comments": comments,
                     }
 
+                    # Add compartment UID if provided
+                    if compartment_uid is not None:
+                        new_record["Compartment_UID"] = compartment_uid
+
                     # Add all kwargs (toggle fields from config)
                     new_record.update(kwargs)
 
@@ -3034,6 +3399,141 @@ class JSONRegisterManager:
                 self.logger.error(f"Error updating compartment review: {e}")
                 self.logger.error(traceback.format_exc())
                 return False
+
+    def batch_update_compartment_reviews(
+        self, reviews: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Batch update multiple compartment reviews in a single write operation.
+
+        Args:
+            reviews: List of dicts containing review data with keys:
+                     hole_id, depth_from, depth_to, and any other review fields
+
+        Returns:
+            Dict with stats: {'updated': int, 'created': int, 'failed': int}
+        """
+        with self._thread_lock:
+            stats = {"updated": 0, "created": 0, "failed": 0}
+
+            try:
+                # Read current data once
+                data = self._read_json_file(self.review_json_path, self.review_lock)
+
+                # Process all reviews in memory
+                for review_data in reviews:
+                    try:
+                        hole_id = review_data.get("hole_id")
+                        depth_from = int(review_data.get("depth_from", 0))
+                        depth_to = int(review_data.get("depth_to", 0))
+
+                        # Get username
+                        username = review_data.get("reviewed_by") or os.getenv(
+                            "USERNAME", "Unknown"
+                        )
+
+                        # Create timestamp
+                        timestamp = datetime.now().isoformat()
+
+                        # Find existing review by this user for this compartment
+                        existing_index = None
+                        existing_review = None
+                        for idx, review in enumerate(data):
+                            if (
+                                review["HoleID"] == hole_id
+                                and review["From"] == depth_from
+                                and review["To"] == depth_to
+                                and review["Reviewed_By"] == username
+                            ):
+                                existing_index = idx
+                                existing_review = review.copy()
+                                break
+
+                        if existing_index is not None:
+                            # Update existing review
+                            review_number = review_data.get("review_number")
+                            if review_number is None:
+                                review_number = (
+                                    existing_review.get("Review_Number", 0) + 1
+                                )
+
+                            updated_review = existing_review.copy()
+                            updated_review.update(
+                                {
+                                    "Review_Number": review_number,
+                                    "Review_Date": timestamp,
+                                    "Comments": review_data.get("comments", ""),
+                                }
+                            )
+
+                            # Update all other fields from review_data
+                            for key, value in review_data.items():
+                                if key not in [
+                                    "hole_id",
+                                    "depth_from",
+                                    "depth_to",
+                                    "reviewed_by",
+                                    "review_number",
+                                    "comments",
+                                ]:
+                                    updated_review[key] = value
+
+                            data[existing_index] = updated_review
+                            stats["updated"] += 1
+                        else:
+                            # Create new review
+                            new_record = {
+                                "HoleID": hole_id,
+                                "From": depth_from,
+                                "To": depth_to,
+                                "Reviewed_By": username,
+                                "Review_Number": review_data.get("review_number", 1),
+                                "Review_Date": timestamp,
+                                "Initial_Review_Date": timestamp,
+                                "Comments": review_data.get("comments", ""),
+                            }
+
+                            # Add compartment UID if provided
+                            compartment_uid = review_data.get("compartment_uid")
+                            if compartment_uid is not None:
+                                new_record["Compartment_UID"] = compartment_uid
+
+                            # Add all other fields
+                            for key, value in review_data.items():
+                                if key not in [
+                                    "hole_id",
+                                    "depth_from",
+                                    "depth_to",
+                                    "reviewed_by",
+                                    "review_number",
+                                    "comments",
+                                    "compartment_uid",
+                                ]:
+                                    new_record[key] = value
+
+                            data.append(new_record)
+                            stats["created"] += 1
+
+                    except Exception as e:
+                        self.logger.error(
+                            f"Error processing review for {review_data.get('hole_id', 'unknown')}: {e}"
+                        )
+                        stats["failed"] += 1
+
+                # Single write operation for all updates
+                self._write_json_file(self.review_json_path, self.review_lock, data)
+
+                self.logger.info(
+                    f"Batch updated reviews: {stats['updated']} updated, "
+                    f"{stats['created']} created, {stats['failed']} failed"
+                )
+
+                return stats
+
+            except Exception as e:
+                self.logger.error(f"Error in batch update compartment reviews: {e}")
+                self.logger.error(traceback.format_exc())
+                return {"updated": 0, "created": 0, "failed": len(reviews)}
 
     def batch_update_compartments(self, updates: List[Dict]) -> int:
         """
@@ -3282,89 +3782,90 @@ class JSONRegisterManager:
     def cleanup_placeholder_records(self) -> Dict[str, int]:
         """
         Remove any placeholder INITIALISING records from all register files.
-        
+
         Returns:
             Dict with counts of records removed per file type
-            
+
         Raises:
             FileOperationError: If critical file operations fail
         """
         operation_id = str(uuid.uuid4())[:8]
-        
+
         cleanup_stats = {
             "compartments": 0,
-            "originals": 0, 
+            "originals": 0,
             "reviews": 0,
             "corners": 0,
-            "errors": []
+            "errors": [],
         }
-        
+
         log_context = {
             "operation": "cleanup_placeholder_records",
-            "operation_id": operation_id
+            "operation_id": operation_id,
         }
-        
+
         self.logger.info("Starting placeholder records cleanup", **log_context)
-        
+
         register_configs = [
             {
                 "name": "compartments",
                 "path": self.compartment_json_path,
-                "lock_type": "compartment"
+                "lock_type": "compartment",
             },
             {
-                "name": "originals", 
+                "name": "originals",
                 "path": self.original_images_json_path,
-                "lock_type": "original"
+                "lock_type": "original",
             },
-            {
-                "name": "reviews",
-                "path": self.review_json_path,
-                "lock_type": "review"
-            },
+            {"name": "reviews", "path": self.review_json_path, "lock_type": "review"},
             {
                 "name": "corners",
                 "path": self.compartment_corners_json_path,
-                "lock_type": "corners"
-            }
+                "lock_type": "corners",
+            },
         ]
-        
+
         with self._thread_lock:
             for config in register_configs:
                 register_name = config["name"]
                 file_path = config["path"]
                 lock_type = config["lock_type"]
-                
+
                 register_context = {
                     **log_context,
                     "register": register_name,
-                    "file_path": str(file_path)
+                    "file_path": str(file_path),
                 }
-                
+
                 try:
-                    self.logger.debug(f"Cleaning {register_name} register", **register_context)
-                    
+                    self.logger.debug(
+                        f"Cleaning {register_name} register", **register_context
+                    )
+
                     # Validate file exists
                     if not file_path.exists():
-                        self.logger.info(f"Skipping {register_name}: file does not exist", **register_context)
+                        self.logger.info(
+                            f"Skipping {register_name}: file does not exist",
+                            **register_context,
+                        )
                         continue
-                    
+
                     with self.file_locks(lock_type):
                         # Read current data with validation
                         data = self._read_json_file(file_path, None)
-                        
+
                         if not isinstance(data, list):
                             raise DataCorruptionError(
                                 f"Expected list structure in {register_name} register, got {type(data)}",
-                                file_path=str(file_path)
+                                file_path=str(file_path),
                             )
-                        
+
                         original_count = len(data)
-                        
+
                         # Filter out placeholder records with validation
                         cleaned_data = []
                         invalid_records = 0
-                        
+
                         for i, record in enumerate(data):
                             if not isinstance(record, dict):
                                 invalid_records += 1
@@ -3372,123 +3873,134 @@ class JSONRegisterManager:
                                     f"Skipping non-dict record at index {i}",
                                     record_index=i,
                                     record_type=type(record).__name__,
-                                    **register_context
+                                    **register_context,
                                 )
                                 continue
-                            
+
                             hole_id = record.get("HoleID")
                             if hole_id != "INITIALISING":
                                 cleaned_data.append(record)
-                        
+
                         records_removed = original_count - len(cleaned_data)
                         cleanup_stats[register_name] = records_removed
-                        
+
                         # Write cleaned data only if changes were made
                         if records_removed > 0:
                             # Create backup before cleanup
                             backup_data = data.copy()
-                            
+
                             try:
                                 lock_path = file_path.with_suffix(".json.lock")
-                                self._write_json_file(file_path, lock_path, cleaned_data)
-                                
+                                self._write_json_file(
+                                    file_path, lock_path, cleaned_data
+                                )
+
                                 self.logger.info(
                                     f"Successfully cleaned {register_name} register",
                                     records_removed=records_removed,
                                     original_count=original_count,
                                     final_count=len(cleaned_data),
                                     invalid_records=invalid_records,
-                                    **register_context
+                                    **register_context,
                                 )
-                                
+
                             except (OSError, IOError, PermissionError) as e:
                                 # Attempt rollback
                                 try:
-                                    self._write_json_file(file_path, lock_path, backup_data)
+                                    self._write_json_file(
+                                        file_path, lock_path, backup_data
+                                    )
                                     self.logger.warning(
                                         f"Rolled back {register_name} after write failure",
-                                        **register_context
+                                        **register_context,
                                     )
                                 except Exception as rollback_error:
                                     self.logger.error(
                                         f"Critical: Failed to rollback {register_name} after cleanup failure",
                                         rollback_error=str(rollback_error),
-                                        **register_context
+                                        **register_context,
                                     )
-                                
-                                error_msg = f"Failed to write cleaned {register_name} data"
-                                cleanup_stats["errors"].append({
-                                    "register": register_name,
-                                    "error": error_msg,
-                                    "details": str(e)
-                                })
-                                
+
+                                error_msg = (
+                                    f"Failed to write cleaned {register_name} data"
+                                )
+                                cleanup_stats["errors"].append(
+                                    {
+                                        "register": register_name,
+                                        "error": error_msg,
+                                        "details": str(e),
+                                    }
+                                )
+
                                 raise FileOperationError(
                                     f"{error_msg}: {str(e)}",
                                     file_path=str(file_path),
-                                    operation="cleanup_write"
+                                    operation="cleanup_write",
                                 ) from e
                         else:
                             self.logger.debug(
                                 f"No placeholder records found in {register_name}",
                                 original_count=original_count,
                                 invalid_records=invalid_records,
-                                **register_context
+                                **register_context,
                             )
-                
+
                 except (DataCorruptionError, FileOperationError):
                     # Re-raise specific exceptions for critical errors
                     raise
                 except json.JSONDecodeError as e:
                     error_msg = f"JSON corruption detected in {register_name} register"
-                    cleanup_stats["errors"].append({
-                        "register": register_name,
-                        "error": error_msg,
-                        "details": str(e)
-                    })
-                    self.logger.error(
-                        error_msg,
-                        json_error=str(e),
-                        **register_context
+                    cleanup_stats["errors"].append(
+                        {
+                            "register": register_name,
+                            "error": error_msg,
+                            "details": str(e),
+                        }
                     )
+                    self.logger.error(error_msg, json_error=str(e), **register_context)
                     # Continue with other registers for JSON errors
                 except LockAcquisitionError as e:
                     error_msg = f"Could not acquire lock for {register_name} register"
-                    cleanup_stats["errors"].append({
-                        "register": register_name,
-                        "error": error_msg,
-                        "details": str(e)
-                    })
+                    cleanup_stats["errors"].append(
+                        {
+                            "register": register_name,
+                            "error": error_msg,
+                            "details": str(e),
+                        }
+                    )
                     self.logger.warning(
-                        error_msg,
-                        lock_error=str(e),
-                        **register_context
+                        error_msg, lock_error=str(e), **register_context
                     )
                     # Continue with other registers for lock errors
                 except Exception as e:
                     error_msg = f"Unexpected error cleaning {register_name} register"
-                    cleanup_stats["errors"].append({
-                        "register": register_name,
-                        "error": error_msg,
-                        "details": str(e)
-                    })
+                    cleanup_stats["errors"].append(
+                        {
+                            "register": register_name,
+                            "error": error_msg,
+                            "details": str(e),
+                        }
+                    )
                     self.logger.error(
                         error_msg,
                         error=str(e),
                         error_type=type(e).__name__,
-                        **register_context
+                        **register_context,
                     )
                     # Continue with other registers for unexpected errors
-            
+
             # Summary logging
-            total_removed = sum(cleanup_stats[key] for key in ["compartments", "originals", "reviews", "corners"])
+            total_removed = sum(
+                cleanup_stats[key]
+                for key in ["compartments", "originals", "reviews", "corners"]
+            )
             error_count = len(cleanup_stats["errors"])
-            
+
             if error_count == 0:
                 self.logger.info(
                     "Placeholder cleanup completed successfully",
                     total_records_removed=total_removed,
-                    **log_context
+                    **log_context,
                 )
             else:
                 self.logger.warning(
@@ -3496,9 +4008,9 @@ class JSONRegisterManager:
                     total_records_removed=total_removed,
                     error_count=error_count,
                     errors=cleanup_stats["errors"],
-                    **log_context
+                    **log_context,
                 )
-        
+
         return cleanup_stats
 
     def get_all_reviews_for_compartment(
@@ -3583,13 +4095,13 @@ class JSONRegisterManager:
                 data = self._read_json_file(
                     self.compartment_corners_json_path, self.corners_lock
                 )
-                
+
                 # Ensure backward compatibility for all records
                 processed_data = []
                 for record in data:
                     processed_record = self._ensure_corner_processing_fields(record)
                     processed_data.append(processed_record)
-                
+
                 df = pd.DataFrame(processed_data)
 
                 if hole_id and not df.empty:
@@ -3619,29 +4131,6 @@ class JSONRegisterManager:
             except Exception as e:
                 self.logger.error(f"Error getting review data: {e}")
                 return pd.DataFrame()
-
-    def get_review_field_summary(self) -> Dict[str, int]:
-        """
-        Get a summary of all fields that appear in review data (current user only).
-        Useful for understanding what legacy fields exist.
-
-        Returns:
-            Dictionary mapping field names to count of records containing that field
-        """
-        with self._thread_lock:
-            try:
-                data = self._read_json_file(self.review_json_path, self.review_lock)
-
-                field_counts = {}
-                for record in data:
-                    for field in record:
-                        field_counts[field] = field_counts.get(field, 0) + 1
-
-                return field_counts
-
-            except Exception as e:
-                self.logger.error(f"Error getting review field summary: {e}")
-                return {}
 
     def get_lock_statistics(self) -> Dict[str, Any]:
         """Get current lock statistics for debugging."""
@@ -4052,6 +4541,43 @@ class JSONRegisterManager:
         main_paths = self._get_main_register_paths()
         return {key: path.with_suffix(".json.lock") for key, path in main_paths.items()}
 
+    def get_all_compartment_reviews(
+        self, hole_id: str, depth_from: int, depth_to: int
+    ) -> List[Dict]:
+        """
+        Get all review entries for a specific compartment FROM CURRENT USER ONLY.
+        Reads from the user's own review file (review_json_path).
+
+        Returns:
+            List of review dictionaries with all stored fields for current user
+        """
+        with self._thread_lock:
+            try:
+                # This reads ONLY from current user's review file
+                data = self._read_json_file(self.review_json_path, self.review_lock)
+
+                # Ensure depths are integers
+                depth_from = int(depth_from)
+                depth_to = int(depth_to)
+
+                # Filter reviews for this compartment
+                # Since we're reading from user's own file, these are all current user's reviews
+                reviews = [
+                    r.copy()
+                    for r in data
+                    if r.get("HoleID") == hole_id
+                    and r.get("From") == depth_from
+                    and r.get("To") == depth_to
+                ]
+
+                # Sort by most recent review date
+                reviews.sort(key=lambda x: x.get("Review_Date", ""), reverse=True)
+                return reviews
+
+            except Exception as e:
+                self.logger.error(f"Error getting user reviews: {e}")
+                return []
+
     # Additional helper methods for aggregating data across users
     def get_all_compartment_data(self, hole_id: Optional[str] = None) -> pd.DataFrame:
         """
@@ -4219,13 +4745,7 @@ class JSONRegisterManager:
                             data = json.load(f)
                             if isinstance(data, list):
                                 # Filter out example/initialization records
-                                count = len(
-                                    [
-                                        r
-                                        for r in data
-                                        if isinstance(r, dict)
-                                    ]
-                                )
+                                count = len([r for r in data if isinstance(r, dict)])
                                 if count > 0:
                                     user_counts[user] = count
                                     total_records += count
@@ -4297,7 +4817,7 @@ class JSONRegisterManager:
     ) -> None:
         """
         Batch merge compartment data with minimal file I/O.
-
+        OBSOLETE - NEVER USE
         Args:
             files_to_merge: List of user files to merge
             main_path: Path to main register file
@@ -4788,6 +5308,649 @@ class JSONRegisterManager:
             return user_part[1:]
 
         return user_part
+
+    # ===== CONSOLIDATED VIEW METHODS (Read-Only Multi-User Aggregation) =====#
+
+    def get_all_compartments_all_users(
+        self, hole_id: Optional[str] = None
+    ) -> pd.DataFrame:
+        """
+        Get all compartment data from ALL user files, with User_Source column.
+        This is a READ-ONLY aggregation - does not modify any user registers.
+
+        Args:
+            hole_id: Optional filter for specific hole
+
+        Returns:
+            DataFrame with User_Source column identifying which user owns each record
+        """
+        all_data = []
+
+        for file_path in self.get_all_user_files("compartment"):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list) and data:
+                        # Extract user from filename
+                        user_suffix = file_path.stem.replace(
+                            self.COMPARTMENT_JSON_BASE, ""
+                        )
+                        if user_suffix.startswith("_"):
+                            user_suffix = user_suffix[1:]
+
+                        # Add user source to each record
+                        for record in data:
+                            if isinstance(record, dict):
+                                record["User_Source"] = user_suffix
+                                all_data.append(record)
+
+            except Exception as e:
+                self.logger.error(f"Error reading {file_path}: {e}")
+
+        df = pd.DataFrame(all_data)
+
+        if hole_id and not df.empty:
+            df = df[df["HoleID"] == hole_id]
+
+        return df
+
+    def save_image_properties_batch(self, props_data: List[Dict]) -> bool:
+        """
+        Save accumulated image properties to disk in one write operation.
+
+        Args:
+            props_data: List of all property dictionaries to save
+
+        Returns:
+            True if successful, False otherwise
+        """
+        props_path = self.base_path / self.DATA_SUBFOLDER / self.IMAGE_PROPERTIES_JSON
+        props_lock = props_path.with_suffix(".json.lock")
+
+        try:
+            if self._acquire_file_lock(props_lock):
+                try:
+                    with open(props_path, "w", encoding="utf-8") as f:
+                        json.dump(props_data, f, indent=2, ensure_ascii=False)
+                    self.logger.info(
+                        f"Saved {len(props_data)} image properties in batch"
+                    )
+                    return True
+                finally:
+                    self._release_file_lock(props_lock)
+            else:
+                self.logger.error(
+                    "Could not acquire lock to save image properties batch"
+                )
+                return False
+        except Exception as e:
+            self.logger.error(f"Error saving image properties batch: {e}")
+            return False
+
+    def get_all_reviews_all_users(self, hole_id: Optional[str] = None) -> pd.DataFrame:
+        """
+        Get all review data from ALL user files.
+        This is a READ-ONLY aggregation - does not modify any user registers.
+
+        Args:
+            hole_id: Optional filter for specific hole
+
+        Returns:
+            DataFrame with all review records from all users
+        """
+        all_data = []
+
+        for file_path in self.get_all_user_files("review"):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list) and data:
+                        # Extract user from filename for tracking
+                        user_suffix = file_path.stem.replace(self.REVIEW_JSON_BASE, "")
+                        if user_suffix.startswith("_"):
+                            user_suffix = user_suffix[1:]
+
+                        # Add source file tracking
+                        for record in data:
+                            if isinstance(record, dict):
+                                record["_source_file"] = file_path.name
+                                record["_file_user"] = user_suffix
+                                all_data.append(record)
+
+            except Exception as e:
+                self.logger.error(f"Error reading {file_path}: {e}")
+
+        df = pd.DataFrame(all_data)
+
+        if hole_id and not df.empty:
+            df = df[df["HoleID"] == hole_id]
+
+        return df
+
+    def export_consolidated_compartments_csv(
+        self, filepath: str, hole_id: Optional[str] = None
+    ) -> bool:
+        """
+        Export consolidated compartment view to CSV.
+        Matches the pattern of logging review dialog's export.
+        This is a READ-ONLY export - does not modify any user registers.
+
+        Creates a CSV with:
+        - One row per compartment
+        - One classification column per reviewer
+        - Consensus calculation
+
+        Args:
+            filepath: Path to save CSV
+            hole_id: Optional filter for specific hole
+
+        Returns:
+            True if successful
+        """
+        try:
+            # Get compartments from all users
+            compartments_df = self.get_all_compartments_all_users(hole_id=hole_id)
+
+            if compartments_df.empty:
+                self.logger.warning("No compartment data to export")
+                return False
+
+            # Get reviews from all users
+            reviews_df = self.get_all_reviews_all_users(hole_id=hole_id)
+
+            # Get all unique reviewers
+            all_reviewers = set()
+            if not reviews_df.empty:
+                all_reviewers = sorted(reviews_df["Reviewed_By"].unique())
+
+            # Build export rows
+            export_rows = []
+
+            for _, comp in compartments_df.iterrows():
+                row = {
+                    "UID": comp.get("UID"),
+                    "HoleID": comp.get("HoleID"),
+                    "Depth_From": comp.get("Depth_From"),
+                    "Depth_To": comp.get("Depth_To"),
+                    "Filename": comp.get("Filename"),
+                    "Moisture_Status": comp.get("Moisture_Status"),
+                    "Hex_Colour": comp.get("Hex_Colour"),
+                    "Owned_By": comp.get("User_Source"),
+                }
+
+                # Get hex colors from image properties register
+                hex_colors = self.get_hex_colors_for_interval(
+                    comp["HoleID"], comp["Depth_From"], comp["Depth_To"]
+                )
+                row["wet_hex"] = hex_colors["wet_hex"]
+                row["dry_hex"] = hex_colors["dry_hex"]
+
+                # Add classification columns for each reviewer
+                classifications_by_reviewer = {}
+
+                if not reviews_df.empty:
+                    # Find reviews for this compartment
+                    comp_reviews = reviews_df[
+                        (reviews_df["HoleID"] == comp["HoleID"])
+                        & (reviews_df["From"] == comp["Depth_From"])
+                        & (reviews_df["To"] == comp["Depth_To"])
+                    ]
+
+                    for _, review in comp_reviews.iterrows():
+                        reviewer = review["Reviewed_By"]
+                        # Get classification from various possible field names
+                        classification = None
+                        for field in [
+                            "classification",
+                            "Classification",
+                            "Lithology",
+                            "Rock_Type",
+                        ]:
+                            if field in review and pd.notna(review[field]):
+                                classification = review[field]
+                                break
+
+                        if classification:
+                            classifications_by_reviewer[reviewer] = {
+                                "classification": str(classification),
+                                "date": review.get("Review_Date", ""),
+                                "comments": review.get("Comments", ""),
+                            }
+
+                # Add columns for each reviewer
+                for reviewer in all_reviewers:
+                    if reviewer in classifications_by_reviewer:
+                        row[f"classification_{reviewer}"] = classifications_by_reviewer[
+                            reviewer
+                        ]["classification"]
+                        row[f"review_date_{reviewer}"] = classifications_by_reviewer[
+                            reviewer
+                        ]["date"]
+                        row[f"comments_{reviewer}"] = classifications_by_reviewer[
+                            reviewer
+                        ]["comments"]
+                    else:
+                        row[f"classification_{reviewer}"] = ""
+                        row[f"review_date_{reviewer}"] = ""
+                        row[f"comments_{reviewer}"] = ""
+
+                # Calculate consensus
+                all_classifications = [
+                    data["classification"]
+                    for data in classifications_by_reviewer.values()
+                ]
+
+                row["review_count"] = len(all_classifications)
+
+                if len(all_classifications) == 0:
+                    row["consensus_classification"] = ""
+                    row["agreement"] = ""
+                elif len(all_classifications) == 1:
+                    row["consensus_classification"] = all_classifications[0]
+                    row["agreement"] = "Single"
+                else:
+                    from collections import Counter
+
+                    counts = Counter(all_classifications)
+                    most_common = counts.most_common(1)[0]
+                    row["consensus_classification"] = most_common[0]
+                    row["agreement"] = (
+                        "Yes" if most_common[1] == len(all_classifications) else "No"
+                    )
+
+                export_rows.append(row)
+
+            # Write to CSV
+            import csv
+
+            with open(filepath, "w", newline="", encoding="utf-8") as f:
+                if export_rows:
+                    writer = csv.DictWriter(f, fieldnames=export_rows[0].keys())
+                    writer.writeheader()
+                    writer.writerows(export_rows)
+
+            self.logger.info(
+                f"Exported {len(export_rows)} compartments to {filepath} "
+                f"with {len(all_reviewers)} reviewer columns"
+            )
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error exporting consolidated CSV: {e}")
+            return False
+
+    # ===== IMAGE PROPERTIES REGISTER (Shared - No User Suffix) =====#
+
+    def get_or_calculate_image_properties(
+        self,
+        hole_id: str,
+        depth_from: float,
+        depth_to: float,
+        filename: str,
+        image_path: str,
+        file_manager,
+        force_recalculate: bool = False,
+        uid: Optional[
+            str
+        ] = None,  # Optional, kept for backward compatibility but not used
+        batch_mode: bool = False,  # If True, accumulate changes without writing
+        props_data: Optional[
+            List[Dict]
+        ] = None,  # Pass in loaded properties for batch mode
+    ) -> Dict[str, Any]:
+        """
+        Get cached image properties or calculate if missing/stale.
+
+        Image properties (hex colors, chip size, etc.) are stored in a SHARED register
+        (no user suffix) because these are physical properties of the image file itself,
+        not user-specific interpretations.
+
+        This method:
+        1. Checks if properties exist for this Filename
+        2. Checks if file was modified since last calculation
+        3. Calculates if missing or stale (or if force_recalculate=True)
+        4. Caches the result for future use
+
+        Args:
+            hole_id: Hole ID
+            depth_from: Start depth
+            depth_to: End depth
+            filename: Image filename
+            image_path: Full path to image file
+            file_manager: FileManager instance for color calculation
+            force_recalculate: Force recalculation even if cached
+            uid: Deprecated, not used (kept for backward compatibility)
+            batch_mode: If True, modify props_data in-place without disk writes
+            props_data: Pre-loaded properties list for batch mode
+
+        Returns:
+            Dictionary with image properties including:
+                - HoleID, Depth_From, Depth_To, Filename
+                - Moisture_Status: "Wet", "Dry", or "Unknown"
+                - Wet_Hex: Hex color if wet image
+                - Dry_Hex: Hex color if dry image
+                - Calculation_Method: Method used
+                - Calculated_Date: When calculated
+                - File_Modified_Date: When file was last modified
+                - Has_Valid_Color: Boolean indicating successful calculation
+                - Calculation_Notes: Any warnings or notes
+                - _newly_calculated: Internal flag for tracking
+        """
+        # Path to shared properties file (no user suffix)
+        props_path = self.base_path / self.DATA_SUBFOLDER / self.IMAGE_PROPERTIES_JSON
+        props_lock = props_path.with_suffix(".json.lock")
+
+        try:
+            # Use provided properties data in batch mode, otherwise load from disk
+            if batch_mode and props_data is not None:
+                all_props = props_data
+            else:
+                # Read existing properties from disk
+                all_props = []
+                if props_path.exists():
+                    try:
+                        with open(props_path, "r", encoding="utf-8") as f:
+                            all_props = json.load(f)
+                            if not isinstance(all_props, list):
+                                self.logger.warning(
+                                    f"Properties file is not a list, resetting"
+                                )
+                                all_props = []
+                    except json.JSONDecodeError as e:
+                        # Corrupted JSON - back up and start fresh
+                        backup_path = props_path.with_suffix(".json.corrupted.bak")
+                        self.logger.error(f"Corrupted properties file detected: {e}")
+                        self.logger.info(f"Backing up corrupted file to: {backup_path}")
+                        try:
+                            import shutil
+
+                            shutil.copy2(props_path, backup_path)
+                            self.logger.info(
+                                f"Backup created, starting with fresh properties file"
+                            )
+                        except Exception as backup_error:
+                            self.logger.error(
+                                f"Could not create backup: {backup_error}"
+                            )
+                        all_props = []
+
+            # Look for existing entry by Filename (UID no longer used)
+            existing = None
+            existing_index = None
+            for i, prop in enumerate(all_props):
+                if prop.get("Filename") == filename:
+                    existing = prop
+                    existing_index = i
+                    break
+
+            # Check if we need to recalculate
+            need_calc = force_recalculate or existing is None
+
+            if existing and not force_recalculate:
+                # Check if file was modified since calculation
+                try:
+                    file_modified = os.path.getmtime(image_path)
+                    calc_date = existing.get("File_Modified_Date")
+                    if calc_date:
+                        # Compare timestamps
+                        calc_timestamp = datetime.fromisoformat(calc_date).timestamp()
+                        if file_modified > calc_timestamp:
+                            need_calc = True
+                            self.logger.debug(
+                                f"File {filename} modified since last calculation, recalculating"
+                            )
+                except Exception as e:
+                    self.logger.debug(f"Could not check file modification time: {e}")
+                    # If we can't check, use cached value
+
+            if need_calc:
+                # Determine moisture status from filename
+                moisture = "Unknown"
+                if "_Wet" in filename or "_wet" in filename:
+                    moisture = "Wet"
+                elif "_Dry" in filename or "_dry" in filename:
+                    moisture = "Dry"
+
+                # Calculate hex color using improved method
+                color_result = file_manager.calculate_robust_hex_color(
+                    image_path, method="LAB_shadow_compensated"
+                )
+
+                # Build properties entry (no UID stored)
+                new_props = {
+                    "HoleID": hole_id,
+                    "Depth_From": int(depth_from),
+                    "Depth_To": int(depth_to),
+                    "Filename": filename,
+                    "Moisture_Status": moisture,
+                    "Wet_Hex": color_result["hex_color"] if moisture == "Wet" else "",
+                    "Dry_Hex": color_result["hex_color"] if moisture == "Dry" else "",
+                    "Calculation_Method": color_result["method"],
+                    "Calculated_Date": datetime.now().isoformat(),
+                }
+
+                # Update or append to the list
+                if existing_index is not None:
+                    # Update existing entry
+                    all_props[existing_index] = new_props
+                else:
+                    # Append new entry
+                    all_props.append(new_props)
+
+                # Write back to disk ONLY if NOT in batch mode
+                if not batch_mode:
+                    if self._acquire_file_lock(props_lock):
+                        try:
+                            with open(props_path, "w", encoding="utf-8") as f:
+                                json.dump(all_props, f, indent=2, ensure_ascii=False)
+                            self.logger.debug(f"Saved image properties for {filename}")
+                        finally:
+                            self._release_file_lock(props_lock)
+                    else:
+                        self.logger.warning(
+                            f"Could not acquire lock to save image properties"
+                        )
+
+                # Mark as newly calculated for caller tracking
+                new_props["_newly_calculated"] = True
+                return new_props
+            else:
+                # Return cached properties
+                existing["_newly_calculated"] = False
+                return existing
+
+        except Exception as e:
+            self.logger.error(
+                f"Error getting/calculating image properties for {filename}: {e}"
+            )
+            return {
+                "HoleID": hole_id,
+                "Depth_From": depth_from,
+                "Depth_To": depth_to,
+                "Filename": filename,
+                "Has_Valid_Color": False,
+                "Calculation_Notes": f"Error: {str(e)}",
+                "_newly_calculated": False,
+            }
+
+    def save_image_properties_batch(self, props_data: List[Dict]) -> bool:
+        """
+        Save accumulated image properties to disk in one write operation.
+
+        Args:
+            props_data: List of all property dictionaries to save
+
+        Returns:
+            True if successful, False otherwise
+        """
+        props_path = self.base_path / self.DATA_SUBFOLDER / self.IMAGE_PROPERTIES_JSON
+        props_lock = props_path.with_suffix(".json.lock")
+
+        try:
+            if self._acquire_file_lock(props_lock):
+                try:
+                    with open(props_path, "w", encoding="utf-8") as f:
+                        json.dump(props_data, f, indent=2, ensure_ascii=False)
+                    self.logger.info(
+                        f"Saved {len(props_data)} image properties in batch"
+                    )
+                    return True
+                finally:
+                    self._release_file_lock(props_lock)
+            else:
+                self.logger.error(
+                    "Could not acquire lock to save image properties batch"
+                )
+                return False
+        except Exception as e:
+            self.logger.error(f"Error saving image properties batch: {e}")
+            return False
+
+    # ===== Missing Tray Status =====
+
+    def read_missing_tray_status(self) -> Dict[str, Dict]:
+        """
+        Read the shared missing tray status file.
+        
+        Returns:
+            Dict keyed by tray key (e.g. "BA0001_60-80") with status entries.
+            Returns empty dict if file doesn't exist or is unreadable.
+        """
+        if not self._acquire_file_lock(self.missing_tray_status_lock):
+            self.logger.warning("Could not acquire lock for missing tray status")
+            return {}
+        try:
+            if not self.missing_tray_status_path.exists():
+                return {}
+            if self.missing_tray_status_path.stat().st_size == 0:
+                return {}
+            with open(self.missing_tray_status_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+            self.logger.warning("Missing tray status file is not a dict, returning empty")
+            return {}
+        except Exception as e:
+            self.logger.error(f"Error reading missing tray status: {e}")
+            return {}
+        finally:
+            self._release_file_lock(self.missing_tray_status_lock)
+
+    def write_missing_tray_status(self, data: Dict[str, Dict]) -> bool:
+        """
+        Write the shared missing tray status file with backup.
+        
+        Args:
+            data: Dict keyed by tray key with status entries.
+            
+        Returns:
+            True if written successfully.
+        """
+        if not self._acquire_file_lock(self.missing_tray_status_lock):
+            self.logger.error("Could not acquire lock for missing tray status write")
+            return False
+        try:
+            self.data_path.mkdir(parents=True, exist_ok=True)
+            # Backup existing file
+            if self.missing_tray_status_path.exists():
+                backup = self.missing_tray_status_path.with_suffix(".json.backup")
+                try:
+                    shutil.copy2(self.missing_tray_status_path, backup)
+                except Exception as e:
+                    self.logger.warning(f"Could not create status backup: {e}")
+            # Write atomically via temp file
+            tmp_path = self.missing_tray_status_path.with_suffix(".json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            tmp_path.replace(self.missing_tray_status_path)
+            self.logger.info(f"Saved {len(data)} missing tray status entries")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error writing missing tray status: {e}")
+            return False
+        finally:
+            self._release_file_lock(self.missing_tray_status_lock)
+
+    def get_hex_colors_for_interval(
+        self, hole_id: str, depth_from: float, depth_to: float
+    ) -> Dict[str, str]:
+        """
+        Get wet, dry, and combined hex colors for an interval from the shared properties register.
+
+        This is used for quick lookups when you need hex colors but don't have the
+        actual image files loaded.
+
+        Args:
+            hole_id: Hole ID
+            depth_from: Start depth
+            depth_to: End depth
+
+        Returns:
+            Dictionary with 'wet_hex', 'dry_hex', and 'combined_hex' keys (empty strings if not found)
+        """
+        props_path = self.base_path / self.DATA_SUBFOLDER / self.IMAGE_PROPERTIES_JSON
+
+        result = {"wet_hex": "", "dry_hex": "", "combined_hex": ""}
+
+        if not props_path.exists():
+            return result
+
+        try:
+            with open(props_path, "r", encoding="utf-8") as f:
+                all_props = json.load(f)
+                if not isinstance(all_props, list):
+                    return result
+
+            # Look for matching intervals - collect all wet/dry values for this interval
+            for prop in all_props:
+                if (
+                    prop.get("HoleID") == hole_id
+                    and float(prop.get("Depth_From", -999)) == float(depth_from)
+                    and float(prop.get("Depth_To", -999)) == float(depth_to)
+                ):
+                    # Collect wet hex if available
+                    if prop.get("Wet_Hex"):
+                        result["wet_hex"] = prop.get("Wet_Hex", "")
+                    
+                    # Collect dry hex if available
+                    if prop.get("Dry_Hex"):
+                        result["dry_hex"] = prop.get("Dry_Hex", "")
+                    
+                    # Use Combined_Hex if available (preferred method)
+                    if prop.get("Combined_Hex"):
+                        result["combined_hex"] = prop.get("Combined_Hex", "")
+
+            # If Combined_Hex wasn't in data, derive it (prefer dry over wet)
+            if not result["combined_hex"]:
+                result["combined_hex"] = result["dry_hex"] if result["dry_hex"] else result["wet_hex"]
+
+            return result
+
+        except Exception as e:
+            self.logger.error(
+                f"Error reading hex colors for {hole_id} {depth_from}-{depth_to}: {e}"
+            )
+            return result
+
+    def get_all_image_properties(self) -> List[Dict[str, Any]]:
+        """
+        Get all image properties from the shared register. This is initially just for average Hex calculations per compartment image.
+
+        Returns:
+            List of all image property dictionaries
+        """
+        props_path = self.base_path / self.DATA_SUBFOLDER / self.IMAGE_PROPERTIES_JSON
+
+        if not props_path.exists():
+            return []
+
+        try:
+            with open(props_path, "r", encoding="utf-8") as f:
+                all_props = json.load(f)
+                return all_props if isinstance(all_props, list) else []
+        except Exception as e:
+            self.logger.error(f"Error reading image properties: {e}")
+            return []
 
     # ===== Transactions =====#
 

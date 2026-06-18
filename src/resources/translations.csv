@@ -480,3 +480,17 @@ Bigger,Bigger,Plus grand
 Reset All,Reset All,Tout réinitialiser
 Cancel Review,Cancel Review,Annuler l'examen
 Are you sure you want to cancel? Unsaved changes will be lost.,Are you sure you want to cancel? Unsaved changes will be lost.,Êtes-vous sûr de vouloir annuler ? Les modifications non enregistrées seront perdues.
+Use existing local folder structure,Use existing local folder structure,Utiliser la structure de dossier locale existante
+Create local folder structure,Create local folder structure,Créer la structure de dossier locale
+Use existing OneDrive folder structure,Use existing OneDrive folder structure,Utiliser la structure de dossier OneDrive existante
+Create missing folders in OneDrive,Create missing folders in OneDrive,Créer les dossiers manquants dans OneDrive
+Save configuration,Save configuration,Enregistrer la configuration
+Settings,Settings,Paramètres
+Data Settings,Data Settings,Paramètres des données
+Color Maps,Color Maps,Cartes de couleurs
+Classification Manager,Classification Manager,Gestionnaire de classification
+Tag Manager,Tag Manager,Gestionnaire de tags
+Data Not Loaded,Data Not Loaded,Données non chargées
+Please wait for data to finish loading, or check that data sources are configured.,Please wait for data to finish loading or check that data sources are configured.,Veuillez attendre que les données soient chargées ou vérifier que les sources de données sont configurées.
+Data settings updated.,Data settings updated.,Paramètres des données mis à jour.
+Color map saved.,Color map saved.,Carte de couleurs enregistrée.

@@ -11,27 +11,27 @@ from .LoggingReviewStep import (
     DrillholeDataVisualizer,
     VisualizationMode,
     PlotType,
-    PlotConfig
+    PlotConfig,
 )
 from .visualization_drawer import VisualizationDrawer
+from .batch_processor import BatchProcessor
 
 # Define what gets imported with "from processing import *"
 __all__ = [
     # From ArucoMarkersAndBlurDetectionStep
-    'BlurDetector',
-    'ArucoManager',
-    
+    "BlurDetector",
+    "ArucoManager",
     # From LoggingReviewStep
-    'DrillholeTraceGenerator',
-    'ColorMapManager',
-    'DrillholeDataManager',
-    'DataType',
-    'IntervalScale',
-    'DrillholeDataVisualizer',
-    'VisualizationMode',
-    'PlotType',
-    'PlotConfig',
-    
+    "DrillholeTraceGenerator",
+    "ColorMapManager",
+    "DrillholeDataManager",
+    "DataType",
+    "IntervalScale",
+    "DrillholeDataVisualizer",
+    "VisualizationMode",
+    "PlotType",
+    "PlotConfig",
     # From root
-    'VisualizationDrawer'
+    "VisualizationDrawer",
+    "BatchProcessor",
 ]

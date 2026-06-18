@@ -8,3 +8,7 @@ pytesseract==0.3.13
 python_ternary==1.0.8
 pywin32==308
 tomli==2.2.1
+structlog>=24.4.0
+tkcalendar==1.6.1
+wordcloud>=1.9.0
+pyproj>=3.0.0

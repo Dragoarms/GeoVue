@@ -29,30 +29,15 @@ LOCAL DIRECTORY FOR LOCAL PROCESSING AND BACKUPS:
 │   ├── 📁 [Approved Compartment Images]/
 │   |   └── 📁 [PROJECT CODE]/
 |   |       └── 📁 [HOLE_ID]/
-|   |           | ├── [HOLE_ID]_CC_001.[ext]
-|   |           | └── [HOLE_ID]_CC_002.[ext]
-│   |           └── 📁 With_Data/
-│   |                └── [HOLE_ID]_CC_001_Data.[ext]
+|   |            └──  [HOLE_ID]_CC_[Depth padded to three digits]_[Wet/Dry suffix].[ext]
 |   └── 📁 [Compartment Images for Review]/
 │      └── 📁 [PROJECT CODE]/
 |           └── 📁 [HOLE_ID]/
-|                ├── [HOLE_ID]_CC_001_{suffix}.[ext]
-|                └── [HOLE_ID]_CC_002_{suffix}.[ext]
+|                └──  [HOLE_ID]_CC_[Depth padded to three digits]_{temp/new / or no suffix}.[ext]
 ├── 📁 Drillhole Traces/
 │      └── 📁 [PROJECT CODE]/
 |           └── 📁 [HOLE_ID]/
 |               └── [HOLE_ID]_trace.[ext]
-└── 📁 Debugging/
-    ├── 📁 Blur Analysis/
-    │      └── 📁 [PROJECT CODE]/
-               └── 📁 [HOLE_ID]/
-    │               └── [HOLE_ID]_[COMPARTMENT]_blur_analysis.jpg
-    └── 📁 Debug Images/
-        ├── 📁 Unidentified/
-        │   └── [ORIGINAL_NAME]_[DEBUG_TYPE].jpg
-        └── 📁 [PROJECT CODE]/
-            └── 📁 [HOLE_ID]/
-                └── [HOLE_ID]_[FROM]-[TO]_[DEBUG_TYPE].jpg
 
 ==================================================================================
 SHARED DIRECTORY STRUCTURE:
@@ -128,12 +113,15 @@ class FileManager:
         "processed": "Processed Original Images",
         "compartments": "Extracted Compartment Images",
         "traces": "Drillhole Traces",
+        "datasets": "Drillhole Datasets",
+        "cross_sections": "Cross Sections",
         "debugging": "Debugging",
     }
 
     SUBFOLDER_NAMES = {
         "approved_originals": "Approved Originals",
         "rejected_originals": "Rejected Originals",
+        "pending_originals": "Pending Originals",
         "approved_compartments": "Approved Compartment Images",
         "review_compartments": "Compartment Images for Review",
         "blur": "Blur Analysis",
@@ -180,6 +168,9 @@ class FileManager:
             "rejected_originals": self.base_dir
             / self.FOLDER_NAMES["processed"]
             / self.SUBFOLDER_NAMES["rejected_originals"],
+            "pending_originals": self.base_dir
+            / self.FOLDER_NAMES["processed"]
+            / self.SUBFOLDER_NAMES["pending_originals"],
             "chip_compartments": self.base_dir / self.FOLDER_NAMES["compartments"],
             "approved_compartments": self.base_dir
             / self.FOLDER_NAMES["compartments"]
@@ -187,7 +178,12 @@ class FileManager:
             "temp_review": self.base_dir
             / self.FOLDER_NAMES["compartments"]
             / self.SUBFOLDER_NAMES["review_compartments"],
+            # Add alias for compatibility with duplicate_handler
+            "review_compartments": self.base_dir
+            / self.FOLDER_NAMES["compartments"]
+            / self.SUBFOLDER_NAMES["review_compartments"],
             "drill_traces": self.base_dir / self.FOLDER_NAMES["traces"],
+            "datasets": self.base_dir / self.FOLDER_NAMES["datasets"],
             "debugging": self.base_dir / self.FOLDER_NAMES["debugging"],
             "blur_analysis": self.base_dir
             / self.FOLDER_NAMES["debugging"]
@@ -227,8 +223,9 @@ class FileManager:
                 "register_data": self.shared_base_dir
                 / self.FOLDER_NAMES["register"]
                 / self.SUBFOLDER_NAMES["register_data"],
+                # Default drillhole_data.csv is now stored under 'Drillhole Datasets'
                 "drillhole_data_csv": self.shared_base_dir
-                / self.FOLDER_NAMES["register"]
+                / self.FOLDER_NAMES["datasets"]
                 / "drillhole_data.csv",
                 "images_to_process": self.shared_base_dir / self.FOLDER_NAMES["images"],
                 "processed_originals": self.shared_base_dir
@@ -248,6 +245,15 @@ class FileManager:
                 / self.FOLDER_NAMES["compartments"]
                 / self.SUBFOLDER_NAMES["review_compartments"],
                 "drill_traces": self.shared_base_dir / self.FOLDER_NAMES["traces"],
+                "datasets": self.shared_base_dir / self.FOLDER_NAMES["datasets"],
+                "cross_sections": (
+                    Path(self.config_manager.get("shared_folder_cross_sections"))
+                    if (
+                        self.config_manager
+                        and self.config_manager.get("shared_folder_cross_sections")
+                    )
+                    else (self.shared_base_dir / self.FOLDER_NAMES["cross_sections"])
+                ),
             }
 
             # Save individual paths to config if available
@@ -260,8 +266,8 @@ class FileManager:
                     str(self.shared_paths["register_excel"]),
                 )
                 self.config_manager.set(
-                    "shared_folder_drillhole_data_csv",
-                    str(self.shared_paths["drillhole_data_csv"]),
+                    "shared_folder_datasets",
+                    str(self.shared_paths["datasets"]),
                 )
                 self.config_manager.set(
                     "shared_folder_register_data_folder",
@@ -294,8 +300,26 @@ class FileManager:
                 self.config_manager.set(
                     "shared_folder_drill_traces", str(self.shared_paths["drill_traces"])
                 )
+                # Only write default cross_sections path when user has not set one
+                if not self.config_manager.get("shared_folder_cross_sections"):
+                    self.config_manager.set(
+                        "shared_folder_cross_sections",
+                        str(self.shared_paths["cross_sections"]),
+                    )
 
-            self.logger.info(
+            # When no shared base dir, still allow cross_sections from config (user may have set it)
+            if (
+                self.config_manager
+                and self.config_manager.get("shared_folder_cross_sections")
+                and "cross_sections" not in self.shared_paths
+            ):
+                if not self.shared_paths:
+                    self.shared_paths = {}
+                self.shared_paths["cross_sections"] = Path(
+                    self.config_manager.get("shared_folder_cross_sections")
+                )
+
+            self.logger.debug(
                 f"Initialized shared paths with base: {self.shared_base_dir}"
             )
 
@@ -327,6 +351,17 @@ class FileManager:
                 return None
 
         return path if path.exists() else None
+
+    def get_cross_sections_path(
+        self, create_if_missing: bool = False
+    ) -> Optional[Path]:
+        """
+        Get the shared Cross Sections folder path (section PDFs for Section Tool integration).
+
+        Returns:
+            Path to the Cross Sections folder, or None if not configured.
+        """
+        return self.get_shared_path("cross_sections", create_if_missing=create_if_missing)
 
     def update_shared_path(self, path_key: str, new_path: str) -> bool:
         """
@@ -364,13 +399,14 @@ class FileManager:
                         "approved_compartments": "shared_folder_approved_compartments_folder",
                         "review_compartments": "shared_folder_review_compartments_folder",
                         "drill_traces": "shared_folder_drill_traces",
-                        "drillhole_data_csv": "shared_folder_drillhole_data_csv",
+                        "datasets": "shared_folder_datasets",
+                        "cross_sections": "shared_folder_cross_sections",
                     }
 
                     if path_key in config_key_map:
                         self.config_manager.set(config_key_map[path_key], new_path)
 
-                self.logger.info(f"Updated shared path {path_key}: {new_path}")
+                self.logger.debug(f"Updated shared path {path_key}: {new_path}")
                 return True
             else:
                 self.logger.warning(f"Unknown path key: {path_key}")
@@ -594,8 +630,8 @@ class FileManager:
             match = re.search(pattern, base_name)
             if match:
                 hole_id = match.group(1)
-                depth_from = float(match.group(2))
-                depth_to = float(match.group(3))
+                depth_from = int(match.group(2))
+                depth_to = int(match.group(3))
 
                 # Check against valid prefixes if the configuration exists and prefix validation is enabled
                 valid_prefixes = (
@@ -853,50 +889,64 @@ class FileManager:
             if status in ["KEEP_ORIGINAL", "MISSING"]:
                 return result
 
-            # Save locally first
-            local_path = self.save_compartment(
-                image,
-                hole_id,
-                compartment_depth,
-                has_data=False,
-                output_format=output_format,
-            )
-
-            if local_path:
-                # Add suffix for wet/dry
-                if status in ["Wet", "Dry"]:
-                    suffix = f"_{status}"
-                    base, ext = os.path.splitext(local_path)
-                    new_local_path = f"{base}{suffix}{ext}"
-                    os.rename(local_path, new_local_path)
-                    local_path = new_local_path
-
-                result["local_path"] = local_path
-
-                # Upload to shared folder if configured
-                shared_path = self.get_shared_path(
-                    "approved_compartments", create_if_missing=True
+            # Guard against invalid/unknown status — never write an unclassified file
+            # to the approved folder
+            if status not in ["Wet", "Dry"]:
+                self.logger.error(
+                    f"save_reviewed_compartment called with invalid status '{status}' "
+                    f"for {hole_id}_CC_{compartment_depth:03d} — skipping to prevent "
+                    f"unclassified file in approved folder"
                 )
-                if shared_path:
-                    project_code = hole_id[:2].upper() if len(hole_id) >= 2 else ""
-                    shared_hole_folder = shared_path / project_code / hole_id
-                    shared_hole_folder.mkdir(parents=True, exist_ok=True)
+                return result
 
-                    # Create filename
-                    filename = os.path.basename(local_path)
-                    shared_file_path = shared_hole_folder / filename
+            # Build the classified filename upfront — no intermediate unclassified file
+            save_dir = self.get_hole_dir("approved_compartments", hole_id)
+            filename = f"{hole_id}_CC_{compartment_depth:03d}_{status}.{output_format}"
+            local_path = os.path.join(save_dir, filename)
 
-                    # Copy to shared
-                    if self.copy_with_metadata(local_path, str(shared_file_path)):
-                        if self._verify_upload(shared_file_path):
-                            # Mark as uploaded
-                            base, ext = os.path.splitext(local_path)
-                            uploaded_path = f"{base}_UPLOADED{ext}"
-                            os.rename(local_path, uploaded_path)
+            # Save directly to final classified path
+            if output_format.lower() == "png" and source_uid:
+                success = self.save_png_with_uid(image, local_path, source_uid)
+                if not success:
+                    cv2.imwrite(local_path, image)
+            elif output_format.lower() == "jpg":
+                cv2.imwrite(local_path, image, [cv2.IMWRITE_JPEG_QUALITY, 100])
+                if source_uid:
+                    self.embed_uid_in_image(local_path, source_uid)
+            else:
+                cv2.imwrite(local_path, image)
 
-                            result["local_path"] = uploaded_path
-                            result["shared_path"] = str(shared_file_path)
-                            result["upload_success"] = True
+            if not os.path.exists(local_path):
+                self.logger.error(f"Failed to write reviewed compartment: {local_path}")
+                return result
+
+            self.logger.info(f"Saved reviewed compartment: {local_path}")
+            result["local_path"] = local_path
+
+            # Upload to shared folder if configured
+            shared_path = self.get_shared_path(
+                "approved_compartments", create_if_missing=True
+            )
+            if shared_path:
+                project_code = hole_id[:2].upper() if len(hole_id) >= 2 else ""
+                shared_hole_folder = shared_path / project_code / hole_id
+                shared_hole_folder.mkdir(parents=True, exist_ok=True)
+
+                # Create filename
+                filename = os.path.basename(local_path)
+                shared_file_path = shared_hole_folder / filename
+
+                # Copy to shared
+                if self.copy_with_metadata(local_path, str(shared_file_path)):
+                    if self._verify_upload(shared_file_path):
+                        # Mark as uploaded
+                        base, ext = os.path.splitext(local_path)
+                        uploaded_path = f"{base}_UPLOADED{ext}"
+                        os.rename(local_path, uploaded_path)
+
+                        result["local_path"] = uploaded_path
+                        result["shared_path"] = str(shared_file_path)
+                        result["upload_success"] = True
 
         except Exception as e:
             self.logger.error(f"Error saving reviewed compartment: {e}")
@@ -989,6 +1039,93 @@ class FileManager:
             self.logger.error(f"Error saving temp compartment: {str(e)}")
             return None
 
+    def save_approved_compartment_direct(
+        self,
+        image: np.ndarray,
+        hole_id: str,
+        compartment_depth: int,
+        moisture_status: str,
+        source_uid: str = None,
+        upload_to_shared: bool = True,
+    ) -> Optional[str]:
+        """
+        Save a compartment directly to approved folder with known wet/dry status.
+
+        Used for re-extraction when wet/dry classification is already known from register.
+        Skips the temp/review folder entirely.
+
+        Args:
+            image: Compartment image as numpy array
+            hole_id: Hole identifier
+            compartment_depth: Depth of compartment
+            moisture_status: "Wet" or "Dry"
+            source_uid: Source image UID to embed in PNG
+            upload_to_shared: Whether to also upload to shared folder
+
+        Returns:
+            Path to saved file or None if failed
+        """
+        try:
+            # Validate moisture status
+            if moisture_status not in ("Wet", "Dry"):
+                self.logger.warning(
+                    f"Invalid moisture status '{moisture_status}', defaulting to temp save"
+                )
+                return self.save_temp_compartment(
+                    image, hole_id, compartment_depth, "temp", source_uid
+                )
+
+            # Get approved compartments directory
+            save_dir = self.get_hole_dir("approved_compartments", hole_id)
+            filename = f"{hole_id}_CC_{compartment_depth:03d}_{moisture_status}.png"
+            file_path = os.path.join(save_dir, filename)
+
+            # Check if file already exists with same UID - preserve it
+            if os.path.exists(file_path) and source_uid:
+                existing_uid = self.extract_uid_from_any_image(file_path)
+                if existing_uid == source_uid:
+                    self.logger.info(
+                        f"Compartment already exists with same UID, skipping: {file_path}"
+                    )
+                    return file_path
+
+            # Save with UID if provided
+            if source_uid:
+                success = self.save_png_with_uid(image, file_path, source_uid)
+                if not success:
+                    cv2.imwrite(file_path, image, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+            else:
+                cv2.imwrite(file_path, image, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+
+            self.logger.info(f"Saved approved compartment directly: {file_path}")
+
+            # Upload to shared folder if configured
+            if upload_to_shared:
+                shared_path = self.get_shared_path(
+                    "approved_compartments", create_if_missing=True
+                )
+                if shared_path:
+                    project_code = hole_id[:2].upper() if len(hole_id) >= 2 else ""
+                    shared_hole_dir = os.path.join(shared_path, project_code, hole_id)
+                    os.makedirs(shared_hole_dir, exist_ok=True)
+                    shared_file_path = os.path.join(shared_hole_dir, filename)
+
+                    # Copy to shared with UID preserved
+                    if source_uid:
+                        self.save_png_with_uid(image, shared_file_path, source_uid)
+                    else:
+                        cv2.imwrite(
+                            shared_file_path, image, [cv2.IMWRITE_PNG_COMPRESSION, 0]
+                        )
+
+                    self.logger.info(f"Uploaded to shared folder: {shared_file_path}")
+
+            return file_path
+
+        except Exception as e:
+            self.logger.error(f"Error saving approved compartment direct: {str(e)}")
+            return None
+
     def cleanup_temp_compartments(self, hole_id: str, temp_paths: List[str]) -> None:
         """
         Clean up temporary compartment files after processing.
@@ -1024,10 +1161,24 @@ class FileManager:
                                 f"{base_name}_UPLOAD_FAILED.png",
                             ]
 
-                            upload_exists = any(
-                                os.path.exists(os.path.join(approved_dir, pattern))
-                                for pattern in uploaded_patterns
+                            # Debug logging
+                            self.logger.debug(f"Checking for uploads of {base_name}:")
+                            self.logger.debug(f"  Approved dir: {approved_dir}")
+                            self.logger.debug(
+                                f"  Dir exists: {os.path.exists(approved_dir)}"
                             )
+                            if os.path.exists(approved_dir):
+                                actual_files = os.listdir(approved_dir)
+                                self.logger.debug(f"  Files in dir: {actual_files}")
+
+                            upload_exists = False
+                            for pattern in uploaded_patterns:
+                                full_path = os.path.join(approved_dir, pattern)
+                                exists = os.path.exists(full_path)
+                                self.logger.debug(f"  Checking {pattern}: {exists}")
+                                if exists:
+                                    upload_exists = True
+                                    break
 
                             if upload_exists:
                                 os.remove(temp_path)
@@ -1268,6 +1419,110 @@ class FileManager:
             self.logger.error(f"❌ Error creating directory structure: {e}")
             raise
 
+    def create_folder_structure(self, base_path: str) -> None:
+        """Create the full folder structure at a specified path (includes register folder for OneDrive)."""
+        try:
+            base = Path(base_path)
+            created_any = False
+
+            # Create base directory
+            if not base.exists():
+                os.makedirs(base)
+                created_any = True
+
+            # Create all main folders including register
+            for folder_name in self.FOLDER_NAMES.values():
+                folder_path = base / folder_name
+                if not folder_path.exists():
+                    os.makedirs(folder_path)
+                    created_any = True
+
+            # Create subfolders under Processed Original Images
+            processed_path = base / self.FOLDER_NAMES["processed"]
+            for subfolder in ["approved_originals", "rejected_originals", "pending_originals"]:
+                subfolder_path = processed_path / self.SUBFOLDER_NAMES[subfolder]
+                if not subfolder_path.exists():
+                    os.makedirs(subfolder_path)
+                    created_any = True
+
+            # Create subfolders under Extracted Compartment Images
+            compartments_path = base / self.FOLDER_NAMES["compartments"]
+            for subfolder in ["approved_compartments", "review_compartments"]:
+                subfolder_path = compartments_path / self.SUBFOLDER_NAMES[subfolder]
+                if not subfolder_path.exists():
+                    os.makedirs(subfolder_path)
+                    created_any = True
+
+            # Create subfolders under Debugging
+            debugging_path = base / self.FOLDER_NAMES["debugging"]
+            for subfolder in ["blur", "debug"]:
+                subfolder_path = debugging_path / self.SUBFOLDER_NAMES[subfolder]
+                if not subfolder_path.exists():
+                    os.makedirs(subfolder_path)
+                    created_any = True
+
+            if created_any:
+                self.logger.info(f"✅ Folder structure created at: {base_path}")
+            else:
+                self.logger.debug(f"📁 All folders already existed at: {base_path}")
+
+        except Exception as e:
+            self.logger.error(f"❌ Error creating folder structure: {e}")
+            raise
+
+    def create_local_folder_structure(self, base_path: str) -> None:
+        """Create folder structure at a specified path (excludes register folder for local storage)."""
+        try:
+            base = Path(base_path)
+            created_any = False
+
+            # Create base directory
+            if not base.exists():
+                os.makedirs(base)
+                created_any = True
+
+            # Create all main folders EXCEPT register
+            for key, folder_name in self.FOLDER_NAMES.items():
+                if key == "register":
+                    continue  # Skip register folder for local storage
+                folder_path = base / folder_name
+                if not folder_path.exists():
+                    os.makedirs(folder_path)
+                    created_any = True
+
+            # Create subfolders under Processed Original Images
+            processed_path = base / self.FOLDER_NAMES["processed"]
+            for subfolder in ["approved_originals", "rejected_originals", "pending_originals"]:
+                subfolder_path = processed_path / self.SUBFOLDER_NAMES[subfolder]
+                if not subfolder_path.exists():
+                    os.makedirs(subfolder_path)
+                    created_any = True
+
+            # Create subfolders under Extracted Compartment Images
+            compartments_path = base / self.FOLDER_NAMES["compartments"]
+            for subfolder in ["approved_compartments", "review_compartments"]:
+                subfolder_path = compartments_path / self.SUBFOLDER_NAMES[subfolder]
+                if not subfolder_path.exists():
+                    os.makedirs(subfolder_path)
+                    created_any = True
+
+            # Create subfolders under Debugging
+            debugging_path = base / self.FOLDER_NAMES["debugging"]
+            for subfolder in ["blur", "debug"]:
+                subfolder_path = debugging_path / self.SUBFOLDER_NAMES[subfolder]
+                if not subfolder_path.exists():
+                    os.makedirs(subfolder_path)
+                    created_any = True
+
+            if created_any:
+                self.logger.info(f"✅ Local folder structure created at: {base_path}")
+            else:
+                self.logger.debug(f"📁 All local folders already existed at: {base_path}")
+
+        except Exception as e:
+            self.logger.error(f"❌ Error creating local folder structure: {e}")
+            raise
+
     def get_hole_dir(self, dir_type: str, hole_id: str) -> str:
         """Get the directory path for a specific hole ID with project code."""
         if dir_type not in self.dir_structure:
@@ -1350,7 +1605,7 @@ class FileManager:
             file_path = os.path.join(save_dir, filename)
 
             # Save the image
-            cv2.imwrite(file_path, image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            cv2.imwrite(file_path, image, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
             self.logger.info(f"Saved debug image: {file_path}")
             return file_path
@@ -1424,6 +1679,7 @@ class FileManager:
         is_rejected: bool = False,
         is_selective: bool = False,
         is_skipped: bool = False,
+        is_pending: bool = False,
         delete_source: bool = True,
         image_uid: str = None,
     ) -> Tuple[Optional[str], bool]:
@@ -1463,6 +1719,9 @@ class FileManager:
                 base_suffix = "_Skipped"
             elif is_selective:
                 base_suffix = "_Selected_Compartments"
+            elif is_pending and image_uid:
+                # Pending originals include UID for QAQC traceability
+                base_suffix = f"_Original_{image_uid[:8]}"
             else:
                 base_suffix = "_Original"
 
@@ -1472,7 +1731,8 @@ class FileManager:
 
             # Start shared folder upload first (using internal shared_paths)
             # Use internal shared paths configuration
-            if self.shared_paths and is_processed:
+            # Skip shared upload for pending originals - they stay local until QAQC finalization
+            if self.shared_paths and is_processed and not is_pending:
                 try:
                     # Use get_shared_path() method
                     if is_rejected:
@@ -1540,6 +1800,9 @@ class FileManager:
             elif is_skipped:
                 # Skipped files go to rejected folder but with different suffix
                 target_dir = self.get_hole_dir("rejected_originals", hole_id)
+            elif is_pending:
+                # Pending originals go to staging folder until QAQC finalization
+                target_dir = self.get_hole_dir("pending_originals", hole_id)
             else:
                 target_dir = self.get_hole_dir("approved_originals", hole_id)
 
@@ -1550,7 +1813,19 @@ class FileManager:
             local_filename = f"{base_local_filename}{ext}"
             target_path = os.path.join(target_dir, local_filename)
 
-            # Handle existing files
+            # Handle existing files - but don't save if we're skipping
+            if is_skipped and not is_rejected:
+                # If skipping (keep original), check if original already exists
+                if os.path.exists(target_path):
+                    self.logger.info(
+                        f"Skipping save - keeping existing original at {target_path}"
+                    )
+                    return (
+                        target_path,
+                        upload_success,
+                    )  # Return existing path without saving
+
+            # Only increment counter for actual new files
             counter = 1
             while os.path.exists(target_path):
                 local_filename = f"{base_local_filename}_{counter}{ext}"
@@ -1605,17 +1880,20 @@ class FileManager:
                 try:
                     # Give shared folder a moment to sync (helps with cloud/network drives)
                     import time
+
                     time.sleep(0.5)  # 500ms delay for sync
 
                     # Verify the upload (more tolerant of small size differences)
                     if shared_upload_path.exists():
                         local_size = os.path.getsize(target_path)
                         shared_size = shared_upload_path.stat().st_size
-                        
+
                         # Allow small size differences (metadata, compression, etc.)
                         size_diff = abs(shared_size - local_size)
-                        max_diff = max(1024, local_size * 0.01)  # 1KB or 1% of file size
-                        
+                        max_diff = max(
+                            1024, local_size * 0.01
+                        )  # 1KB or 1% of file size
+
                         if size_diff <= max_diff:
                             upload_success = True
                             self.logger.info(
@@ -1842,6 +2120,247 @@ class FileManager:
             self.logger.error(f"Emergency move failed: {str(e)}")
             return None
 
+    def finalize_pending_original(
+        self,
+        pending_path: str,
+        hole_id: str,
+    ) -> Tuple[Optional[str], bool]:
+        """
+        Finalize a pending original by uploading to shared folder and moving to local approved.
+        
+        Uses standardized naming: HoleID_From-To_Original_N.ext where N is sequential.
+        
+        Flow:
+        1. Scan shared folder to find next available number
+        2. Copy to shared approved_originals as _Original_N
+        3. Move to local approved_originals as _Original_N_UPLOADED
+        4. Delete the pending file
+        
+        Args:
+            pending_path: Path to the pending original file
+            hole_id: Hole identifier
+            
+        Returns:
+            Tuple of (local_path, upload_success)
+        """
+        import shutil
+        import re
+        
+        try:
+            if not os.path.exists(pending_path):
+                self.logger.warning(f"Pending original does not exist: {pending_path}")
+                return None, False
+            
+            filename = os.path.basename(pending_path)
+            _, ext = os.path.splitext(pending_path)
+            
+            # Extract depth info from filename
+            # Pattern: OK0171_120-140_Original_a1532568.JPG
+            match = re.match(
+                r"([A-Z]{2}\d{4})_(\d+)-(\d+)_Original_([a-f0-9]+)",
+                filename,
+                re.IGNORECASE
+            )
+            if not match:
+                self.logger.warning(f"Could not parse pending original filename: {filename}")
+                return None, False
+            
+            parsed_hole_id = match.group(1)
+            depth_from = int(match.group(2))
+            depth_to = int(match.group(3))
+            uid = match.group(4)
+            
+            project_code = hole_id[:2].upper()
+            
+            # Find next available number by scanning shared folder
+            next_number = self._get_next_original_number(hole_id, depth_from, depth_to)
+            
+            # Build standardized filename
+            base_filename = f"{hole_id}_{depth_from}-{depth_to}_Original_{next_number}"
+            
+            upload_success = False
+            
+            # Step 1: Copy to shared approved_originals
+            if self.shared_paths:
+                shared_base = self.get_shared_path("approved_originals")
+                if shared_base:
+                    try:
+                        shared_hole_folder = shared_base / project_code / hole_id
+                        shared_hole_folder.mkdir(parents=True, exist_ok=True)
+                        
+                        shared_filename = f"{base_filename}{ext}"
+                        shared_upload_path = shared_hole_folder / shared_filename
+                        
+                        # Check if already exists (shouldn't happen with proper numbering)
+                        if shared_upload_path.exists():
+                            self.logger.warning(f"Shared file already exists: {shared_filename}")
+                        else:
+                            # Copy to shared
+                            if self.copy_with_metadata(pending_path, str(shared_upload_path)):
+                                # Verify upload
+                                if shared_upload_path.exists():
+                                    pending_size = os.path.getsize(pending_path)
+                                    shared_size = shared_upload_path.stat().st_size
+                                    if abs(shared_size - pending_size) < 1000:
+                                        upload_success = True
+                                        self.logger.info(
+                                            f"Uploaded pending original to shared: {shared_filename}"
+                                        )
+                                    else:
+                                        self.logger.warning(
+                                            f"Shared upload size mismatch: {shared_filename}"
+                                        )
+                    except Exception as e:
+                        self.logger.error(f"Failed to upload pending original to shared: {e}")
+            
+            # Step 2: Move to local approved_originals
+            local_approved_dir = self.get_hole_dir("approved_originals", hole_id)
+            os.makedirs(local_approved_dir, exist_ok=True)
+            
+            # Add _UPLOADED suffix if upload succeeded
+            if upload_success:
+                local_filename = f"{base_filename}_UPLOADED{ext}"
+            else:
+                local_filename = f"{base_filename}{ext}"
+            
+            local_path = os.path.join(local_approved_dir, local_filename)
+            
+            # Move the pending file to approved
+            try:
+                shutil.move(pending_path, local_path)
+                self.logger.info(f"Finalized pending original: {filename} -> {local_filename}")
+                
+                # Clean up empty pending directories
+                pending_dir = os.path.dirname(pending_path)
+                if os.path.exists(pending_dir) and not os.listdir(pending_dir):
+                    os.rmdir(pending_dir)
+                    project_dir = os.path.dirname(pending_dir)
+                    if os.path.exists(project_dir) and not os.listdir(project_dir):
+                        os.rmdir(project_dir)
+                
+                return local_path, upload_success
+                
+            except Exception as e:
+                self.logger.error(f"Failed to move pending original to approved: {e}")
+                return None, upload_success
+            
+        except Exception as e:
+            self.logger.error(f"Error finalizing pending original: {e}")
+            return None, False
+
+    def _get_next_original_number(self, hole_id: str, depth_from: int, depth_to: int) -> int:
+        """
+        Find the next available number for an original file.
+        
+        Scans both shared and local approved_originals folders.
+        Handles legacy files without numbers (treats as _1).
+        
+        Returns:
+            Next available number (1, 2, 3, etc.)
+        """
+        import re
+        
+        existing_numbers = set()
+        project_code = hole_id[:2].upper()
+        base_pattern = f"{hole_id}_{depth_from}-{depth_to}_Original"
+        
+        # Pattern to match: _Original.ext, _Original_1.ext, _Original_2.ext, etc.
+        # Also handles _UPLOADED suffix
+        pattern = re.compile(
+            rf"{re.escape(base_pattern)}(?:_(\d+))?(?:_UPLOADED)?(?:_UPLOAD_FAILED)?\.[a-zA-Z]+$",
+            re.IGNORECASE
+        )
+        
+        # Scan shared folder
+        if self.shared_paths:
+            shared_base = self.get_shared_path("approved_originals")
+            if shared_base:
+                shared_hole_dir = shared_base / project_code / hole_id
+                if shared_hole_dir.exists():
+                    for f in shared_hole_dir.iterdir():
+                        if f.is_file():
+                            match = pattern.match(f.name)
+                            if match:
+                                num = match.group(1)
+                                if num:
+                                    existing_numbers.add(int(num))
+                                else:
+                                    # Legacy file without number = 1
+                                    existing_numbers.add(1)
+        
+        # Scan local folder
+        local_dir = self.get_hole_dir("approved_originals", hole_id)
+        if os.path.exists(local_dir):
+            for f in os.listdir(local_dir):
+                match = pattern.match(f)
+                if match:
+                    num = match.group(1)
+                    if num:
+                        existing_numbers.add(int(num))
+                    else:
+                        existing_numbers.add(1)
+        
+        # Find next available number
+        if not existing_numbers:
+            return 1
+        
+        next_num = 1
+        while next_num in existing_numbers:
+            next_num += 1
+        
+        return next_num
+
+    def delete_approved_original_by_uid(self, hole_id: str, uid: str) -> bool:
+        """
+        Delete an approved original file by its UID.
+        
+        Searches both local and shared approved_originals folders.
+        The UID is stored in EXIF metadata, not the filename.
+        
+        Args:
+            hole_id: Hole identifier
+            uid: UID to search for
+            
+        Returns:
+            True if file was found and deleted
+        """
+        project_code = hole_id[:2].upper()
+        deleted = False
+        
+        # Search and delete from local
+        local_dir = self.get_hole_dir("approved_originals", hole_id)
+        if os.path.exists(local_dir):
+            for filename in os.listdir(local_dir):
+                filepath = os.path.join(local_dir, filename)
+                if os.path.isfile(filepath):
+                    file_uid = self.extract_uid_from_any_image(filepath)
+                    if file_uid and file_uid.lower() == uid.lower():
+                        try:
+                            os.remove(filepath)
+                            self.logger.info(f"Deleted local approved original: {filename}")
+                            deleted = True
+                        except Exception as e:
+                            self.logger.error(f"Failed to delete local original {filename}: {e}")
+        
+        # Search and delete from shared
+        if self.shared_paths:
+            shared_base = self.get_shared_path("approved_originals")
+            if shared_base:
+                shared_hole_dir = shared_base / project_code / hole_id
+                if shared_hole_dir.exists():
+                    for f in shared_hole_dir.iterdir():
+                        if f.is_file():
+                            file_uid = self.extract_uid_from_any_image(str(f))
+                            if file_uid and file_uid.lower() == uid.lower():
+                                try:
+                                    f.unlink()
+                                    self.logger.info(f"Deleted shared approved original: {f.name}")
+                                    deleted = True
+                                except Exception as e:
+                                    self.logger.error(f"Failed to delete shared original {f.name}: {e}")
+        
+        return deleted
+
     # ===== UID methods =====
 
     def embed_uid_in_image(self, image_path: str, uid: str = None) -> str:
@@ -2044,7 +2563,9 @@ class FileManager:
                 try:
                     exif_dict = piexif.load(image_path)
                 except Exception as e:
-                    self.logger.debug(f"No existing EXIF data in TIFF {image_path}: {e}")
+                    self.logger.debug(
+                        f"No existing EXIF data in TIFF {image_path}: {e}"
+                    )
                     exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}}
 
                 # Embed UID in EXIF
@@ -2134,6 +2655,116 @@ class FileManager:
         except Exception as e:
             self.logger.debug(f"Error extracting UID from {image_path}: {e}")
             return None
+
+    def calculate_robust_hex_color(
+        self, image_path: str, method: str = "LAB_shadow_compensated"
+    ) -> Dict[str, Any]:
+        """
+        Calculate robust hex color for chip tray image using LAB color space
+        to reduce shadow and highlight sensitivity.
+
+        This method uses LAB color space which separates luminance (L*) from
+        chromatic content (a*, b*). By masking out dark shadows and bright
+        highlights, we get a more consistent color representation of the actual
+        chips, not the lighting conditions.
+
+        Args:
+            image_path: Path to image file
+            method: Calculation method:
+                - "LAB_shadow_compensated" (recommended): Uses LAB color space,
+                  filters shadows/highlights, more robust for lithology
+                - "simple_average": Global RGB average (legacy method)
+
+        Returns:
+            Dictionary with:
+                - hex_color: Hex color string (e.g., "#8B4513")
+                - method: Method used
+                - valid: Whether calculation was successful
+                - notes: Any warnings or notes about the calculation
+        """
+        try:
+            import cv2
+            import numpy as np
+
+            # Read image
+            img = cv2.imread(str(image_path))
+            if img is None:
+                return {
+                    "hex_color": "",
+                    "method": method,
+                    "valid": False,
+                    "notes": "Failed to read image",
+                }
+
+            if method == "LAB_shadow_compensated":
+                # Convert to LAB color space
+                # LAB separates luminance (L*) from chromatic content (a*, b*)
+                lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+                L, A, B = cv2.split(lab)
+
+                # Mask out dark shadows (L < 60) and bright highlights (L > 240)
+                # L* ranges from 0 (black) to 255 (white) in OpenCV's representation
+                # This keeps only mid-range luminance pixels representing actual chips
+                mask = (L > 60) & (L < 240)
+
+                if mask.sum() < 100:  # Too few valid pixels
+                    return {
+                        "hex_color": "",
+                        "method": method,
+                        "valid": False,
+                        "notes": "Insufficient mid-range pixels (image too dark/bright)",
+                    }
+
+                # Calculate mean LAB values from masked region
+                mean_L = L[mask].mean()
+                mean_A = A[mask].mean()
+                mean_B = B[mask].mean()
+
+                # Convert back to RGB
+                lab_avg = np.uint8([[[mean_L, mean_A, mean_B]]])
+                rgb_avg = cv2.cvtColor(lab_avg, cv2.COLOR_LAB2BGR)[0, 0]
+
+                # Convert BGR to RGB (OpenCV uses BGR ordering)
+                rgb_avg_corrected = rgb_avg[::-1]
+                hex_color = "#%02X%02X%02X" % tuple(int(x) for x in rgb_avg_corrected)
+
+                return {
+                    "hex_color": hex_color,
+                    "method": method,
+                    "valid": True,
+                    "notes": f"Calculated from {mask.sum()} pixels",
+                }
+
+            elif method == "simple_average":
+                # Simple global average (current/legacy method)
+                mean_rgb = img.mean(axis=(0, 1))
+                # OpenCV uses BGR, convert to RGB
+                mean_rgb_corrected = mean_rgb[::-1]
+                hex_color = "#%02X%02X%02X" % tuple(mean_rgb_corrected.astype(int))
+
+                return {
+                    "hex_color": hex_color,
+                    "method": method,
+                    "valid": True,
+                    "notes": "Global average of all pixels (legacy method)",
+                }
+
+            else:
+                return {
+                    "hex_color": "",
+                    "method": method,
+                    "valid": False,
+                    "notes": f"Unknown method: {method}",
+                }
+
+        except Exception as e:
+            self.logger.error(f"Error calculating hex color for {image_path}: {e}")
+            return {
+                "hex_color": "",
+                "method": method,
+                "valid": False,
+                "notes": f"Error: {str(e)}",
+            }
 
     def copy_with_metadata(self, source: str, destination: str) -> bool:
         """

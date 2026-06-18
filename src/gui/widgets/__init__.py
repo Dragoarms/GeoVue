@@ -7,12 +7,15 @@ from gui.widgets.field_with_label import create_field_with_label
 from gui.widgets.modern_button import ModernButton
 from gui.widgets.text_display import create_text_display
 from gui.widgets.themed_combobox import create_themed_combobox
+from gui.widgets.themed_date_entry import create_themed_date_entry
 from gui.widgets.themed_menu import ThemedMenu
 from gui.widgets.themed_menu import ThemedMenuBar
 from gui.widgets.dynamic_filter_row import DynamicFilterRow
 from gui.widgets.three_state_toggle import ThreeStateToggle
 from gui.widgets.modern_notebook import ModernNotebook
 from gui.widgets.multiselect_review_dialog import MultiSelectReviewDialog
+from gui.widgets.classification_item_row import ClassificationItemRow
+from gui.widgets.themed_searchable_optionmenu import ThemedSearchableOptionMenu
 
 __all__ = [
     "CollapsibleFrame",
@@ -22,10 +25,13 @@ __all__ = [
     "ModernButton",
     "create_text_display",
     "create_themed_combobox",
+    "create_themed_date_entry",
     "DynamicFilterRow",
     "ThreeStateToggle",
     "ModernNotebook",
     "ThemedMenu",
     "ThemedMenuBar",
     "MultiSelectReviewDialog",
+    "ClassificationItemRow",
+    "ThemedSearchableOptionMenu",
 ]

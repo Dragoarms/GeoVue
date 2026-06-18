@@ -40,18 +40,38 @@ class DepthValidator:
 
             self.logger.info(f"Reading CSV from: {self.csv_path}")
 
-            # Read CSV
-            df = pd.read_csv(self.csv_path)
-            self.logger.info(f"CSV loaded, shape: {df.shape}")
-            self.logger.info(f"CSV columns: {df.columns.tolist()}")
+            # Read CSV with low_memory=False to avoid mixed type warnings
+            df = pd.read_csv(self.csv_path, low_memory=False)
+            self.logger.debug(f"CSV loaded, shape: {df.shape}")
+            self.logger.debug(f"CSV columns: {df.columns.tolist()}")
 
-            # Check required columns exist
-            required_cols = ["HoleID", "From", "To"]
-            if not all(col in df.columns for col in required_cols):
-                self.logger.error(
-                    f"CSV missing required columns. Found: {df.columns.tolist()}"
-                )
+            # Map column names - check for various possible names
+            hole_columns = ["HOLEID", "HoleID", "Hole_ID", "DHID"]
+            from_columns = ["SAMPFROM", "From", "SampleFrom", "DepthFrom", "FROM", "from"]
+            to_columns = ["SAMPTO", "To", "SampleTo", "DepthTo", "TO", "to"]
+
+            # Find which columns exist
+            hole_col = next((col for col in hole_columns if col in df.columns), None)
+            from_col = next((col for col in from_columns if col in df.columns), None)
+            to_col = next((col for col in to_columns if col in df.columns), None)
+
+            if not (hole_col and from_col and to_col):
+                missing = []
+                if not hole_col:
+                    missing.append("HoleID (tried: " + ", ".join(hole_columns) + ")")
+                if not from_col:
+                    missing.append("From (tried: " + ", ".join(from_columns) + ")")
+                if not to_col:
+                    missing.append("To (tried: " + ", ".join(to_columns) + ")")
+                self.logger.error(f"CSV missing required columns: {missing}")
+                self.logger.error(f"Available columns: {df.columns.tolist()[:20]}...")
                 return False
+
+            # Rename columns to standard names for internal use
+            df = df.rename(columns={hole_col: "HoleID", from_col: "From", to_col: "To"})
+            self.logger.info(
+                f"Mapped columns: {hole_col}->HoleID, {from_col}->From, {to_col}->To"
+            )
 
             # Clean and process data
             df["HoleID"] = df["HoleID"].astype(str).str.strip().str.upper()

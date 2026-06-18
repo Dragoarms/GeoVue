@@ -1,18 +1,20 @@
 import tkinter as tk
 from tkinter import ttk
 from .entry_with_validation import create_entry_with_validation
-from .themed_combobox import create_themed_combobox  # Add this import
+from .themed_combobox import create_themed_combobox
+from .themed_searchable_optionmenu import ThemedSearchableOptionMenu
 
 def create_field_with_label(
     parent, label_text, variable, theme_colors, fonts,
     translator=None, field_type="entry", readonly=False,
-    width=20, validate_func=None, values=None, placeholder=None
+    width=20, validate_func=None, values=None, placeholder=None,
+    gui_manager=None  # Add this parameter
 ):
     """
-    Creates a labeled input field (entry or combobox) with consistent horizontal layout and theming.
+    Creates a labeled input field (entry, combobox, or searchable dropdown) with consistent horizontal layout and theming.
 
-    The label appears on the left, and the field (entry or combobox) on the right. Supports both editable
-    and read-only entry fields, and optionally styled comboboxes with provided values.
+    The label appears on the left, and the field on the right. Supports entry fields,
+    comboboxes, and searchable dropdowns.
 
     Args:
         parent: Parent Tkinter widget.
@@ -21,12 +23,13 @@ def create_field_with_label(
         theme_colors: Dictionary of theme color values.
         fonts: Dictionary of font styles.
         translator: Optional translation function for label text.
-        field_type: One of "entry" or "combobox".
+        field_type: One of "entry", "combobox", or "searchable".
         readonly: Whether the field should be read-only.
         width: Width of the label area.
-        validate_func: Optional function triggered on input validation.
-        values: List of values for combobox options (used only if field_type="combobox").
-        placeholder: Optional placeholder text for entry fields.
+        validate_func: Optional function triggered on input validation or selection change.
+        values: List of values for combobox/searchable options.
+        placeholder: Optional placeholder text for entry/searchable fields.
+        gui_manager: GUIManager instance (required for searchable type).
 
     Returns:
         A tuple of (Frame, field widget) for layout integration and direct access.
@@ -60,7 +63,8 @@ def create_field_with_label(
             )
         else:
             field = create_entry_with_validation(
-                frame, variable, theme_colors, fonts["normal"], validate_func=validate_func, placeholder=placeholder
+                frame, variable, theme_colors, fonts["normal"], 
+                validate_func=validate_func, placeholder=placeholder
             )
         field.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
 
@@ -76,6 +80,24 @@ def create_field_with_label(
             validate_func=validate_func
         )
         field.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+    
+    elif field_type == "searchable":
+        if not gui_manager:
+            raise ValueError("gui_manager is required for searchable field type")
+        
+        field = ThemedSearchableOptionMenu(
+            frame,
+            gui_manager=gui_manager,
+            items=values or [],
+            variable=variable,
+            width=15,  # Match combobox default width
+            placeholder=placeholder,
+            on_change=validate_func  # Use validate_func as on_change callback
+        )
+        field.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+    
+    else:
+        raise ValueError(f"Invalid field_type: {field_type}")
 
     # Store original text and translator for updates
     frame._original_text = label_text

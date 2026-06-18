@@ -461,3 +461,139 @@ class BoundaryManager:
             "missing_markers": missing,
             "completion_percentage": (total / self.expected_compartment_count * 100),
         }
+
+
+    def interpolate_missing_boundaries(
+        self,
+        vertical_constraints: Tuple[int, int],
+        scale_px_per_cm: float,
+        config: Dict[str, Any],
+        image_width: int,
+    ) -> Dict[str, Any]:
+        """
+        Interpolate missing compartment boundaries using existing boundaries.
+        
+        Args:
+            vertical_constraints: (top_y, bottom_y) for compartment bounds
+            scale_px_per_cm: Scale factor from marker detection
+            config: Config dict with compartment_width_cm, compartment_spacing_mm, etc.
+            image_width: Image width for boundary clamping
+            
+        Returns:
+            Dict with interpolated_boundaries, interpolated_marker_ids, gap_analysis
+        """
+        top_y, bottom_y = vertical_constraints
+
+        cw_cm = config.get("compartment_width_cm", 2.0)
+        comp_w = int(cw_cm * scale_px_per_cm)
+
+        default_mm = config.get("compartment_spacing_mm", 3.0)
+        default_sp = int((default_mm / 10.0) * scale_px_per_cm)
+
+        overrides = config.get("compartment_spacing_overrides", {})
+
+        total = config.get("compartment_count", 20)
+        min_mid, max_mid = 4, 3 + total
+
+        # Build sorted list from internal boundaries
+        existing = []
+        for marker_id in sorted(self.boundaries.keys()):
+            if min_mid <= marker_id <= max_mid:
+                boundary = self.boundaries[marker_id]
+                existing.append((marker_id, boundary.x1, boundary.x2))
+
+        if not existing:
+            self.logger.warning("No existing boundaries to interpolate from")
+            return {"interpolated_boundaries": [], "interpolated_marker_ids": [], "gap_analysis": []}
+
+        truly_missing = set(self.get_missing_markers())
+        if not truly_missing:
+            self.logger.info("No missing markers to interpolate")
+            return {"interpolated_boundaries": [], "interpolated_marker_ids": [], "gap_analysis": []}
+
+        gaps = []
+        new_bounds = []
+        new_ids = []
+
+        # Interior gaps
+        for i in range(len(existing) - 1):
+            mid1, _, x1b = existing[i]
+            mid2, x2a, _ = existing[i + 1]
+            gap_span = x2a - x1b
+            count = mid2 - mid1 - 1
+            if count <= 0:
+                continue
+
+            markers_in_gap = [m for m in range(mid1 + 1, mid2) if m in truly_missing]
+            if not markers_in_gap:
+                continue
+
+            key = f"{mid1 - 3}-{mid2 - 3}"
+            sp_mm = overrides.get(key, default_mm)
+            sp_px = int((sp_mm / 10.0) * scale_px_per_cm)
+
+            gaps.append({
+                "start_x": x1b, "end_x": x2a, "gap_size": gap_span,
+                "expected_compartments": count, "after_marker": mid1, "before_marker": mid2,
+            })
+
+            total_width = count * comp_w + (count + 1) * sp_px
+            slack = gap_span - total_width
+            start = x1b + max(0, slack // 2) + sp_px
+
+            for j, marker in enumerate(range(mid1 + 1, mid2)):
+                if marker not in truly_missing:
+                    continue
+                x1n = int(start + j * (comp_w + sp_px))
+                x2n = x1n + comp_w
+                x1n = max(0, x1n)
+                x2n = min(image_width, x2n)
+                new_bounds.append((x1n, top_y, x2n, bottom_y))
+                new_ids.append(marker)
+                self.logger.debug(f"Interpolated interior marker {marker}: ({x1n}, {top_y}, {x2n}, {bottom_y})")
+
+        # Left edge
+        if existing:
+            first_mid, first_x1, _ = existing[0]
+            for m in range(first_mid - 1, min_mid - 1, -1):
+                if m not in truly_missing:
+                    continue
+                steps_left = first_mid - m
+                x2n = first_x1 - default_sp - (steps_left - 1) * (comp_w + default_sp)
+                x1n = x2n - comp_w
+                if x1n < 0:
+                    self.logger.warning(f"Marker {m} off-screen left (x1={x1n})")
+                    break
+                new_bounds.insert(0, (x1n, top_y, x2n, bottom_y))
+                new_ids.insert(0, m)
+
+            # Right edge
+            last_mid, _, last_x2 = existing[-1]
+            for m in range(last_mid + 1, max_mid + 1):
+                if m not in truly_missing:
+                    continue
+                steps_right = m - last_mid
+                x1n = last_x2 + default_sp + (steps_right - 1) * (comp_w + default_sp)
+                x2n = x1n + comp_w
+                if x2n > image_width:
+                    self.logger.warning(f"Marker {m} off-screen right (x2={x2n})")
+                    break
+                new_bounds.append((x1n, top_y, x2n, bottom_y))
+                new_ids.append(m)
+
+        self.logger.info(f"Built {len(new_bounds)} interpolated boxes for markers {new_ids}")
+        return {"interpolated_boundaries": new_bounds, "interpolated_marker_ids": new_ids, "gap_analysis": gaps}
+
+    def apply_interpolated_boundaries(
+        self,
+        interpolated_boundaries: List[Tuple[int, int, int, int]],
+        interpolated_marker_ids: List[int],
+    ) -> int:
+        """Apply interpolated boundaries. Returns count added."""
+        added = 0
+        for bounds, marker_id in zip(interpolated_boundaries, interpolated_marker_ids):
+            x1, y1, x2, y2 = bounds
+            if self.add_boundary(marker_id, x1, y1, x2, y2, boundary_type="interpolated"):
+                added += 1
+        self.logger.info(f"Applied {added}/{len(interpolated_marker_ids)} interpolated boundaries")
+        return added

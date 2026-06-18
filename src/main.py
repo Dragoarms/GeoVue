@@ -61,6 +61,7 @@ from typing import List, Dict, Tuple, Any
 import re
 import pandas as pd
 from datetime import datetime
+
 # from pillow_heif import (
 #     register_heif_opener,
 # )
@@ -112,11 +113,11 @@ logger.info(f"Starting GeoVue v{__version__}")
 # Module-specific logging levels DEBUG, INFO, WARNING, ERROR
 # ===================================================
 # Turn off or down debug logs for noisy modules
-logging.getLogger("processing.aruco_manager").setLevel(logging.INFO)
+logging.getLogger("processing.aruco_manager").setLevel(logging.DEBUG)
 logging.getLogger("processing.blur_detector").setLevel(logging.INFO)
-logging.getLogger("core.file_manager").setLevel(logging.INFO)
+logging.getLogger("core.file_manager").setLevel(logging.DEBUG)
 logging.getLogger("core.config_manager").setLevel(logging.INFO)
-logging.getLogger("core.visualization_manager").setLevel(logging.INFO)
+logging.getLogger("core.visualization_manager").setLevel(logging.DEBUG)
 logging.getLogger("core.translator").setLevel(logging.INFO)
 
 
@@ -125,7 +126,7 @@ logging.getLogger("processing.QAQCStep.qaqc_models").setLevel(logging.INFO)
 logging.getLogger("processing.QAQCStep.qaqc_processor").setLevel(logging.INFO)
 logging.getLogger("processing.QAQCStep.qaqc_scanner").setLevel(logging.INFO)
 
-logging.getLogger("processing.visualization_drawer").setLevel(logging.INFO)
+logging.getLogger("processing.visualization_drawer").setLevel(logging.DEBUG)
 
 
 logging.getLogger("gui.gui_manager").setLevel(logging.INFO)
@@ -133,20 +134,20 @@ logging.getLogger("gui.dialog_helper").setLevel(logging.INFO)
 
 logging.getLogger("gui.duplicate_handler").setLevel(logging.INFO)
 logging.getLogger("gui.main_gui").setLevel(logging.DEBUG)
-logging.getLogger("gui.compartment_registration_dialog").setLevel(logging.DEBUG)
+logging.getLogger("gui.compartment_registration_dialog").setLevel(logging.INFO)
 logging.getLogger("gui.progress_dialog").setLevel(logging.INFO)
 logging.getLogger("gui.logging_review_dialog").setLevel(logging.INFO)
 logging.getLogger("gui.first_run_dialog").setLevel(logging.INFO)
 logging.getLogger("gui.embedding_training_dialog").setLevel(logging.INFO)
 
-logging.getLogger("gui.widgets").setLevel(logging.INFO)
+logging.getLogger("gui.widgets").setLevel(logging.DEBUG)
 
-logging.getLogger("utils.json_register_manager").setLevel(logging.DEBUG)
+logging.getLogger("utils.json_register_manager").setLevel(logging.INFO)
 logging.getLogger("utils.register_synchronizer").setLevel(logging.INFO)
 logging.getLogger("utils.image_pan_zoom_handler").setLevel(logging.INFO)
 
 
-# Suppress third-party debug logs (set to WARNING or ERROR as needed)
+# Suppress third-party debug logs (set to INFO or ERROR as needed)
 logging.getLogger("PIL").setLevel(logging.WARNING)
 logging.getLogger("PIL.Image").setLevel(logging.WARNING)
 logging.getLogger("PIL.PngImagePlugin").setLevel(logging.ERROR)
@@ -242,33 +243,13 @@ class GeoVue:
         self.file_manager = FileManager(
             base_dir=output_dir, config_manager=self.config_manager
         )
+        
+        # DrillholeDataManager will be initialized AFTER shared paths are set up
+        # (after first run dialog or after register_manager initialization)
+        self.drillhole_data_manager = None
 
-        # Initialize depth validator with CSV path
-        depth_csv_path = self.file_manager.get_shared_path("depth_validation_csv")
-        self.logger.info(
-            f"Looking for depth validation CSV at shared path: {depth_csv_path}"
-        )
-
-        if depth_csv_path:
-            self.logger.info(
-                f"Attempting to initialize depth validator from: {depth_csv_path}"
-            )
-            self.depth_validator = DepthValidator(depth_csv_path)
-            self.logger.info(
-                f"Depth validator initialized, is_loaded: {self.depth_validator.is_loaded}"
-            )
-            if not self.depth_validator.is_loaded:
-                self.logger.warning("Depth validator created but CSV data not loaded")
-        else:
-            self.depth_validator = DepthValidator()  # Empty validator
-            self.logger.warning(
-                "No depth validation CSV path configured - using empty validator"
-            )
-
-        # Also check if _initialize_depth_validator method exists and call it
-        if hasattr(self, "_initialize_depth_validator"):
-            self.logger.info("Calling _initialize_depth_validator method")
-            self._initialize_depth_validator()
+        # Depth validator is populated later by SnowflakeSessionManager Phase 1.
+        self.depth_validator = None
 
         # Initialize translation system early
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -371,6 +352,12 @@ class GeoVue:
                 if value:  # Only save non-None values
                     self.config_manager.set(key, value)
 
+            # Save Snowflake user if provided
+            sf_user = result.get("snowflake_user", "")
+            if sf_user:
+                self.config_manager.set("snowflake_user", sf_user)
+                self.logger.info(f"Saved Snowflake user: {sf_user}")
+
             # Mark as initialized
             self.config_manager.mark_initialized()
 
@@ -388,6 +375,7 @@ class GeoVue:
             else:
                 # ADD THIS: If we didn't recreate FileManager, still update shared paths
                 self.file_manager.initialize_shared_paths()
+
 
         # ===================================================
         # STEP 5: INITIALIZE GUI COMPONENTS
@@ -436,6 +424,13 @@ class GeoVue:
             self.register_manager = JSONRegisterManager(
                 str(register_base_path), self.logger
             )
+        
+        # Kick off Snowflake Phase 1 (COLLAR) in background — safe, non-blocking.
+        # The splash update callback uses root.after() to stay thread-safe.
+        self._launch_snowflake_phase1()
+
+        # NOW initialize DrillholeDataManager with register_manager and shared paths ready
+        self._initialize_drillhole_data_manager()
 
         # Set application icon
         self._set_application_icon()
@@ -463,6 +458,57 @@ class GeoVue:
         self.processing_complete = False
 
         self.logger.info("GeoVue initialization complete")
+
+    def _launch_snowflake_phase1(self) -> None:
+        """
+        Start Snowflake Phase 1 (collar fetch) in a background thread.
+        If snowflake_user is not yet configured, schedules a prompt dialog
+        to appear 1.5s after the main window loads, then starts Phase 1
+        once the user supplies or confirms their email.
+        If Snowflake is unavailable for any reason, this is a silent no-op.
+        """
+        try:
+            from processing.DataManager.snowflake_session import (
+                get_session_manager, SNOWFLAKE_AVAILABLE,
+            )
+
+            if not SNOWFLAKE_AVAILABLE:
+                self.logger.info("Snowflake connector not installed — Phase 1 skipped")
+                return
+
+            sm = get_session_manager()
+
+            def _on_status(msg: str, detail: str) -> None:
+                """Route session manager status updates to splash screen."""
+                try:
+                    import sys
+                    lc = sys.modules.get("launcher_config")
+                    splash = getattr(lc, "splash_instance", None) if lc else None
+                    if splash and hasattr(splash, "update_status"):
+                        if hasattr(self, "root") and self.root.winfo_exists():
+                            self.root.after(0, lambda m=msg, d=detail: splash.update_status(m, d))
+                except Exception:
+                    pass
+
+            stored_user = self.config_manager.get("snowflake_user", "")
+
+            if stored_user:
+                # Happy path — user already configured, launch immediately
+                sm.set_user_hint(stored_user)
+                sm.start_phase1(on_status=_on_status)
+                self.logger.info(f"Snowflake Phase 1 launched (user={stored_user})")
+            else:
+                # No user stored — store the callback for later; MainGUI will
+                # schedule it via root.after() AFTER initialization is complete.
+                # Do NOT schedule root.after() here — it would fire during the
+                # DataCoordinator pump loop and block root.update() indefinitely.
+                self.logger.info(
+                    "snowflake_user not configured — prompt deferred until GUI ready"
+                )
+                self._pending_snowflake_prompt = (_on_status, sm)
+
+        except Exception as e:
+            self.logger.info(f"Snowflake Phase 1 not launched: {e}")
 
     def debug_quick(self, label="Debug Point"):
         """Quick debug print of key variables."""
@@ -695,21 +741,179 @@ class GeoVue:
             self.logger.error(traceback.format_exc())
             return False
 
-    def _initialize_depth_validator(self):
-        """Initialize depth validator if CSV path is configured."""
-        csv_path = self.config_manager.get("shared_folder_drillhole_data_csv")
-        if csv_path and os.path.exists(csv_path):
-            try:
-                self.depth_validator = DepthValidator(csv_path)
-                if self.depth_validator.is_loaded:
-                    self.logger.info(
-                        f"Initialized depth validator with {len(self.depth_validator.depth_ranges)} holes"
+    def _initialize_drillhole_data_manager(self):
+        """
+        Initialize DataCoordinator (new indexed drillhole data system).
+        Called after shared paths and register_manager are set up.
+        
+        This replaces the old DrillholeDataManager with the new efficient
+        indexed system that provides O(1) lookups instead of O(n) DataFrame filtering.
+        """
+        from processing.DataManager import DataCoordinator
+        
+        self.logger.info("=" * 80)
+        self.logger.info("Initializing DataCoordinator (indexed drillhole data system)")
+        self.logger.info("=" * 80)
+        
+        # Create the new DataCoordinator
+        self.data_coordinator = DataCoordinator(
+            config_manager=self.config_manager,
+            file_manager=self.file_manager
+        )
+        
+        # Collect paths for initialization
+        compartment_folders = []
+        original_folder = None
+        csv_files = []
+        
+        if hasattr(self.file_manager, 'shared_paths') and self.file_manager.shared_paths:
+            # Get compartment image folders (approved compartments)
+            shared_approved = self.file_manager.shared_paths.get('approved_compartments')
+            if shared_approved and os.path.exists(str(shared_approved)):
+                compartment_folders.append(str(shared_approved))
+                self.logger.info(f"  Compartment folder (shared): {shared_approved}")
+            else:
+                self.logger.warning(f"  Approved compartments folder not found: {shared_approved}")
+            
+            # # Get local approved folder if exists
+            # local_approved = self.file_manager.get_local_path('approved_photos')
+            # if local_approved and os.path.exists(local_approved):
+            #     compartment_folders.append(str(local_approved))
+            #     self.logger.info(f"  Compartment folder (local): {local_approved}")
+            
+            # Get original images folder (approved originals)
+            shared_originals = self.file_manager.shared_paths.get('approved_originals')
+            if shared_originals and os.path.exists(str(shared_originals)):
+                original_folder = str(shared_originals)
+                self.logger.info(f"  Original images folder: {shared_originals}")
+            
+            # Collect CSV files from datasets directory
+            shared_datasets_dir = self.file_manager.shared_paths.get('datasets')
+            if shared_datasets_dir and os.path.exists(shared_datasets_dir):
+                self.logger.info(f"  Datasets directory: {shared_datasets_dir}")
+                
+                try:
+                    for file in os.listdir(shared_datasets_dir):
+                        if file.lower().endswith(('.csv',)):
+                            # Skip collar file for now - handled separately if needed
+                            # TODO: Add collar data support to DataCoordinator
+                            file_path = os.path.join(shared_datasets_dir, file)
+                            if os.path.isfile(file_path):
+                                csv_files.append(file_path)
+                                self.logger.info(f"    Found CSV: {file}")
+                except Exception as e:
+                    self.logger.error(f"Error scanning datasets directory: {e}")
+        
+        # Initialize the coordinator with all collected paths.
+        # Runs in a background thread so the main thread can keep the splash
+        # bar animated — image scanning takes 30-40s on network drives.
+        if compartment_folders or csv_files:
+            init_error: list = []
+            init_done = threading.Event()
+
+            def _do_init():
+                try:
+                    self.data_coordinator.initialize(
+                        compartment_folders=compartment_folders,
+                        original_folder=original_folder,
+                        csv_files=csv_files,
+                        json_manager=self.register_manager,
                     )
-                else:
-                    self.logger.warning("Depth validator CSV exists but failed to load")
-            except Exception as e:
-                self.logger.error(f"Failed to initialize depth validator: {e}")
-                self.depth_validator = None
+                except Exception as e:
+                    import traceback as _tb
+                    init_error.append((e, _tb.format_exc()))
+                finally:
+                    init_done.set()
+
+            threading.Thread(target=_do_init, daemon=True, name="dc-init").start()
+
+            # Pump tkinter every 50 ms so the splash bar animates.
+            splash_ref = None
+            try:
+                import sys as _sys
+                lc = _sys.modules.get("launcher_config")
+                splash_ref = getattr(lc, "splash_instance", None) if lc else None
+            except Exception:
+                pass
+
+            while not init_done.wait(timeout=0.05):
+                if splash_ref:
+                    try:
+                        splash_ref.pulse()
+                    except Exception:
+                        splash_ref = None
+                try:
+                    self.root.update()
+                except Exception:
+                    break
+
+            if init_error:
+                e, tb = init_error[0]
+                self.logger.error(f"Error initializing DataCoordinator: {e}")
+                self.logger.error(tb)
+                self.data_coordinator = None
+            else:
+                stats = self.data_coordinator.get_stats()
+                self.logger.info("DataCoordinator initialization complete:")
+                self.logger.info(f"  Images indexed: {stats['image_index']['images_indexed']:,}")
+                self.logger.info(f"  Holes with images: {stats['image_index']['unique_holes']:,}")
+                self.logger.info(f"  CSV rows: {stats['geological_store']['total_rows']:,}")
+                self.logger.info(f"  Init time: {stats['initialization_time']:.2f}s")
+        else:
+            self.logger.warning("No compartment folders or CSV files found — DataCoordinator not initialized")
+            self.data_coordinator = None
+
+        self.drillhole_data_manager = None  # deprecated; use data_coordinator
+        self.logger.info("=" * 80)
+
+    def _initialize_depth_validator(self):
+        """
+        Depth validator is populated from Snowflake collar data via
+        SnowflakeSessionManager.start_phase1().  No CSV source is required.
+        Initialize to None here; it will be set once Phase 1 completes.
+        """
+        self.depth_validator = None
+
+    def _is_compartment_within_hole_depth(self, hole_id: str, comp_depth: float) -> bool:
+        """
+        Check if a compartment depth is within the valid range for the hole.
+
+        If depth validation data is available and the hole is found, returns True only
+        if the compartment depth is within the valid range. If no depth data is available
+        or the hole is not found, returns True to allow extraction of all compartments.
+
+        Args:
+            hole_id: The hole identifier
+            comp_depth: The compartment depth to check
+
+        Returns:
+            True if the compartment should be saved, False if it should be skipped
+        """
+        # If no depth validator or not loaded, save all compartments
+        if not hasattr(self, 'depth_validator') or self.depth_validator is None:
+            return True
+        if not self.depth_validator.is_loaded:
+            return True
+
+        # Get valid range for this hole
+        valid_range = self.depth_validator.get_valid_range(hole_id)
+
+        # If hole not found in depth data, save all compartments
+        if valid_range is None:
+            return True
+
+        min_depth, max_depth = valid_range
+
+        # Check if compartment depth is within valid range
+        # Note: We only check max_depth as compartments beyond the hole depth are empty
+        if comp_depth > max_depth:
+            self.logger.debug(
+                f"Skipping compartment at depth {comp_depth}m for {hole_id} "
+                f"(beyond hole max depth of {max_depth}m)"
+            )
+            return False
+
+        return True
 
     def _initialize_core_components(self):
         """Initialize core system components."""
@@ -780,11 +984,13 @@ class GeoVue:
         if not hasattr(self, "gui_manager"):
             self.gui_manager = GUIManager(self.file_manager, self.config_manager)
 
-        # Initialize duplicate checker for GUI dialogs
+        # Initialize duplicate checker — defer the expensive shared folder scan
+        # until the user actually starts processing (ensure_loaded() called then).
         self.duplicate_handler = DuplicateHandler(file_manager=self.file_manager)
-        self.duplicate_handler.parent = self  # Give it access to visualization_cache
+        self.duplicate_handler.parent = self
         self.duplicate_handler.logger = logging.getLogger(__name__)
-        self.duplicate_handler.root = self.root  # Set root for dialog creation
+        self.duplicate_handler.root = self.root
+        self.duplicate_handler.set_scan_shared_folders(False)
 
         # Initialize QAQC manager (old version)
         self.qaqc_manager = QAQCManager(
@@ -928,8 +1134,11 @@ class GeoVue:
         # Initialize variables that might be used in error/exit handlers
         scale_data = None
         scale_px_per_cm_original = None
-        rotation_matrix = None  # No longer used per code comments
+        rotation_matrix = None  # No longer used per code comments ? CHECK THIS!
         total_rotation_angle = 0.0
+        
+        # Track interpolated boundaries for batch processing report
+        self._interpolated_indices = []
 
         try:
             # ===================================================
@@ -1070,6 +1279,307 @@ class GeoVue:
             self.logger.debug(f" Initial metadata: {metadata}")
 
             # ===================================================
+            # STEP 3.5: CHECK FOR REGISTER-BASED RE-EXTRACTION
+            # ===================================================
+            # If this is a reprocessing AND we have register data with corners,
+            # we can skip ArUco detection and use stored coordinates directly
+            use_register_extraction = False
+            register_corners = []
+            register_original_record = None
+
+            if is_reprocessing and image_uid:
+                self.logger.info(
+                    f"Checking register for existing extraction data (UID: {image_uid[:8]}...)"
+                )
+
+                # Query register for this source image
+                register_original_record = (
+                    self.register_manager.get_original_image_by_uid(image_uid)
+                )
+
+                if register_original_record:
+                    # Check for stored compartment corners
+                    register_corners = (
+                        self.register_manager.get_all_corners_by_source_uid(
+                            image_uid
+                        )
+                    )
+
+                    if register_corners and len(register_corners) > 0:
+                        use_register_extraction = True
+                        add_progress_message(
+                            f"Found {len(register_corners)} stored compartments - using register data",
+                            None,
+                            message_type="info",
+                        )
+                        self.logger.info(
+                            f"Register-based extraction: {len(register_corners)} compartments"
+                        )
+
+                        # Get stored metadata from register
+                        stored_hole_id = register_original_record.get("HoleID")
+                        stored_depth_from = register_original_record.get("Depth_From")
+                        stored_depth_to = register_original_record.get("Depth_To")
+                        stored_scale = register_original_record.get("Scale_PX_Per_CM")
+
+                        self.logger.info(
+                            f"Stored metadata: {stored_hole_id} {stored_depth_from}-{stored_depth_to}m, "
+                            f"scale={stored_scale} px/cm"
+                        )
+                    else:
+                        self.logger.info(
+                            "Original record found but no corner data - using normal flow"
+                        )
+                else:
+                    self.logger.info(
+                        "No register record found for UID - using normal flow"
+                    )
+
+            # ===================================================
+            # STEP 3.6: REGISTER-BASED EXTRACTION (FAST PATH)
+            # ===================================================
+            if use_register_extraction:
+                add_progress_message(
+                    "Extracting compartments from stored coordinates...",
+                    None,
+                    message_type="info",
+                )
+
+                # Check if transformation was applied during original processing
+                # If so, we need to apply the same transformation before extraction
+                transformation_applied = register_original_record.get(
+                    "Transformation_Applied", False
+                )
+                stored_rotation = register_original_record.get("Total_Rotation_Angle", 0.0)
+
+                # Use the full-resolution original image for extraction
+                extraction_image = original_image
+
+                if transformation_applied and abs(stored_rotation) > 0.01:
+                    add_progress_message(
+                        f"Applying stored rotation ({stored_rotation:.2f} degrees)...",
+                        None,
+                        message_type="info",
+                    )
+                    self.logger.info(
+                        f"Re-applying stored rotation: {stored_rotation:.2f} degrees"
+                    )
+
+                    # Apply the same rotation that was applied during original processing
+                    h, w = original_image.shape[:2]
+                    center = (w // 2, h // 2)
+                    rotation_matrix = cv2.getRotationMatrix2D(
+                        center, stored_rotation, 1.0
+                    )
+
+                    # Calculate new dimensions to avoid cropping (same as original)
+                    cos_val = np.abs(rotation_matrix[0, 0])
+                    sin_val = np.abs(rotation_matrix[0, 1])
+                    new_w = int(h * sin_val + w * cos_val)
+                    new_h = int(h * cos_val + w * sin_val)
+
+                    # Adjust rotation matrix for expanded canvas
+                    rotation_matrix[0, 2] += (new_w - w) / 2
+                    rotation_matrix[1, 2] += (new_h - h) / 2
+
+                    # Apply rotation
+                    extraction_image = cv2.warpAffine(
+                        original_image,
+                        rotation_matrix,
+                        (new_w, new_h),
+                        flags=cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=(0, 0, 0),
+                    )
+                    self.logger.info(
+                        f"Rotated image from {w}x{h} to {new_w}x{new_h}"
+                    )
+
+                extracted_compartments = []
+                compartment_statuses = []
+
+                # Get existing compartment records to check wet/dry status
+                existing_compartments = (
+                    self.register_manager.get_compartments_by_source_uid(image_uid)
+                )
+                existing_by_depth = {
+                    comp.get("From"): comp for comp in existing_compartments
+                }
+
+                for corner_record in register_corners:
+                    comp_num = corner_record.get("Compartment_Number", 0)
+                    depth = corner_record.get("Depth_From", 0)
+
+                    # Get corner coordinates
+                    tl = (corner_record.get("Top_Left_X", 0), corner_record.get("Top_Left_Y", 0))
+                    tr = (corner_record.get("Top_Right_X", 0), corner_record.get("Top_Right_Y", 0))
+                    br = (corner_record.get("Bottom_Right_X", 0), corner_record.get("Bottom_Right_Y", 0))
+                    bl = (corner_record.get("Bottom_Left_X", 0), corner_record.get("Bottom_Left_Y", 0))
+
+                    # Calculate bounding box for extraction
+                    x_coords = [tl[0], tr[0], br[0], bl[0]]
+                    y_coords = [tl[1], tr[1], br[1], bl[1]]
+                    x1 = max(0, min(x_coords))
+                    y1 = max(0, min(y_coords))
+                    x2 = min(extraction_image.shape[1], max(x_coords))
+                    y2 = min(extraction_image.shape[0], max(y_coords))
+
+                    # Extract compartment from (possibly rotated) extraction image
+                    if x2 > x1 and y2 > y1:
+                        compartment_img = extraction_image[y1:y2, x1:x2].copy()
+                        extracted_compartments.append((comp_num, depth, compartment_img))
+
+                        # Check existing wet/dry status
+                        existing = existing_by_depth.get(depth)
+                        wet_dry_status = None
+                        photo_status = "For Review"
+
+                        if existing:
+                            photo_status = existing.get("Photo_Status", "For Review")
+                            wet_dry_status = existing.get("Moisture_Status")
+
+                            # Extract moisture from Photo_Status if not set
+                            # Photo_Status values: OK_Wet, OK_Dry, OK_Wet_Bad, OK_Dry_Bad,
+                            
+                            if not wet_dry_status and photo_status:
+                                if "_Wet" in photo_status:
+                                    wet_dry_status = "Wet"
+                                elif "_Dry" in photo_status:
+                                    wet_dry_status = "Dry"
+
+                            # Also check filename for wet/dry as fallback
+                            if not wet_dry_status:
+                                filename = existing.get("Final_Filename", "")
+                                if "_Wet" in filename:
+                                    wet_dry_status = "Wet"
+                                elif "_Dry" in filename:
+                                    wet_dry_status = "Dry"
+
+                        compartment_statuses.append({
+                            "comp_num": comp_num,
+                            "depth": depth,
+                            "photo_status": photo_status,
+                            "wet_dry": wet_dry_status,
+                        })
+
+                        self.logger.debug(
+                            f"Extracted compartment {comp_num} at depth {depth}: "
+                            f"status={photo_status}, wet_dry={wet_dry_status}"
+                        )
+
+                # Save extracted compartments
+                saved_paths = []
+                hole_id = register_original_record.get("HoleID", "UNKNOWN")
+                skipped_count = 0
+
+                for (comp_num, depth, comp_img), status in zip(
+                    extracted_compartments, compartment_statuses
+                ):
+                    # Skip compartments beyond hole depth if depth data is available
+                    if not self._is_compartment_within_hole_depth(hole_id, depth):
+                        skipped_count += 1
+                        continue
+
+                    wet_dry = status.get("wet_dry")
+                    photo_status = status.get("photo_status")
+
+                    # If already approved with wet/dry, save directly to approved
+                    # Photo_Status values: OK_Wet, OK_Dry, OK_Wet_Bad, OK_Dry_Bad
+                    has_moisture_status = photo_status and photo_status.startswith("OK_")
+                    if has_moisture_status and wet_dry in ("Wet", "Dry"):
+                        saved_path = self.file_manager.save_approved_compartment_direct(
+                            comp_img,
+                            hole_id,
+                            depth,
+                            wet_dry,
+                            source_uid=image_uid,
+                            upload_to_shared=True,
+                        )
+                        add_progress_message(
+                            f"Re-extracted {hole_id} CC_{depth:03d}_{wet_dry} (approved)",
+                            None,
+                            message_type="info",
+                        )
+                    else:
+                        # Save to temp for review
+                        suffix = f"reextract_{image_uid[:8]}"
+                        saved_path = self.file_manager.save_temp_compartment(
+                            comp_img,
+                            hole_id,
+                            depth,
+                            suffix=suffix,
+                            source_uid=image_uid,
+                        )
+                        add_progress_message(
+                            f"Re-extracted {hole_id} CC_{depth:03d} (for review)",
+                            None,
+                            message_type="info",
+                        )
+
+                    if saved_path:
+                        saved_paths.append(saved_path)
+
+                if skipped_count > 0:
+                    self.logger.info(
+                        f"Skipped {skipped_count} re-extracted compartments beyond hole depth for {hole_id}"
+                    )
+                    add_progress_message(
+                        f"Skipped {skipped_count} empty compartments (beyond hole depth)",
+                        None,
+                        message_type="info",
+                    )
+
+                # Report completion
+                add_progress_message(
+                    f"Register-based extraction complete: {len(saved_paths)} compartments",
+                    None,
+                    message_type="success",
+                )
+
+                self.logger.info(
+                    f"Register-based extraction complete for {hole_id}: "
+                    f"{len(saved_paths)} compartments saved"
+                )
+
+                # Check if all compartments were approved - if so, save original to processed_originals
+                all_approved = all(
+                    s.get("photo_status", "").startswith("OK_")
+                    for s in compartment_statuses
+                )
+
+                if all_approved and saved_paths:
+                    # Get depth range from register record
+                    depth_from = register_original_record.get("Depth_From", 0)
+                    depth_to = register_original_record.get("Depth_To", 0)
+
+                    # Save original to processed originals folder
+                    local_path, upload_success = self.file_manager.save_original_file(
+                        image_path,
+                        hole_id,
+                        depth_from,
+                        depth_to,
+                        is_processed=True,
+                        is_rejected=False,
+                        is_selective=False,
+                        is_skipped=False,
+                        is_pending=False,
+                        image_uid=image_uid,
+                    )
+
+                    if local_path:
+                        add_progress_message(
+                            f"Original image saved to processed originals",
+                            None,
+                            message_type="info",
+                        )
+                        self.logger.info(
+                            f"Original saved to processed originals: {local_path}"
+                        )
+
+                # Skip the rest of the normal processing flow
+                return True
+
+            # ===================================================
             # STEP 4: DETECT ARUCO MARKERS
             # ===================================================
             add_progress_message(
@@ -1092,20 +1602,6 @@ class GeoVue:
                 self.config["corner_marker_ids"] + self.config["compartment_marker_ids"]
             )
 
-            # # Only expect metadata markers if OCR is enabled and available
-            # if (
-            #     self.config.get("enable_ocr", True)
-            #     and self.tesseract_manager.is_available
-            # ):
-            #     expected_markers.update(self.config["metadata_marker_ids"])
-            #     self.logger.debug(
-            #         " OCR is enabled - including metadata markers in expected set"
-            #     )
-            # else:
-            #     self.logger.debug(
-            #         " OCR is disabled - excluding metadata markers from expected set"
-            #     )
-
             detected_markers = set(markers.keys())
             missing_markers = expected_markers - detected_markers
             missing_marker_ids = list(missing_markers)  # Convert to list for later use
@@ -1122,15 +1618,8 @@ class GeoVue:
                     "Removed metadata marker 24 from missing list (OCR disabled or unavailable)"
                 )
 
-            status_msg = f"Detected {len(detected_markers)}/{len(expected_markers)} ArUco markers"
-            self.logger.info(status_msg)
-            if self.progress_queue:
-                add_progress_message(status_msg, None)
-
-                if missing_markers:
-                    add_progress_message(
-                        f"Missing markers: {sorted(missing_markers)}", None
-                    )
+            # NOTE: Auto mode marker threshold check moved to AFTER skew correction
+            # to allow re-detection to find additional markers
 
             # ===================================================
             # STEP 5: CORRECT IMAGE ORIENTATION AND SKEW
@@ -1220,6 +1709,17 @@ class GeoVue:
                     small_image = corrected_small_image
                     self.small_image = small_image
 
+                    # In auto mode, always re-run enhanced marker detection to maximize marker finding
+                    # even if no rotation was applied (different preprocessing may find missed markers)
+                    if hasattr(self, "auto_mode") and self.auto_mode:
+                        self.logger.debug(" Auto mode: Re-running marker detection even without rotation")
+                        markers = self.aruco_manager.improve_marker_detection(small_image)
+                        self.logger.debug(f" Auto mode re-detection found {len(markers)} markers")
+                        
+                        # Update visualization manager
+                        self.viz_manager.processing_metadata["markers_detected"] = markers
+                        self.viz_manager.processing_metadata["marker_ids"] = sorted(markers.keys())
+
             except Exception as e:
                 self.logger.warning(f"Skew correction failed: {str(e)}")
                 self.logger.error(traceback.format_exc())
@@ -1242,6 +1742,40 @@ class GeoVue:
                 self.logger.info(
                     f"After correction, still missing markers: {sorted(missing_marker_ids)}"
                 )
+
+            # In auto mode, check minimum marker threshold AFTER skew correction
+            # Allow images with slightly fewer markers through for interpolation attempt
+            if hasattr(self, "auto_mode") and self.auto_mode:
+                expected_count = self.config.get("compartment_count", 20)
+                interpolation_tolerance = self.config.get("auto_loop_interpolation_tolerance", 2)
+                min_markers_required = expected_count - interpolation_tolerance  # 18 by default
+                
+                compartment_markers_found = len(
+                    [
+                        m
+                        for m in detected_markers
+                        if m
+                        in self.config.get("compartment_marker_ids", list(range(4, 24)))
+                    ]
+                )
+
+                if compartment_markers_found < min_markers_required:
+                    self.logger.warning(
+                        f"Auto mode: Only {compartment_markers_found} compartment markers found (after skew correction), minimum {min_markers_required} required - skipping"
+                    )
+                    add_progress_message(
+                        f"Skipping {os.path.basename(image_path)}: insufficient markers ({compartment_markers_found}/{expected_count})",
+                        None,
+                    )
+                    return "quality_skip"
+                elif compartment_markers_found < expected_count:
+                    self.logger.info(
+                        f"Auto mode: {compartment_markers_found}/{expected_count} compartment markers found - will attempt interpolation"
+                    )
+                else:
+                    self.logger.info(
+                        f"Auto mode: {compartment_markers_found} compartment markers found - proceeding"
+                    )
 
             # ===================================================
             # STEP 5.5: ESTIMATE IMAGE SCALE FROM MARKERS AND CORRECT SKEWED MARKERS
@@ -1349,9 +1883,11 @@ class GeoVue:
                         self.logger.warning(
                             "Could not estimate image scale from markers"
                         )
+                        scale_data = None  # Explicitly set to None when estimation fails
 
                 except Exception as e:
                     self.logger.error(f"Error estimating image scale: {str(e)}")
+                    scale_data = None  # Explicitly set to None on exception
 
             # NOW correct skewed markers using the known scale
             if markers and len(markers) > 0 and self.current_scale_data:
@@ -1431,11 +1967,11 @@ class GeoVue:
                     compartment_count=self.config.get("compartment_count", 20),
                     smart_cropping=True,
                     metadata={
-                        "scale_px_per_cm": scale_data.get("scale_px_per_cm"),
+                        "scale_px_per_cm": scale_data.get("scale_px_per_cm") if scale_data else None,
                     },
                 )
 
-                # Extract analysis results - TODO - add in all of the analysis results
+                # Extract analysis results
                 boundaries = boundary_analysis["boundaries"]
                 # boundaries_viz = boundary_analysis['visualization']
                 boundary_missing_markers = boundary_analysis[
@@ -1465,19 +2001,125 @@ class GeoVue:
                 self.missing_marker_ids = sorted(missing_marker_ids)
                 self.vertical_constraints = vertical_constraints
                 self.marker_to_compartment = marker_to_compartment
+                # PEP-8: initialize BoundaryManager once boundaries exist (assuming analyze_compartment_boundaries works)
+                self.boundary_manager = BoundaryManager(
+                    marker_to_compartment=self.marker_to_compartment,
+                    expected_compartment_count=self.config.get("compartment_count", 20),
+                    compartment_interval=(
+                        metadata.get("compartment_interval", 1)
+                        if isinstance(metadata, dict)
+                        else boundary_analysis.get("compartment_interval", 1)
+                    ),
+                )
+                _b2m = boundary_analysis.get("boundary_to_marker", {})
+                if isinstance(boundaries, list) and isinstance(_b2m, dict):
+                    for _idx, _bounds in enumerate(boundaries):
+                        _mid = _b2m.get(_idx)
+                        if _mid is None:
+                            continue
+                        try:
+                            x1, y1, x2, y2 = _bounds
+                            self.boundary_manager.add_boundary(
+                                int(_mid),
+                                int(x1),
+                                int(y1),
+                                int(x2),
+                                int(y2),
+                                boundary_type="detected",
+                            )
+                        except Exception as _e:
+                            self.logger.debug(
+                                f"BoundaryManager add failed for index {_idx} marker {_mid}: {_e}"
+                            )
 
                 self.logger.debug(
                     f" Extracted {len(boundaries)} compartment boundaries before registration dialog"
                 )
 
-                # Simply check if boundaries were found
+                # Check if boundaries were found
                 if not boundaries:
                     error_msg = "Failed to extract compartment boundaries"
                     self.logger.debug(f" {error_msg}")
                     self.logger.error(error_msg)
                     add_progress_message(error_msg, None)
-
                     return False
+
+                # In auto mode, validate boundary quality and try interpolation if needed
+                if hasattr(self, "auto_mode") and self.auto_mode:
+                    expected_count = self.config.get("compartment_count", 20)
+                    interpolation_tolerance = self.config.get("auto_loop_interpolation_tolerance", 2)
+                    
+                    missing_count = expected_count - len(boundaries)
+                    
+                    # Try interpolation if we're missing some boundaries (within tolerance)
+                    if 0 < missing_count <= interpolation_tolerance:
+                        self.logger.info(
+                            f"Auto mode: Missing {missing_count} boundaries, attempting interpolation"
+                        )
+                        add_progress_message(
+                            f"Missing {missing_count} boundary/ies - attempting interpolation...",
+                            None,
+                        )
+                        
+                        # Get scale and vertical constraints for interpolation
+                        interp_scale = scale_data.get("scale_px_per_cm") if scale_data else None
+                        
+                        if interp_scale and hasattr(self, "boundary_manager"):
+                            interp_result = self.boundary_manager.interpolate_missing_boundaries(
+                                vertical_constraints=vertical_constraints,
+                                scale_px_per_cm=interp_scale,
+                                config=self.config,
+                                image_width=small_image.shape[1],
+                            )
+                            
+                            if interp_result["interpolated_marker_ids"]:
+                                added = self.boundary_manager.apply_interpolated_boundaries(
+                                    interp_result["interpolated_boundaries"],
+                                    interp_result["interpolated_marker_ids"],
+                                )
+                                # Track which boundaries were interpolated for reporting
+                                self._interpolated_indices = interp_result["interpolated_marker_ids"]
+                                self.logger.info(f"Auto mode: Interpolated {added} boundaries (markers: {self._interpolated_indices})")
+                                add_progress_message(f"Interpolated {added} missing boundary/ies", None)
+                                
+                                # Update boundaries from boundary manager
+                                boundaries, boundary_to_marker_mapping, _ = (
+                                    self.boundary_manager.export_to_legacy_format()
+                                )
+                                boundary_missing_markers = self.boundary_manager.get_missing_markers()
+                        else:
+                            self.logger.warning("Auto mode: Cannot interpolate - missing scale or boundary_manager")
+                    
+                    # Final validation after interpolation attempt
+                    if len(boundaries) != expected_count:
+                        self.logger.warning(
+                            f"Auto mode: Found {len(boundaries)} boundaries, expected {expected_count} - skipping file"
+                        )
+                        add_progress_message(
+                            f"Skipping {os.path.basename(image_path)}: incorrect boundary count ({len(boundaries)}/{expected_count})",
+                            None,
+                        )
+                        return "quality_skip"
+
+                    # Check if markers are in sequence
+                    if boundary_missing_markers:
+                        compartment_markers = [
+                            m for m in range(4, 24) if m not in boundary_missing_markers
+                        ]
+                        for i in range(1, len(compartment_markers)):
+                            if compartment_markers[i] - compartment_markers[i - 1] > 1:
+                                self.logger.warning(
+                                    f"Auto mode: Gap in marker sequence between {compartment_markers[i-1]} and {compartment_markers[i]} - skipping file"
+                                )
+                                add_progress_message(
+                                    f"Skipping {os.path.basename(image_path)}: markers out of sequence",
+                                    None,
+                                )
+                                return "quality_skip"
+
+                    self.logger.info(
+                        f"Auto mode: Boundaries validated - {len(boundaries)} boundaries found in sequence"
+                    )
 
             except Exception as e:
                 error_msg = f"Error in compartment boundary extraction: {str(e)}"
@@ -1566,228 +2208,332 @@ class GeoVue:
                     self.logger.info("Removed metadata marker 24 from missing list")
 
             # ===================================================
-            # STEP 10: SHOW COMPARTMENT REGISTRATION DIALOG
+            # STEP 10: SHOW COMPARTMENT REGISTRATION DIALOG (OR SKIP IN AUTO MODE)
             # ===================================================
-            # ALWAYS show the compartment registration dialog
-            if self.progress_queue:
-                add_progress_message("Opening compartment registration dialog...", None)
 
-            self.logger.debug(" Preparing to show compartment registration dialog")
-
-            try:
-                # Define the callback function for re-processing with adjustments
-                def process_image_callback(params):
-                    self.logger.debug(
-                        f"process_image_callback called with params: {params}"
-                    )
-                    # Re-analyze boundaries with adjustment parameters
-                    temp_metadata = (
-                        dict(extracted_metadata) if extracted_metadata else {}
-                    )
-                    temp_metadata["boundary_adjustments"] = params
-
-                    new_analysis = self.aruco_manager.analyze_compartment_boundaries(
-                        small_image,
-                        markers,
-                        compartment_count=self.config.get("compartment_count", 20),
-                        smart_cropping=True,
-                        metadata=temp_metadata,
+            # Check if we're in auto mode
+            if (
+                getattr(self, "auto_mode", False)
+                and hasattr(self, "metadata")
+                and self.metadata
+            ):
+                # Auto mode - skip dialog and use provided metadata
+                if self.progress_queue:
+                    add_progress_message(
+                        "Auto mode - using extracted metadata...", None
                     )
 
-                    self.logger.debug(
-                        f"process_image_callback returning {len(new_analysis['boundaries'])} boundaries"
-                    )
-                    return {
-                        "boundaries": new_analysis["boundaries"],
-                        "visualization": None,  # Don't return visualization - dialog handles it
-                    }
+                self.logger.info(f"Auto mode processing with metadata: {self.metadata}")
 
-                # Debug what we're passing to the dialog
-                self.logger.debug(f" Passing to dialog:")
-                self.logger.debug(f"  - image shape: {small_image.shape}")
-                self.logger.debug(f"  - boundaries count: {len(boundaries)}")
+                # Create automatic results matching dialog output format
+                result = {
+                    "hole_id": metadata.get(
+                        "hole_id"
+                    ),  # Use extracted metadata, not self.metadata
+                    "depth_from": metadata.get("depth_from"),
+                    "depth_to": metadata.get("depth_to"),
+                    "compartment_interval": metadata.get("compartment_interval", 1),
+                    "result_boundaries": {},
+                    "top_boundary": self.top_y if hasattr(self, "top_y") else 0,
+                    "bottom_boundary": (
+                        self.bottom_y if hasattr(self, "bottom_y") else 0
+                    ),
+                    "rejected": False,
+                    "quit": False,
+                    "transformed_image": None,  # No transformation in auto mode
+                    "cumulative_rotation": rotation_angle,
+                    "boundaries_need_transformation": True,
+                }
+
+                # Validate final boundaries before continuing
+                if len(boundaries) != self.config.get("compartment_count", 20):
+                    self.logger.warning(
+                        f"Auto mode: Final boundary count incorrect: {len(boundaries)}"
+                    )
+                    result["action"] = "skip"
+                    result["skipped"] = True
+                    result["reason"] = (
+                        f"Final boundary validation failed: {len(boundaries)} boundaries"
+                    )
+
+                self.logger.debug(f"Auto mode result created: {result}")
+
+                # In auto mode, we need to set final_boundaries_working from detected boundaries
+                final_boundaries_working = boundaries.copy()
                 self.logger.debug(
-                    f"  - original_image available: {original_image is not None}"
-                )
-                self.logger.debug(f"  - missing markers: {missing_marker_ids}")
-
-                # Call handle_markers_and_boundaries with appropriate parameters
-                result = self.handle_markers_and_boundaries(
-                    small_image,  # Working image for visualization
-                    boundaries,  # Detected boundaries
-                    missing_marker_ids=missing_marker_ids,
-                    metadata=extracted_metadata,
-                    vertical_constraints=(
-                        (self.top_y, self.bottom_y)
-                        if hasattr(self, "top_y") and hasattr(self, "bottom_y")
-                        else None
-                    ),
-                    marker_to_compartment=marker_to_compartment,
-                    rotation_angle=rotation_angle,
-                    corner_markers=(
-                        self.corner_markers if hasattr(self, "corner_markers") else None
-                    ),
-                    markers=markers,
-                    initial_mode=0,  # Start in MODE_METADATA
-                    on_apply_adjustments=process_image_callback,
-                    image_path=image_path,
-                    scale_data=(
-                        self.current_scale_data
-                        if hasattr(self, "current_scale_data")
-                        else None
-                    ),
-                    boundary_analysis=(
-                        self.boundary_analysis
-                        if hasattr(self, "boundary_analysis")
-                        else None
-                    ),
-                    original_image=original_image,  # Pass the high-res image for extraction
+                    f" Auto mode - using {len(final_boundaries_working)} detected boundaries"
                 )
 
-                self.logger.debug(" Registration dialog completed")
-                self.logger.debug(f" Dialog result: {result}")
+                # Also need to update the dialog_result for later processing
+                self.dialog_result = result
 
-                # Process the result
-                if result:
-                    if result.get("quit", False):
-                        # User chose to quit processing
-                        self.logger.info("User stopped processing")
-                        add_progress_message("Processing stopped by user", None)
-                        self.processing_complete = True
-                        return False
+            else:
+                # Normal mode - show dialog
+                if self.progress_queue:
+                    add_progress_message(
+                        "Opening compartment registration dialog...", None
+                    )
 
-                    if result.get("rejected", False):
-                        # Handle rejected case
-                        self.logger.debug(" Image rejected by user")
+                self.logger.debug(" Preparing to show compartment registration dialog")
 
-                        # Use instance variable if local doesn't exist
-                        current_scale_data = scale_data or getattr(
-                            self, "current_scale_data", None
+                try:
+                    # Define the callback function for re-processing with adjustments
+                    def process_image_callback(params):
+                        self.logger.debug(
+                            f"process_image_callback called with params: {params}"
                         )
-                        current_scale_px_per_cm_original = scale_px_per_cm_original
+                        # Re-analyze boundaries with adjustment parameters
+                        temp_metadata = (
+                            dict(extracted_metadata) if extracted_metadata else {}
+                        )
+                        temp_metadata["boundary_adjustments"] = params
 
-                        # Extract from scale data if not already set
-                        if (
-                            current_scale_px_per_cm_original is None
-                            and current_scale_data
-                        ):
-                            current_scale_px_per_cm_original = current_scale_data.get(
-                                "scale_px_per_cm_original"
+                        new_analysis = (
+                            self.aruco_manager.analyze_compartment_boundaries(
+                                small_image,
+                                markers,
+                                compartment_count=self.config.get(
+                                    "compartment_count", 20
+                                ),
+                                smart_cropping=True,
+                                metadata=temp_metadata,
+                            )
+                        )
+
+                        self.logger.debug(
+                            f"process_image_callback returning {len(new_analysis['boundaries'])} boundaries"
+                        )
+                        return {
+                            "boundaries": new_analysis["boundaries"],
+                            "visualization": None,  # Don't return visualization - dialog handles it
+                        }
+
+                    # Debug what we're passing to the dialog
+                    self.logger.debug(f" Passing to dialog:")
+                    self.logger.debug(f"  - image shape: {small_image.shape}")
+                    self.logger.debug(f"  - boundaries count: {len(boundaries)}")
+                    self.logger.debug(
+                        f"  - original_image available: {original_image is not None}"
+                    )
+                    self.logger.debug(f"  - missing markers: {missing_marker_ids}")
+
+                    # Call handle_markers_and_boundaries with appropriate parameters
+                    result = self.handle_markers_and_boundaries(
+                        small_image,  # Working image for visualization
+                        boundaries,  # Detected boundaries
+                        missing_marker_ids=missing_marker_ids,
+                        metadata=extracted_metadata,
+                        vertical_constraints=(
+                            (self.top_y, self.bottom_y)
+                            if hasattr(self, "top_y") and hasattr(self, "bottom_y")
+                            else None
+                        ),
+                        marker_to_compartment=marker_to_compartment,
+                        rotation_angle=rotation_angle,
+                        corner_markers=(
+                            self.corner_markers
+                            if hasattr(self, "corner_markers")
+                            else None
+                        ),
+                        markers=markers,
+                        initial_mode=None,  # Let dialog determine appropriate mode
+                        on_apply_adjustments=process_image_callback,
+                        image_path=image_path,
+                        scale_data=(
+                            self.current_scale_data
+                            if hasattr(self, "current_scale_data")
+                            else None
+                        ),
+                        boundary_analysis=(
+                            self.boundary_analysis
+                            if hasattr(self, "boundary_analysis")
+                            else None
+                        ),
+                        original_image=original_image,  # Pass the high-res image for extraction
+                    )
+
+                    self.logger.debug(" Registration dialog completed")
+                    self.logger.debug(f" Dialog result: {result}")
+
+                    # Process the result
+                    if result:
+                        if result.get("quit", False):
+                            # User chose to quit processing
+                            self.logger.info("User stopped processing")
+                            add_progress_message("Processing stopped by user", None)
+                            self.processing_complete = True
+                            return False
+
+                        if result.get("cancelled", False):
+                            # User cancelled registration - skip this image without any file operations
+                            self.logger.info(f"User cancelled registration for {os.path.basename(image_path)}")
+                            add_progress_message(
+                                f"Skipped: {os.path.basename(image_path)} (cancelled by user)", 
+                                None,
+                                message_type="warning"
+                            )
+                            return False
+
+                        if result.get("rejected", False):
+                            # Handle rejected case
+                            self.logger.debug(" Image rejected by user")
+
+                            # Use instance variable if local doesn't exist
+                            current_scale_data = scale_data or getattr(
+                                self, "current_scale_data", None
+                            )
+                            current_scale_px_per_cm_original = scale_px_per_cm_original
+
+                            # Extract from scale data if not already set
+                            if (
+                                current_scale_px_per_cm_original is None
+                                and current_scale_data
+                            ):
+                                current_scale_px_per_cm_original = (
+                                    current_scale_data.get("scale_px_per_cm_original")
+                                )
+
+                            exit_handled = self.handle_image_exit(
+                                image_path=image_path,
+                                result=result,
+                                metadata=metadata,
+                                compartments=None,
+                                processing_messages=processing_messages,
+                                add_progress_message=add_progress_message,
+                                scale_px_per_cm_original=current_scale_px_per_cm_original,
+                                scale_data=current_scale_data,
+                                rotation_angle=rotation_angle,
+                                rotation_matrix=None,  # No longer used
+                            )
+                            return exit_handled
+
+                        # Extract metadata from dialog result
+                        metadata = {
+                            "hole_id": result.get("hole_id"),
+                            "depth_from": result.get("depth_from"),
+                            "depth_to": result.get("depth_to"),
+                            "compartment_interval": result.get(
+                                "compartment_interval", 1
+                            ),
+                        }
+                        self.logger.debug(f" Metadata from dialog: {metadata}")
+
+                        # Store dialog results for later use
+                        self.dialog_result = result  # Store complete result
+
+                        # Extract key values
+                        self.top_y = result.get("top_boundary", self.top_y)
+                        self.bottom_y = result.get("bottom_boundary", self.bottom_y)
+                        self.result_boundaries = result.get("result_boundaries", {})
+
+                        # Check if image was transformed by dialog
+                        if result.get("transformed_image") is not None:
+                            # Use the pre-transformed image from dialog
+                            original_image = result["transformed_image"]
+                            total_rotation_angle = result.get(
+                                "cumulative_rotation", rotation_angle
+                            )
+                            self.logger.info(
+                                f"Using transformed image from dialog (rotation: {total_rotation_angle:.2f}°)"
                             )
 
-                        exit_handled = self.handle_image_exit(
-                            image_path=image_path,
-                            result=result,
-                            metadata=metadata,
-                            compartments=None,
-                            processing_messages=processing_messages,
-                            add_progress_message=add_progress_message,
-                            scale_px_per_cm_original=current_scale_px_per_cm_original,
-                            scale_data=current_scale_data,
-                            rotation_angle=rotation_angle,
-                            rotation_matrix=None,  # No longer used
+                            # Boundaries are already aligned with the transformed image
+                            boundaries_need_transformation = False
+                        else:
+                            # No transformation applied
+                            total_rotation_angle = rotation_angle
+                            boundaries_need_transformation = result.get(
+                                "boundaries_need_transformation", True
+                            )
+                            self.logger.debug(
+                                "No image transformation applied in dialog"
+                            )
+
+                        # ————————————————————————————————————————————————
+                        # Fetch the *full* set of final boundaries from the manager
+                        # (detected + manual + interpolated/refined)
+                        boundaries, boundary_to_marker, _ = (
+                            self.boundary_manager.export_to_legacy_format()
                         )
-                        return exit_handled
 
-                    # Extract metadata from dialog result
-                    metadata = {
-                        "hole_id": result.get("hole_id"),
-                        "depth_from": result.get("depth_from"),
-                        "depth_to": result.get("depth_to"),
-                        "compartment_interval": result.get("compartment_interval", 1),
-                    }
-                    self.logger.debug(f" Metadata from dialog: {metadata}")
+                        # If you want them in depth order (marker 4→23):
+                        # sorted by marker ID
+                        boundaries = [
+                            b
+                            for (_, b) in sorted(
+                                zip(boundary_to_marker.values(), boundaries),
+                                key=lambda mb: mb[0],
+                            )
+                        ]
+                        # ————————————————————————————————————————————————
 
-                    # Store dialog results for later use
-                    self.dialog_result = result  # Store complete result
-
-                    # Extract key values
-                    self.top_y = result.get("top_boundary", self.top_y)
-                    self.bottom_y = result.get("bottom_boundary", self.bottom_y)
-                    self.result_boundaries = result.get("result_boundaries", {})
-
-                    # Check if image was transformed by dialog
-                    if result.get("transformed_image") is not None:
-                        # Use the pre-transformed image from dialog
-                        original_image = result["transformed_image"]
-                        total_rotation_angle = result.get(
-                            "cumulative_rotation", rotation_angle
+                        # Store final boundaries for extraction
+                        final_boundaries_working = boundaries.copy()
+                        self.logger.debug(
+                            f" Final boundaries: {len(final_boundaries_working)} compartments"
                         )
+
                         self.logger.info(
-                            f"Using transformed image from dialog (rotation: {total_rotation_angle:.2f}°)"
+                            f"User completed registration with metadata: {metadata}"
                         )
 
-                        # Boundaries are already aligned with the transformed image
-                        boundaries_need_transformation = False
                     else:
-                        # No transformation applied
-                        total_rotation_angle = rotation_angle
-                        boundaries_need_transformation = result.get(
-                            "boundaries_need_transformation", True
-                        )
-                        self.logger.debug("No image transformation applied in dialog")
+                        # User canceled the dialog
+                        self.logger.warning("Image processing canceled by user")
+                        if self.progress_queue:
+                            add_progress_message("Processing canceled by user", None)
+                        return False
 
-                    # ————————————————————————————————————————————————
-                    # Fetch the *full* set of final boundaries from the manager
-                    # (detected + manual + interpolated/refined)
-                    boundaries, boundary_to_marker, _ = (
-                        self.boundary_manager.export_to_legacy_format()
-                    )
-
-                    # If you want them in depth order (marker 4→23):
-                    # sorted by marker ID
-                    boundaries = [
-                        b
-                        for (_, b) in sorted(
-                            zip(boundary_to_marker.values(), boundaries),
-                            key=lambda mb: mb[0],
-                        )
-                    ]
-                    # ————————————————————————————————————————————————
-
-                    # Store final boundaries for extraction
-                    final_boundaries_working = boundaries.copy()
-                    self.logger.debug(
-                        f" Final boundaries: {len(final_boundaries_working)} compartments"
-                    )
-
-                    self.logger.info(
-                        f"User completed registration with metadata: {metadata}"
-                    )
-
-                else:
-                    # User canceled the dialog
-                    self.logger.warning("Image processing canceled by user")
+                except Exception as e:
+                    self.logger.error(f"Registration dialog error: {str(e)}")
+                    self.logger.error(traceback.format_exc())
                     if self.progress_queue:
-                        add_progress_message("Processing canceled by user", None)
+                        add_progress_message(
+                            f"Registration dialog error: {str(e)}", None
+                        )
                     return False
-
-            except Exception as e:
-                self.logger.error(f"Registration dialog error: {str(e)}")
-                self.logger.error(traceback.format_exc())
-                if self.progress_queue:
-                    add_progress_message(f"Registration dialog error: {str(e)}", None)
-                return False
 
             # ===================================================
             # STEP 11: HANDLE IMAGE ALIGNMENT AND TRANSFORMATION
             # ===================================================
             # Check if image was transformed in the dialog
+            transformation_applied = False
             if result and result.get("transformed_image") is not None:
+                # Debug: Check if image was actually transformed
+                transformed_img = result["transformed_image"]
+                self.logger.info(
+                    f"Dialog returned transformed image with shape: {transformed_img.shape}"
+                )
+                self.logger.info(f"Original image shape was: {original_image.shape}")
+
+                # Check if the shapes differ (rotation would change shape)
+                if transformed_img.shape != original_image.shape:
+                    self.logger.info(
+                        "Image shape changed - transformation appears to be applied"
+                    )
+                else:
+                    self.logger.warning(
+                        "Image shape unchanged - transformation may not be applied!"
+                    )
+
                 # Use the pre-transformed high-res image from dialog
-                original_image = result["transformed_image"]
-                self.logger.info("Using transformed image from alignment dialog")
+                original_image = transformed_img
+                transformation_applied = True
 
                 # Update the total rotation angle
                 if result.get("cumulative_rotation") is not None:
                     total_rotation_angle = result["cumulative_rotation"]
+                    self.logger.info(
+                        f"Cumulative rotation from dialog: {total_rotation_angle:.2f}°"
+                    )
                 else:
                     total_rotation_angle = rotation_angle
+                    self.logger.warning(
+                        f"No cumulative rotation in result, using: {rotation_angle:.2f}°"
+                    )
 
-                # The boundaries are already aligned with the transformed image
-                # No additional transformation needed!
                 self.logger.debug(
-                    "Image is pre-aligned, boundaries need no transformation"
+                    f"Using pre-rotated image, rotation={total_rotation_angle:.3f}°"
                 )
             else:
                 # No transformation was applied
@@ -1811,8 +2557,81 @@ class GeoVue:
                     f"Scaled {len(compartment_boundaries)} compartment boundaries "
                     "from working to original resolution"
                 )
+
+                # If image was transformed (rotated), transform boundaries to match
+                if transformation_applied and abs(total_rotation_angle) > 0.01:
+                    self.logger.info(
+                        f"Transforming boundaries to match rotated image (angle={total_rotation_angle:.3f}°)"
+                    )
+
+                    # Get original and new image dimensions
+                    original_shape = result.get("original_shape")
+                    if original_shape is not None:
+                        old_h, old_w = original_shape[:2]
+                    else:
+                        # Fallback - estimate from rotation
+                        new_h, new_w = original_image.shape[:2]
+                        angle_rad = np.radians(abs(total_rotation_angle))
+                        cos_a = np.cos(angle_rad)
+                        sin_a = np.sin(angle_rad)
+                        # Reverse the dimension expansion
+                        old_w = int((new_w * cos_a - new_h * sin_a) / (cos_a * cos_a - sin_a * sin_a))
+                        old_h = int((new_h * cos_a - new_w * sin_a) / (cos_a * cos_a - sin_a * sin_a))
+
+                    new_h, new_w = original_image.shape[:2]
+
+                    # Calculate rotation center and offset
+                    old_center_x = old_w / 2
+                    old_center_y = old_h / 2
+                    offset_x = (new_w - old_w) / 2
+                    offset_y = (new_h - old_h) / 2
+
+                    # Rotation matrix components
+                    angle_rad = np.radians(total_rotation_angle)
+                    cos_a = np.cos(angle_rad)
+                    sin_a = np.sin(angle_rad)
+
+                    # Transform each boundary - rotate the corner points
+                    transformed_boundaries = []
+                    for x1, y1, x2, y2 in compartment_boundaries:
+                        # Get all 4 corners of the original rectangle
+                        corners = np.array([
+                            [x1, y1],  # top-left
+                            [x2, y1],  # top-right
+                            [x2, y2],  # bottom-right
+                            [x1, y2]   # bottom-left
+                        ], dtype=np.float64)
+
+                        # Translate to origin (center of old image)
+                        corners[:, 0] -= old_center_x
+                        corners[:, 1] -= old_center_y
+
+                        # Apply rotation
+                        rotated = np.zeros_like(corners)
+                        rotated[:, 0] = corners[:, 0] * cos_a - corners[:, 1] * sin_a
+                        rotated[:, 1] = corners[:, 0] * sin_a + corners[:, 1] * cos_a
+
+                        # Translate back and apply offset for new dimensions
+                        rotated[:, 0] += old_center_x + offset_x
+                        rotated[:, 1] += old_center_y + offset_y
+
+                        # Get axis-aligned bounding box of rotated rectangle
+                        new_x1 = int(np.min(rotated[:, 0]))
+                        new_y1 = int(np.min(rotated[:, 1]))
+                        new_x2 = int(np.max(rotated[:, 0]))
+                        new_y2 = int(np.max(rotated[:, 1]))
+
+                        transformed_boundaries.append((new_x1, new_y1, new_x2, new_y2))
+
+                    compartment_boundaries = transformed_boundaries
+                    self.logger.info(
+                        f"Transformed {len(compartment_boundaries)} boundaries for rotated image"
+                    )
+
             except Exception as e:
-                self.logger.error(f"Failed to scale boundaries: {e}")
+                self.logger.error(f"Failed to scale/transform boundaries: {e}")
+                import traceback
+                self.logger.error(traceback.format_exc())
                 # Fallback if scaling fails
                 compartment_boundaries = final_boundaries_working
 
@@ -1884,6 +2703,10 @@ class GeoVue:
 
                 # Loop for handling metadata modification and re-checking duplicates
                 continue_processing = True
+                # Ensure the shared folder scan has run before any duplicate check.
+                # This is deferred from startup to avoid the 20s OneDrive scan on launch.
+                self.duplicate_handler.ensure_loaded()
+
                 while continue_processing:
                     self.logger.debug(
                         " Checking for duplicates with metadata: hole_id={}, depth={}-{}m".format(
@@ -1895,6 +2718,65 @@ class GeoVue:
 
                     # Check for duplicates - this method should run on main thread
                     self.logger.debug(" Calling duplicate_handler.check_duplicate")
+
+                    # In auto_mode, bypass interactive dialogs - defer to QAQC
+                    # This allows Wet/Dry pairs to both be processed with unique names
+                    if hasattr(self, "auto_mode") and self.auto_mode:
+                        # Check if duplicate exists
+                        is_dup = self.duplicate_handler.is_duplicate(
+                            metadata["hole_id"],
+                            metadata["depth_from"],
+                            metadata["depth_to"],
+                        )
+                        
+                        if is_dup:
+                            # Auto-mode: proceed with "replace" action but use unique suffix
+                            # The QAQC stage will handle Wet/Dry resolution
+                            self.logger.info(
+                                f"Auto mode: Duplicate detected for {metadata['hole_id']} "
+                                f"{metadata['depth_from']}-{metadata['depth_to']}m - "
+                                f"saving with _pending suffix for QAQC resolution"
+                            )
+                            
+                            # Create auto-mode result that proceeds with unique naming
+                            duplicate_result = {
+                                "action": "replace",  # Proceed with saving
+                                "auto_mode_duplicate": True,  # Flag for unique naming
+                                "moisture": None,  # Will be set during QAQC
+                            }
+                            continue_processing = False
+                            
+                            # Build result for handle_image_exit
+                            result = {
+                                "action": "replace",
+                                "hole_id": metadata.get("hole_id"),
+                                "depth_from": metadata.get("depth_from"),
+                                "depth_to": metadata.get("depth_to"),
+                                "compartment_interval": metadata.get("compartment_interval", 1),
+                                "boundaries": compartment_boundaries,
+                                "corners_list": corners_list,
+                                "auto_mode_duplicate": True,
+                            }
+                            break  # Exit the while loop
+                        else:
+                            # No duplicate - proceed normally
+                            duplicate_result = {"action": "continue"}
+                            continue_processing = False
+                            
+                            result = {
+                                "action": "continue",
+                                "hole_id": metadata.get("hole_id"),
+                                "depth_from": metadata.get("depth_from"),
+                                "depth_to": metadata.get("depth_to"),
+                                "compartment_interval": metadata.get("compartment_interval", 1),
+                                "boundaries": compartment_boundaries,
+                                "corners_list": corners_list,
+                            }
+                            break  # Exit the while loop
+                    
+                    # Normal mode - allow interactive dialogs
+                    allow_interactive = True
+
                     duplicate_result = self.duplicate_handler.check_duplicate(
                         metadata["hole_id"],
                         metadata["depth_from"],
@@ -1902,6 +2784,12 @@ class GeoVue:
                         small_image,  # Use the downsampled image
                         image_path,
                         extracted_compartments=compartments,  # Pass extracted compartments
+                        register_manager=(
+                            self.register_manager
+                            if hasattr(self, "register_manager")
+                            else None
+                        ),
+                        allow_interactive=allow_interactive,
                     )
 
                     self.logger.debug(f" Duplicate check result: {duplicate_result}")
@@ -1972,32 +2860,36 @@ class GeoVue:
                                 pass
 
                             elif action == "replace_all":
-                                # Delete existing compartment files BEFORE saving new ones
-                                files_to_delete = duplicate_result.get(
-                                    "files_to_delete", []
+                                # Move existing files to rejected folder with "Replaced" suffix
+                                files_to_move = duplicate_result.get(
+                                    "files_to_delete",
+                                    [],  # Still called files_to_delete for compatibility
                                 )
-                                if files_to_delete:
+                                existing_originals = duplicate_result.get(
+                                    "existing_originals", []
+                                )
+
+                                if files_to_move or existing_originals:
+                                    total_files = len(files_to_move) + len(
+                                        existing_originals
+                                    )
                                     add_progress_message(
-                                        f"Deleting {len(files_to_delete)} existing compartment files...",
+                                        f"Moving {total_files} existing files to rejected folder...",
                                         None,
                                     )
-                                    deleted_count = 0
 
-                                    for file_path in files_to_delete:
-                                        try:
-                                            if os.path.exists(file_path):
-                                                os.remove(file_path)
-                                                deleted_count += 1
-                                                self.logger.info(
-                                                    f"Deleted existing compartment: {file_path}"
-                                                )
-                                        except Exception as e:
-                                            self.logger.error(
-                                                f"Failed to delete {file_path}: {str(e)}"
-                                            )
+                                    # Move all files to rejected
+                                    all_files = files_to_move + existing_originals
+                                    moved = self.duplicate_handler._move_to_rejected(
+                                        all_files,
+                                        metadata["hole_id"],
+                                        metadata["depth_from"],
+                                        metadata["depth_to"],
+                                        "Replaced",
+                                    )
 
                                     add_progress_message(
-                                        f"Deleted {deleted_count} existing compartment files",
+                                        f"Moved {len(moved)} existing files to rejected folder",
                                         None,
                                     )
 
@@ -2016,6 +2908,16 @@ class GeoVue:
                             elif action == "reject":
                                 # Include all rejection details
                                 result.update(duplicate_result)
+
+                            elif action == "needs_review":
+                                # Batch mode flagged this for manual review
+                                result["skipped"] = True
+                                result["reason"] = duplicate_result.get(
+                                    "reason", "Requires manual review"
+                                )
+                                self.logger.info(
+                                    f"Flagged for manual review: {result['reason']}"
+                                )
 
                             # Call handle_image_exit for all non-modify actions
                             self.debug_quick(
@@ -2138,6 +3040,81 @@ class GeoVue:
                         )
                         continue_processing = False
                         return False
+
+                # After while loop: Handle auto mode result that broke out of the loop
+                if hasattr(self, "auto_mode") and self.auto_mode and result:
+                    self.logger.debug("Auto mode: Processing result after while loop break")
+                    
+                    # Ensure scale variables are available
+                    current_scale_data = scale_data or getattr(
+                        self, "current_scale_data", None
+                    )
+                    current_scale_px_per_cm_original = scale_px_per_cm_original
+
+                    # Extract scale_px_per_cm_original from scale_data if available
+                    if current_scale_px_per_cm_original is None:
+                        if (
+                            hasattr(self, "current_scale_data")
+                            and self.current_scale_data
+                        ):
+                            current_scale_px_per_cm_original = (
+                                self.current_scale_data.get(
+                                    "scale_px_per_cm_original"
+                                )
+                            )
+                        elif (
+                            current_scale_data
+                            and "scale_px_per_cm_original" in current_scale_data
+                        ):
+                            current_scale_px_per_cm_original = (
+                                current_scale_data["scale_px_per_cm_original"]
+                            )
+
+                    saved_paths = self.handle_image_exit(
+                        image_path=image_path,
+                        result=result,
+                        metadata=metadata,
+                        compartments=compartments,
+                        processing_messages=processing_messages,
+                        add_progress_message=add_progress_message,
+                        total_rotation_angle=total_rotation_angle,
+                        scale_px_per_cm_original=current_scale_px_per_cm_original,
+                        scale_data=current_scale_data,
+                        rotation_angle=rotation_angle,
+                        rotation_matrix=None,
+                        image_uid=image_uid,
+                    )
+
+                    # Blur detection (optional)
+                    if self.config.get("enable_blur_detection") and saved_paths:
+                        self.logger.debug(
+                            f"Auto mode: Blur detection enabled, analyzing {len(saved_paths)} saved compartments"
+                        )
+                        blur_results = self.detect_blur_in_saved_compartments(
+                            saved_paths, os.path.basename(image_path)
+                        )
+
+                    # Clear metadata for next image
+                    self.metadata = {}
+
+                    self.logger.debug("Auto mode: process_image completed successfully")
+                    
+                    # Return detailed result for batch processing report
+                    return {
+                        "success": saved_paths is not None and len(saved_paths) > 0,
+                        "compartment_count": len(saved_paths) if saved_paths else 0,
+                        "compartment_filenames": saved_paths or [],
+                        "interpolated_indices": getattr(self, "_interpolated_indices", []),
+                        "rotation_angle": total_rotation_angle,
+                        "scale_px_per_cm": scale_px_per_cm_original,
+                        "scale_confidence": current_scale_data.get("confidence") if current_scale_data else None,
+                        "image_uid": image_uid,
+                        "registers_updated": ["compartment", "original_images", "corners"],
+                        "processing_timestamp": datetime.now().isoformat(),
+                        "is_duplicate": result.get("auto_mode_duplicate", False),
+                        "duplicate_action": "pending_qaqc" if result.get("auto_mode_duplicate") else None,
+                        "marker_count": len(markers) if markers else 0,
+                    }
 
             # If we get here without metadata, we can't process
             else:
@@ -2289,7 +3266,12 @@ class GeoVue:
             # ===================================================
             if not is_skipped and compartments and not is_rejected:
                 # Determine suffix based on action
-                if is_selective:
+                if result.get("auto_mode_duplicate"):
+                    # Auto-mode duplicate: use UID prefix for QAQC traceability
+                    # This links compartments to their parent original image
+                    suffix = f"pending_{image_uid[:8]}"
+                    self.logger.info(f"Auto-mode duplicate: using suffix '{suffix}' for QAQC resolution")
+                elif is_selective:
                     suffix = "new"  # For side-by-side comparison
                 else:
                     suffix = "temp"  # Normal processing
@@ -2305,14 +3287,22 @@ class GeoVue:
                 # Save each compartment
                 start_depth = int(final_metadata["depth_from"])
                 compartment_interval = int(final_metadata["compartment_interval"])
+                hole_id = final_metadata["hole_id"]
+                skipped_count = 0
 
                 for i, comp in enumerate(compartments):
                     if comp is not None:
                         comp_depth = start_depth + ((i + 1) * compartment_interval)
+
+                        # Skip compartments beyond hole depth if depth data is available
+                        if not self._is_compartment_within_hole_depth(hole_id, comp_depth):
+                            skipped_count += 1
+                            continue
+
                         try:
                             saved_path = self.file_manager.save_temp_compartment(
                                 comp,
-                                final_metadata["hole_id"],
+                                hole_id,
                                 comp_depth,
                                 suffix=suffix,
                                 source_uid=image_uid,
@@ -2326,6 +3316,16 @@ class GeoVue:
                             self.logger.error(
                                 f"Error saving compartment at depth {comp_depth}: {str(e)}"
                             )
+
+                if skipped_count > 0:
+                    self.logger.info(
+                        f"Skipped {skipped_count} compartments beyond hole depth for {hole_id}"
+                    )
+                    if add_progress_message:
+                        add_progress_message(
+                            f"Skipped {skipped_count} empty compartments (beyond hole depth)",
+                            None,
+                        )
 
             # Extract compartments for gaps if needed (keep_with_gaps action)
             elif action == "keep_with_gaps" and compartments:
@@ -2342,16 +3342,23 @@ class GeoVue:
 
                     start_depth = int(final_metadata["depth_from"])
                     compartment_interval = int(final_metadata["compartment_interval"])
+                    hole_id = final_metadata["hole_id"]
+                    skipped_count = 0
 
                     for i, comp in enumerate(compartments):
                         if comp is not None:
                             comp_depth = start_depth + ((i + 1) * compartment_interval)
                             if comp_depth in missing_depths:
+                                # Skip compartments beyond hole depth if depth data is available
+                                if not self._is_compartment_within_hole_depth(hole_id, comp_depth):
+                                    skipped_count += 1
+                                    continue
+
                                 try:
                                     saved_path = (
                                         self.file_manager.save_temp_compartment(
                                             comp,
-                                            final_metadata["hole_id"],
+                                            hole_id,
                                             comp_depth,
                                             suffix="temp",
                                             source_uid=image_uid,
@@ -2369,6 +3376,11 @@ class GeoVue:
                                     self.logger.error(
                                         f"Error saving missing compartment: {str(e)}"
                                     )
+
+                    if skipped_count > 0:
+                        self.logger.info(
+                            f"Skipped {skipped_count} missing compartments beyond hole depth for {hole_id}"
+                        )
             # ===================================================
             # PREPARE COMPARTMENT DATA FOR REGISTERS
             # ===================================================
@@ -2421,26 +3433,34 @@ class GeoVue:
                             adjusted_scale_px_per_cm = scale_px_per_cm_original
                             scale_source = "provided_original"
                         elif "scale_px_per_cm_original" in current_scale_data:
-                            adjusted_scale_px_per_cm = current_scale_data["scale_px_per_cm_original"]
+                            adjusted_scale_px_per_cm = current_scale_data[
+                                "scale_px_per_cm_original"
+                            ]
                             scale_source = "pre_calculated_original"
                         elif "scale_factor" in current_scale_data:
-                            adjusted_scale_px_per_cm = scale_px_per_cm * current_scale_data["scale_factor"]
+                            adjusted_scale_px_per_cm = (
+                                scale_px_per_cm * current_scale_data["scale_factor"]
+                            )
                             scale_source = "stored_scale_factor"
                         elif hasattr(self, "image_scale_factor"):
-                            adjusted_scale_px_per_cm = scale_px_per_cm * self.image_scale_factor
+                            adjusted_scale_px_per_cm = (
+                                scale_px_per_cm * self.image_scale_factor
+                            )
                             scale_source = "instance_scale_factor"
                         else:
                             adjusted_scale_px_per_cm = scale_px_per_cm
                             scale_source = "no_adjustment"
-                        
+
                         cached_scale_values = {
                             "scale_px_per_cm": scale_px_per_cm,
                             "adjusted_scale_px_per_cm": adjusted_scale_px_per_cm,
-                            "scale_source": scale_source
+                            "scale_source": scale_source,
                         }
-                        
+
                         # Log once instead of per-compartment
-                        self.logger.debug(f"Pre-calculated scale values: {scale_source} = {adjusted_scale_px_per_cm:.2f} px/cm")
+                        self.logger.debug(
+                            f"Pre-calculated scale values: {scale_source} = {adjusted_scale_px_per_cm:.2f} px/cm"
+                        )
 
                 start_depth = int(final_metadata["depth_from"])
                 compartment_interval = int(final_metadata["compartment_interval"])
@@ -2558,10 +3578,14 @@ class GeoVue:
                                 width_px = abs(x2 - x1)
 
                                 # Use cached adjusted scale value
-                                adjusted_scale_px_per_cm = cached_scale_values["adjusted_scale_px_per_cm"]
-                                compartment_width_cm = round(width_px / adjusted_scale_px_per_cm, 2)
+                                adjusted_scale_px_per_cm = cached_scale_values[
+                                    "adjusted_scale_px_per_cm"
+                                ]
+                                compartment_width_cm = round(
+                                    width_px / adjusted_scale_px_per_cm, 2
+                                )
                                 update["image_width_cm"] = compartment_width_cm
-                                
+
                                 # Log only for first compartment to reduce logging volume
                                 if saved_idx == 0:
                                     self.logger.debug(
@@ -2588,10 +3612,16 @@ class GeoVue:
 
             # Add summary logging for scale calculations
             if cached_scale_values:
-                processed_widths = [u.get("image_width_cm") for u in compartment_updates if "image_width_cm" in u]
+                processed_widths = [
+                    u.get("image_width_cm")
+                    for u in compartment_updates
+                    if "image_width_cm" in u
+                ]
                 if processed_widths:
                     avg_width = sum(processed_widths) / len(processed_widths)
-                    self.logger.debug(f"Processed {len(processed_widths)} compartments using cached scale, average width: {avg_width:.2f}cm")
+                    self.logger.debug(
+                        f"Processed {len(processed_widths)} compartments using cached scale, average width: {avg_width:.2f}cm"
+                    )
 
             # ===================================================
             # SAVE ORIGINAL FILE
@@ -2599,6 +3629,9 @@ class GeoVue:
             self.logger.debug(
                 f" Saving original file with status - rejected:{is_rejected}, skipped:{is_skipped}, selective:{is_selective}"
             )
+            # Check if this is an auto-mode duplicate (pending QAQC)
+            is_pending = result.get("auto_mode_duplicate", False)
+            
             local_path, upload_success = self.file_manager.save_original_file(
                 image_path,
                 final_metadata["hole_id"],
@@ -2608,6 +3641,7 @@ class GeoVue:
                 is_rejected=is_rejected,
                 is_selective=is_selective,
                 is_skipped=is_skipped,
+                is_pending=is_pending,
                 image_uid=image_uid,
             )
 
@@ -2615,15 +3649,22 @@ class GeoVue:
             # UPDATE REGISTERS
             # ===================================================
             # Before updating registers, check if this is a reprocessing
-            if hasattr(self, "is_reprocessing") and self.is_reprocessing and image_uid:
-                # Mark existing compartments as superseded
+            # BUT SKIP THIS FOR REJECTED/SKIPPED IMAGES - they should not modify existing data
+            if (
+                hasattr(self, "is_reprocessing")
+                and self.is_reprocessing
+                and image_uid
+                and not is_rejected
+                and not is_skipped
+            ):
+                # Mark existing compartments as superseded ONLY for accepted reprocessing
                 if hasattr(self, "register_manager"):
                     old_count = self.register_manager.update_compartments_by_source_uid(
                         image_uid, "Superseded"
                     )
                     if old_count > 0:
                         self.logger.info(
-                            f"Marked {old_count} existing compartments as superseded"
+                            f"Marked {old_count} existing compartments as superseded for reprocessing"
                         )
                         if add_progress_message:
                             add_progress_message(
@@ -2716,8 +3757,8 @@ class GeoVue:
                     f"Updated original image register for {status_type} image"
                 )
 
-                # Batch update compartment register
-                if compartment_updates:
+                # Batch update compartment register - BUT NOT FOR REJECTED/SKIPPED IMAGES
+                if compartment_updates and not is_rejected and not is_skipped:
                     try:
                         updated = self.register_manager.batch_update_compartments(
                             compartment_updates
@@ -2818,57 +3859,57 @@ class GeoVue:
         self.visualization_cache["current_processing"].update(updates)
         self.logger.debug(f"Updated processing cache with keys: {list(updates.keys())}")
 
-    def update_boundaries_from_dialog(
-        self, new_boundaries: List[Tuple[int, int, int, int]], scale: str = "working"
-    ):
-        """Update boundaries in the cache, maintaining scale information."""
-        self.logger.debug(f"update_boundaries_from_dialog called with scale='{scale}'")
-        self.logger.debug(f"Received {len(new_boundaries)} boundaries")
+    # def update_boundaries_from_dialog(
+    #     self, new_boundaries: List[Tuple[int, int, int, int]], scale: str = "working"
+    # ):
+    #     """Update boundaries in the cache, maintaining scale information."""
+    #     self.logger.debug(f"update_boundaries_from_dialog called with scale='{scale}'")
+    #     self.logger.debug(f"Received {len(new_boundaries)} boundaries")
 
-        # Log first few boundaries for inspection
-        for i, boundary in enumerate(new_boundaries[:3]):
-            self.logger.debug(f"  Boundary {i}: {boundary}")
-        if len(new_boundaries) > 3:
-            self.logger.debug(f"  ... and {len(new_boundaries) - 3} more boundaries")
+    #     # Log first few boundaries for inspection
+    #     for i, boundary in enumerate(new_boundaries[:3]):
+    #         self.logger.debug(f"  Boundary {i}: {boundary}")
+    #     if len(new_boundaries) > 3:
+    #         self.logger.debug(f"  ... and {len(new_boundaries) - 3} more boundaries")
 
-        if scale == "working":
-            self.logger.debug("Updating processing data with working scale boundaries")
+    #     if scale == "working":
+    #         self.logger.debug("Updating processing data with working scale boundaries")
 
-            # Get current processing data to check what's there
-            current_data = self.get_processing_data()
-            if current_data:
-                self.logger.debug(
-                    f"Current boundaries_scale: {current_data.get('boundaries_scale', 'not set')}"
-                )
-                if "compartment_boundaries" in current_data:
-                    self.logger.debug(
-                        f"Current boundaries count: {len(current_data['compartment_boundaries'])}"
-                    )
+    #         # Get current processing data to check what's there
+    #         current_data = self.get_processing_data()
+    #         if current_data:
+    #             self.logger.debug(
+    #                 f"Current boundaries_scale: {current_data.get('boundaries_scale', 'not set')}"
+    #             )
+    #             if "compartment_boundaries" in current_data:
+    #                 self.logger.debug(
+    #                     f"Current boundaries count: {len(current_data['compartment_boundaries'])}"
+    #                 )
 
-            self.update_processing_data(
-                {
-                    "compartment_boundaries": new_boundaries,
-                    "boundaries_scale": "working",
-                }
-            )
+    #         self.update_processing_data(
+    #             {
+    #                 "compartment_boundaries": new_boundaries,
+    #                 "boundaries_scale": "working",
+    #             }
+    #         )
 
-            # Verify the update
-            updated_data = self.get_processing_data()
-            self.logger.debug(
-                f"After update - boundaries_scale: {updated_data.get('boundaries_scale', 'not set')}"
-            )
-            self.logger.debug(
-                f"After update - boundaries count: {len(updated_data.get('compartment_boundaries', []))}"
-            )
-        else:
-            self.logger.debug(
-                f"WARNING: Called with scale='{scale}' which is not handled!"
-            )
+    #         # Verify the update
+    #         updated_data = self.get_processing_data()
+    #         self.logger.debug(
+    #             f"After update - boundaries_scale: {updated_data.get('boundaries_scale', 'not set')}"
+    #         )
+    #         self.logger.debug(
+    #             f"After update - boundaries count: {len(updated_data.get('compartment_boundaries', []))}"
+    #         )
+    #     else:
+    #         self.logger.debug(
+    #             f"WARNING: Called with scale='{scale}' which is not handled!"
+    #         )
 
-        # Re-calculate corners
-        self.logger.debug("Calling _update_corners_from_boundaries")
-        self._update_corners_from_boundaries(new_boundaries)
-        self.logger.debug("update_boundaries_from_dialog completed")
+    #     # Re-calculate corners
+    #     self.logger.debug("Calling _update_corners_from_boundaries")
+    #     self._update_corners_from_boundaries(new_boundaries)
+    #     self.logger.debug("update_boundaries_from_dialog completed")
 
     def handle_markers_and_boundaries(
         self,
@@ -2880,7 +3921,7 @@ class GeoVue:
         rotation_angle=0.0,
         corner_markers=None,
         marker_to_compartment=None,
-        initial_mode=2,
+        initial_mode=0,
         markers=None,
         show_adjustment_controls=True,
         on_apply_adjustments=None,
@@ -2922,6 +3963,7 @@ class GeoVue:
                 scale_data=scale_data,
                 boundary_analysis=boundary_analysis,
                 app=self,
+                initial_mode=initial_mode,  # Pass through initial_mode
             )
 
             # Show dialog and get results

@@ -31,11 +31,11 @@ class FirstRunDialog:
                 "processed": "Processed Original Images",
                 "compartments": "Extracted Compartment Images",
                 "traces": "Drillhole Traces",
-                "debugging": "Debugging",
+                "datasets": "Drillhole Datasets",
+                "cross_sections": "Cross Sections",
             }
             self.REQUIRED_SUBFOLDERS = {
                 "processed": ["Approved Originals", "Rejected Originals"],
-                "debugging": ["Blur Analysis", "Debug Images"],
                 "register": ["Register Data (Do not edit)"],
                 "compartments": [
                     "Approved Compartment Images",
@@ -50,11 +50,11 @@ class FirstRunDialog:
                 "processed": "Processed Original Images",
                 "compartments": "Extracted Compartment Images",
                 "traces": "Drillhole Traces",
-                "debugging": "Debugging",
+                "datasets": "Drillhole Datasets",
+                "cross_sections": "Cross Sections",
             }
             self.REQUIRED_SUBFOLDERS = {
                 "processed": ["Approved Originals", "Rejected Originals"],
-                "debugging": ["Blur Analysis", "Debug Images"],
                 "register": ["Register Data (Do not edit)"],
                 "compartments": [
                     "Approved Compartment Images",
@@ -81,6 +81,17 @@ class FirstRunDialog:
         if hasattr(self.parent, "_first_run_dialog"):
             self.logger.debug("Warning: Previous first run dialog still exists")
         self.parent._first_run_dialog = self
+
+        # Initialize variables early (normally set in pages)
+        self.local_path_var = tk.StringVar(value="C:\\GeoVue Chip Tray Photos")
+        self.local_path = "C:\\GeoVue Chip Tray Photos"
+        self.backup_path_var = tk.StringVar()
+        self.use_backup_var = tk.BooleanVar(value=True)  # Always true, backup is required
+        
+        # Automatically check and create local folder structure  
+        default_path = Path(self.local_path_var.get())
+        if not default_path.exists():
+            default_path.mkdir(parents=True, exist_ok=True)
 
         self.dialog = DialogHelper.create_dialog(
             self.parent, DialogHelper.t("Welcome to GeoVue"), modal=False, topmost=True
@@ -142,7 +153,7 @@ class FirstRunDialog:
         # Language toggle in top right
         self.language_btn = self.gui_manager.create_modern_button(
             header_frame,
-            text="🌐 Language",
+            text="Language",
             color=self.gui_manager.theme_colors["accent_blue"],
             command=self._toggle_language,
         )
@@ -219,16 +230,20 @@ class FirstRunDialog:
         )
         self.notebook.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
 
-        # Create pages
+        # Create pages (include Local Storage but it won't be in the Next flow)
         self._create_welcome_page()
-        self._create_local_storage_page()
+        self._create_setup_instructions_page()
+        self._create_local_storage_page()  # Keep this for manual access
         self._create_backup_storage_page()
-        self._create_summary_page()
+        self._create_snowflake_page()       # Tab 4
+        self._create_summary_page()         # Tab 5
 
         # Disable navigation to later pages
         self.notebook.tab(1, state="disabled")
         self.notebook.tab(2, state="disabled")
         self.notebook.tab(3, state="disabled")
+        self.notebook.tab(4, state="disabled")
+        self.notebook.tab(5, state="disabled")
 
         # Button frame at bottom
         button_frame = ttk.Frame(main_container, padding="5")
@@ -294,8 +309,9 @@ class FirstRunDialog:
         # Automatically check default folder if it exists
         default_path = Path(self.local_path_var.get())
         if default_path.exists():
-            self.logger.info(f"Checking default local path: {default_path}")
-            self._check_local_folder_structure(str(default_path))
+            self.logger.info(f"Default local path exists: {default_path}")
+            # Skip checking since we're not showing the local storage page
+            self.local_existing = True  # Assume existing if path exists
 
         # Ensure dialog is visible
         self.logger.debug(f"Parent exists: {self.parent.winfo_exists()}")
@@ -364,13 +380,13 @@ class FirstRunDialog:
         self.finish_btn.set_text(DialogHelper.t("Finish"))
         self.next_btn.set_text(DialogHelper.t("Next"))
 
-        # Update tab titles
+        # Update tab titles (5 tabs with new structure)
         self.notebook.tab_buttons[0]._label.config(text=DialogHelper.t("Welcome"))
-        self.notebook.tab_buttons[1]._label.config(text=DialogHelper.t("Local Storage"))
-        self.notebook.tab_buttons[2]._label.config(
-            text=DialogHelper.t("Backup Storage")
-        )
-        self.notebook.tab_buttons[3]._label.config(text=DialogHelper.t("Summary"))
+        self.notebook.tab_buttons[1]._label.config(text=DialogHelper.t("Setup Instructions"))
+        self.notebook.tab_buttons[2]._label.config(text=DialogHelper.t("Local Storage"))
+        self.notebook.tab_buttons[3]._label.config(text=DialogHelper.t("OneDrive Folder"))
+        self.notebook.tab_buttons[4]._label.config(text=DialogHelper.t("Snowflake Account"))
+        self.notebook.tab_buttons[5]._label.config(text=DialogHelper.t("Summary"))
 
         # Update page content - store references to update labels
         if hasattr(self, "_translatable_widgets"):
@@ -459,15 +475,15 @@ class FirstRunDialog:
         steps = [
             "1. "
             + DialogHelper.t(
-                "Select a local folder where GeoVue will process images (use the default path!)"
+                "Synchronize the 'Chip Tray Photos' folder from Microsoft Teams to OneDrive"
             ),
             "2. "
             + DialogHelper.t(
-                "Select a SYNCHRONISED shared folder (...Exploration Drilling\\03 - Reverse Circulation\\Chip Tray Photos)"
+                "Select your synchronized OneDrive folder location"
             ),
             "3. "
             + DialogHelper.t(
-                "Confirm. This will create the required folders locally and set the outputs for onedrive correctly."
+                "Set key folders to 'Always Keep on This Device' for offline access"
             ),
         ]
 
@@ -595,63 +611,114 @@ class FirstRunDialog:
         )
         self.local_status_text.config(state="disabled")
 
+    def _create_setup_instructions_page(self):
+        """Create setup instructions page."""
+        page = ttk.Frame(
+            self.notebook.page_container, padding="20", style="Content.TFrame"
+        )
+        self.notebook.add(page, text=DialogHelper.t("Setup Instructions"))
+
+        # Title
+        title = ttk.Label(
+            page,
+            text=DialogHelper.t("Synchronize SharePoint Folder"),
+            font=self.gui_manager.fonts["title"],
+            style="Content.TLabel",
+        )
+        title.pack(pady=(0, 20))
+
+        # Instructions Frame
+        instructions_frame = ttk.LabelFrame(
+            page, text=DialogHelper.t("Steps to Sync"), padding="15"
+        )
+        instructions_frame.pack(fill=tk.X, pady=(0, 15))
+
+        steps = [
+            "1. " + DialogHelper.t("You need to 'Sync' a SharePoint folder which contains the Chip Tray Photos folder."),
+            "2. " + DialogHelper.t("Open Microsoft Teams and navigate to the channel containing the 'Chip Tray Photos' folder."),
+            "3. " + DialogHelper.t("In the toolbar at the top, click 'Sync'. This will create a link in your File Explorer to the SharePoint location."),
+        ]
+
+        for step in steps:
+            step_label = ttk.Label(
+                instructions_frame,
+                text=step,
+                font=self.gui_manager.fonts["normal"],
+                style="Content.TLabel",
+                wraplength=750,
+            )
+            step_label.pack(anchor=tk.W, pady=5)
+
+        # Required folders for offline access
+        offline_frame = ttk.LabelFrame(
+            page, text=DialogHelper.t("⚠️ Required: Set Folders for Offline Access"), padding="15"
+        )
+        offline_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        offline_label = ttk.Label(
+            offline_frame,
+            text=DialogHelper.t("After sync completes, right-click these folders in OneDrive and select 'Always Keep on This Device':"),
+            font=self.gui_manager.fonts["normal"],
+            style="Content.TLabel",
+            wraplength=750,
+        )
+        offline_label.pack(anchor=tk.W, pady=(0, 10))
+        
+        folders = [
+            "• " + DialogHelper.t("Extracted Compartment Images (Required for viewing)"),
+            "• " + DialogHelper.t("Chip Tray Register (Required for data)"),
+            "• " + DialogHelper.t("Drillhole Datasets (Required for geological data)"),
+            "• " + DialogHelper.t("Processed Original Images (Optional but recommended)"),
+        ]
+        
+        for folder in folders:
+            folder_label = ttk.Label(
+                offline_frame,
+                text=folder,
+                font=self.gui_manager.fonts["normal"],
+                style="Content.TLabel",
+            )
+            folder_label.pack(anchor=tk.W, pady=2, padx=(20, 0))
+            
+        warning = ttk.Label(
+            offline_frame,
+            text=DialogHelper.t("Note: Initial download may exceed 100GB. Ensure sufficient disk space."),
+            font=self.gui_manager.fonts["normal"],
+            foreground="orange",
+            style="Content.TLabel",
+        )
+        warning.pack(anchor=tk.W, pady=(10, 0))
+
+        # Bottom instruction
+        bottom_text = ttk.Label(
+            page,
+            text=DialogHelper.t("Once you have completed these steps, click 'Next'."),
+            font=self.gui_manager.fonts["normal"],
+            style="Content.TLabel",
+        )
+        bottom_text.pack(pady=(20, 0))
+
     def _create_backup_storage_page(self):
         """Create backup/shared storage selection page."""
         page = ttk.Frame(
             self.notebook.page_container, padding="20", style="Content.TFrame"
         )
-        self.notebook.add(page, text=DialogHelper.t("Backup Storage"))
+        self.notebook.add(page, text=DialogHelper.t("OneDrive Folder"))
 
         # Title
         title = ttk.Label(
             page,
-            text=DialogHelper.t("Select Backup/Shared Storage"),
+            text=DialogHelper.t("Select OneDrive Folder"),
             font=self.gui_manager.fonts["title"],
             style="Content.TLabel",
         )
-        title.pack(pady=(0, 10))
-        self._translatable_widgets.append(
-            {"widget": title, "text_key": "Select Backup/Shared Storage"}
-        )
-
-        # Instructions
-        instructions = ttk.Label(
-            page,
-            text=DialogHelper.t(
-                "Select a OneDrive or network folder for backup and sharing."
-            )
-            + "\n"
-            + DialogHelper.t(
-                "This allows team collaboration and automatic backup of processed files."
-            ),
-            font=self.gui_manager.fonts["normal"],
-            justify=tk.CENTER,
-            style="Content.TLabel",
-        )
-        instructions.pack(pady=(0, 15))
-
-        # Checkbox to enable/disable backup - DEFAULT TO TRUE
-        self.use_backup_var = tk.BooleanVar(value=True)
-        check_frame = ttk.Frame(page)
-        check_frame.pack(pady=(0, 15))
-
-        # Use custom checkbox
-        backup_check = self.gui_manager.create_custom_checkbox(
-            check_frame,
-            text=DialogHelper.t("Enable backup/shared storage"),
-            variable=self.use_backup_var,
-            command=self._toggle_backup_controls,
-        )
-        backup_check.pack()
-        self._translatable_checkboxes.append(backup_check)
+        title.pack(pady=(0, 20))
 
         # Path selection frame
         self.backup_frame = ttk.LabelFrame(
-            page, text=DialogHelper.t("Backup Location"), padding="15"
+            page, text=DialogHelper.t("OneDrive Folder Location"), padding="15"
         )
         self.backup_frame.pack(fill=tk.X, pady=10)
-
-        self.backup_path_var = tk.StringVar()
 
         # Path input row
         path_row = ttk.Frame(self.backup_frame)
@@ -680,53 +747,202 @@ class FirstRunDialog:
         )
         self.backup_browse_btn.pack(side=tk.RIGHT, padx=(10, 0))
 
-        # Hint frame
-        hint_frame = ttk.Frame(self.backup_frame)
-        hint_frame.pack(fill=tk.X, pady=(10, 0))
-
+        # Hint
         hint_label = ttk.Label(
-            hint_frame,
-            text=DialogHelper.t("Hint: Look for") + ":",
+            self.backup_frame,
+            text=DialogHelper.t("Look for: C:\\Users\\[YourName]\\OneDrive - Fortescue\\...\\Chip Tray Photos"),
             font=self.gui_manager.fonts["small"],
-            style="Content.TLabel",
-        )
-        hint_label.pack(anchor=tk.W)
-        self._translatable_widgets.append(
-            {"widget": hint_label, "text_key": "Hint: Look for"}
-        )
-
-        hint_path = ttk.Label(
-            hint_frame,
-            text="... Fortescue Metals Group\\Gabon - Belinga - Exploration Drilling\\03 - Reverse Circulation\\Chip Tray Photos",
-            font=self.gui_manager.fonts["code"],
             foreground=self.gui_manager.theme_colors["accent_blue"],
             style="Content.TLabel",
         )
-        hint_path.pack(anchor=tk.W, padx=(20, 0))
+        hint_label.pack(anchor=tk.W, pady=(10, 0))
 
         # Status frame
         self.backup_status_frame = ttk.LabelFrame(
-            page, text=DialogHelper.t("Backup Folder Status"), padding="10"
+            page, text=DialogHelper.t("Folder Verification"), padding="10"
         )
         self.backup_status_frame.pack(fill=tk.BOTH, expand=True, pady=10)
 
-        # Add scrollbar to status text
+        # Status text with scrollbar
         status_container = ttk.Frame(self.backup_status_frame)
         status_container.pack(fill=tk.BOTH, expand=True)
 
         scrollbar = ttk.Scrollbar(status_container)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Use themed text display
         self.backup_status_text = self.gui_manager.create_text_display(
-            status_container, height=8, wrap=tk.WORD, readonly=True
+            status_container, height=10, wrap=tk.WORD, readonly=True
         )
         self.backup_status_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.backup_status_text.yview)
         self.backup_status_text.config(yscrollcommand=scrollbar.set)
+        
+        # Initial message
+        self.backup_status_text.config(state="normal")
+        self.backup_status_text.insert(
+            tk.END, DialogHelper.t("Please browse to select your synchronized 'Chip Tray Photos' folder.")
+        )
+        self.backup_status_text.config(state="disabled")
 
-        # Initialize backup controls as enabled since checkbox is checked
-        self._toggle_backup_controls()
+    def _create_snowflake_page(self):
+        """Create optional Snowflake account setup page."""
+        page = ttk.Frame(
+            self.notebook.page_container, padding="20", style="Content.TFrame"
+        )
+        self.notebook.add(page, text=DialogHelper.t("Snowflake Account"))
+
+        # Top spacer
+        ttk.Frame(page).pack(expand=True, fill=tk.BOTH)
+
+        content = ttk.Frame(page)
+        content.pack()
+
+        title = ttk.Label(
+            content,
+            text=DialogHelper.t("Snowflake Data Connection (Optional)"),
+            font=self.gui_manager.fonts["title"],
+            style="Content.TLabel",
+        )
+        title.pack(pady=(0, 10))
+
+        desc = ttk.Label(
+            content,
+            text=DialogHelper.t(
+                "GeoVue can connect to Snowflake to load live drillhole data.\n"
+                "Enter your Fortescue email address (the one you use to log in to Snowflake).\n"
+                "You can skip this step and configure it later in Settings."
+            ),
+            font=self.gui_manager.fonts["normal"],
+            justify=tk.CENTER,
+            style="Content.TLabel",
+        )
+        desc.pack(pady=(0, 20))
+
+        # Email entry row
+        email_frame = ttk.Frame(content)
+        email_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Label(
+            email_frame,
+            text=DialogHelper.t("Your email:"),
+            font=self.gui_manager.fonts["normal"],
+            style="Content.TLabel",
+            width=15,
+            anchor="e",
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        self.snowflake_user_var = tk.StringVar()
+        # Pre-populate with a sensible guess if available
+        try:
+            import getpass
+            win_user = getpass.getuser().lower()
+            self.snowflake_user_var.set(f"{win_user}@fortescue.com")
+        except Exception:
+            self.snowflake_user_var.set("@fortescue.com")
+
+        self._sf_email_entry = tk.Entry(
+            email_frame,
+            textvariable=self.snowflake_user_var,
+            font=self.gui_manager.fonts["normal"],
+            bg=self.gui_manager.theme_colors["field_bg"],
+            fg=self.gui_manager.theme_colors["text"],
+            insertbackground=self.gui_manager.theme_colors["text"],
+            relief=tk.FLAT,
+            bd=1,
+            highlightbackground=self.gui_manager.theme_colors["field_border"],
+            highlightthickness=1,
+            width=40,
+        )
+        self._sf_email_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # Test connection button + status label
+        test_row = ttk.Frame(content)
+        test_row.pack(fill=tk.X, pady=(6, 0))
+
+        self._sf_test_btn = self.gui_manager.create_modern_button(
+            test_row,
+            text=DialogHelper.t("Test Connection"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._test_snowflake_connection,
+        )
+        self._sf_test_btn.pack(side=tk.LEFT)
+
+        self._sf_test_status = tk.Label(
+            test_row,
+            text="",
+            font=self.gui_manager.fonts["small"],
+            bg=self.gui_manager.theme_colors["background"],
+            fg=self.gui_manager.theme_colors["subtext"],
+        )
+        self._sf_test_status.pack(side=tk.LEFT, padx=(12, 0))
+
+        skip_label = ttk.Label(
+            content,
+            text=DialogHelper.t("Leave blank to skip Snowflake integration."),
+            font=self.gui_manager.fonts["small"],
+            style="Content.TLabel",
+            foreground=self.gui_manager.theme_colors["subtext"],
+        )
+        skip_label.pack(pady=(16, 0))
+
+        # Bottom spacer
+        ttk.Frame(page).pack(expand=True, fill=tk.BOTH)
+
+    def _test_snowflake_connection(self):
+        """Test the entered Snowflake credentials by attempting SSO login."""
+        import threading
+
+        email = self.snowflake_user_var.get().strip()
+        if not email or "@" not in email:
+            self._sf_test_status.config(
+                text=DialogHelper.t("Please enter a valid email address."),
+                fg=self.gui_manager.theme_colors["accent_red"],
+            )
+            return
+
+        self._sf_test_btn.set_state("disabled")
+        self._sf_test_status.config(
+            text=DialogHelper.t("Opening browser for SSO login…"),
+            fg=self.gui_manager.theme_colors["accent_blue"],
+        )
+        self.dialog.update_idletasks()
+
+        def _run():
+            success = False
+            message = ""
+            try:
+                import snowflake.connector
+                conn = snowflake.connector.connect(
+                    account="FMG-WN74261",
+                    user=email,
+                    warehouse="WH_DA_EXPLORATION",
+                    authenticator="externalbrowser",
+                    login_timeout=60,
+                )
+                cur = conn.cursor()
+                cur.execute("SELECT CURRENT_USER()")
+                sf_user = cur.fetchone()[0]
+                cur.close()
+                conn.close()
+                success = True
+                message = f"✓ Connected as {sf_user}"
+            except ImportError:
+                message = "Snowflake connector not installed"
+            except Exception as e:
+                message = f"✗ {str(e)[:80]}"
+
+            def _apply():
+                self._sf_test_btn.set_state("normal")
+                color = (
+                    self.gui_manager.theme_colors["accent_green"]
+                    if success
+                    else self.gui_manager.theme_colors["accent_red"]
+                )
+                self._sf_test_status.config(text=message, fg=color)
+
+            self.dialog.after(0, _apply)
+
+        threading.Thread(target=_run, daemon=True, name="sf-test").start()
 
     def _create_summary_page(self):
         """Create summary page."""
@@ -813,23 +1029,32 @@ class FirstRunDialog:
         actions_frame.pack(fill=tk.X)
 
         actions = []
+        
+        # DEBUG: Check what values are set
+        print(f"DEBUG: local_existing = {getattr(self, 'local_existing', 'NOT SET')}")
+        print(f"DEBUG: backup_existing = {getattr(self, 'backup_existing', 'NOT SET')}")
 
         # Local folder actions
         if hasattr(self, "local_existing") and self.local_existing:
-            actions.append("✓ " + DialogHelper.t("Use existing local folder structure"))
+            action_text = "[OK] " + DialogHelper.t("Use existing local folder structure")
+            print(f"DEBUG: Adding LOCAL action: {action_text}")
+            actions.append(action_text)
         else:
-            actions.append("✓ " + DialogHelper.t("Create local folder structure"))
+            action_text = "[OK] " + DialogHelper.t("Create local folder structure")
+            print(f"DEBUG: Adding LOCAL action: {action_text}")
+            actions.append(action_text)
 
-        # Backup folder actions
-        if self.use_backup_var.get() and hasattr(self, "backup_existing"):
-            if self.backup_existing:
-                actions.append(
-                    "✓ " + DialogHelper.t("Use existing backup folder structure")
-                )
-            else:
-                actions.append("✓ " + DialogHelper.t("Create backup folder structure"))
+        # OneDrive folder actions (backup_existing tells us if OneDrive structure exists)
+        if hasattr(self, "backup_existing") and self.backup_existing:
+            action_text = "[OK] " + DialogHelper.t("Use existing OneDrive folder structure")
+            print(f"DEBUG: Adding ONEDRIVE action: {action_text}")
+            actions.append(action_text)
+        else:
+            action_text = "[OK] " + DialogHelper.t("Create missing folders in OneDrive")
+            print(f"DEBUG: Adding ONEDRIVE action: {action_text}")
+            actions.append(action_text)
 
-        actions.append("✓ " + DialogHelper.t("Save configuration"))
+        actions.append("[OK] " + DialogHelper.t("Save configuration"))
 
         for action in actions:
             action_label = ttk.Label(
@@ -839,6 +1064,7 @@ class FirstRunDialog:
                 style="Content.TLabel",
             )
             action_label.pack(anchor=tk.W, pady=3)
+
 
     def _browse_local_folder(self):
         """Browse for local storage folder."""
@@ -864,6 +1090,10 @@ class FirstRunDialog:
         if folder:
             self.backup_path_var.set(folder)
             self._check_backup_folder_structure(folder)
+            
+            # Enable Next button after successful folder selection
+            if hasattr(self, 'next_btn'):
+                self.next_btn.set_state("normal")
 
     def _toggle_backup_controls(self):
         """Enable/disable backup path controls based on checkbox."""
@@ -911,7 +1141,7 @@ class FirstRunDialog:
             if folder_path.exists():
                 self.local_status_text.insert(
                     tk.END,
-                    f"✓ " + DialogHelper.t("Found") + f": {folder_name}\n",
+                    f"[OK] " + DialogHelper.t("Found") + f": {folder_name}\n",
                     "success",
                 )
                 found_folders += 1
@@ -922,12 +1152,12 @@ class FirstRunDialog:
                         subfolder_path = folder_path / subfolder
                         if subfolder_path.exists():
                             self.local_status_text.insert(
-                                tk.END, f"  ✓ {subfolder}\n", "success"
+                                tk.END, f"  - {subfolder}\n", "success"
                             )
                         else:
                             self.local_status_text.insert(
                                 tk.END,
-                                f"  ✗ "
+                                f"  X "
                                 + DialogHelper.t("Missing")
                                 + f": {subfolder}\n",
                                 "warning",
@@ -936,7 +1166,7 @@ class FirstRunDialog:
             else:
                 self.local_status_text.insert(
                     tk.END,
-                    f"✗ " + DialogHelper.t("Missing") + f": {folder_name}\n",
+                    f"[X] " + DialogHelper.t("Missing") + f": {folder_name}\n",
                     "warning",
                 )
                 missing_items.append(folder_name)
@@ -948,7 +1178,7 @@ class FirstRunDialog:
         if found_folders == total_folders and not missing_items:
             self.local_status_text.insert(
                 tk.END,
-                "\n✅ " + DialogHelper.t("Complete folder structure found!") + "\n",
+                "\n[COMPLETE] " + DialogHelper.t("Complete folder structure found!") + "\n",
                 "success",
             )
             self.local_status_text.insert(
@@ -958,7 +1188,7 @@ class FirstRunDialog:
             percentage = (found_folders / total_folders) * 100
             self.local_status_text.insert(
                 tk.END,
-                f"\n⚠ "
+                f"\n[WARNING] "
                 + DialogHelper.t("Found")
                 + f" {found_folders}/{total_folders} "
                 + DialogHelper.t("folders")
@@ -974,7 +1204,7 @@ class FirstRunDialog:
         else:
             self.local_status_text.insert(
                 tk.END,
-                "\n📁 "
+                "\n[INFO] "
                 + DialogHelper.t("Empty folder - new structure will be created.")
                 + "\n",
                 "info",
@@ -1014,7 +1244,7 @@ class FirstRunDialog:
             if folder_path.exists():
                 self.backup_status_text.insert(
                     tk.END,
-                    f"✓ " + DialogHelper.t("Found") + f": {folder_name}\n",
+                    f"[OK] " + DialogHelper.t("Found") + f": {folder_name}\n",
                     "success",
                 )
                 found_folders += 1
@@ -1025,12 +1255,12 @@ class FirstRunDialog:
                         subfolder_path = folder_path / subfolder
                         if subfolder_path.exists():
                             self.backup_status_text.insert(
-                                tk.END, f"  ✓ {subfolder}\n", "success"
+                                tk.END, f"  - {subfolder}\n", "success"
                             )
                         else:
                             self.backup_status_text.insert(
                                 tk.END,
-                                f"  ✗ "
+                                f"  X "
                                 + DialogHelper.t("Missing")
                                 + f": {subfolder}\n",
                                 "warning",
@@ -1039,7 +1269,7 @@ class FirstRunDialog:
             else:
                 self.backup_status_text.insert(
                     tk.END,
-                    f"✗ " + DialogHelper.t("Missing") + f": {folder_name}\n",
+                    f"[X] " + DialogHelper.t("Missing") + f": {folder_name}\n",
                     "warning",
                 )
                 missing_items.append(folder_name)
@@ -1051,13 +1281,13 @@ class FirstRunDialog:
         if register_path.exists():
             self.backup_status_text.insert(
                 tk.END,
-                "\n✓ " + DialogHelper.t("Found Excel register") + "\n",
+                "\n[OK] " + DialogHelper.t("Found Excel register") + "\n",
                 "success",
             )
         else:
             self.backup_status_text.insert(
                 tk.END,
-                "\n✗ " + DialogHelper.t("Excel register not found") + "\n",
+                "\n[X] " + DialogHelper.t("Excel register not found") + "\n",
                 "warning",
             )
 
@@ -1068,7 +1298,7 @@ class FirstRunDialog:
         if found_folders == total_folders and not missing_items:
             self.backup_status_text.insert(
                 tk.END,
-                "\n✅ " + DialogHelper.t("Complete folder structure found!") + "\n",
+                "\n[COMPLETE] " + DialogHelper.t("Complete folder structure found!") + "\n",
                 "success",
             )
             self.backup_status_text.insert(
@@ -1078,7 +1308,7 @@ class FirstRunDialog:
             percentage = (found_folders / total_folders) * 100
             self.backup_status_text.insert(
                 tk.END,
-                f"\n⚠ "
+                f"\n[WARNING] "
                 + DialogHelper.t("Found")
                 + f" {found_folders}/{total_folders} "
                 + DialogHelper.t("folders")
@@ -1094,7 +1324,7 @@ class FirstRunDialog:
         else:
             self.backup_status_text.insert(
                 tk.END,
-                "\n📁 "
+                "\n[INFO] "
                 + DialogHelper.t("Empty folder - new structure will be created.")
                 + "\n",
                 "info",
@@ -1119,16 +1349,33 @@ class FirstRunDialog:
         if current_tab == 0:  # Welcome
             self.back_btn.set_state("disabled")
             self.next_btn.pack(side=tk.RIGHT, padx=(0, 10))
+            self.next_btn.set_state("normal")
             self.finish_btn.pack_forget()
-        elif current_tab == 1:  # Local Storage
+        elif current_tab == 1:  # Setup Instructions
+            self.back_btn.set_state("normal")
+            self.next_btn.pack(side=tk.RIGHT, padx=(0, 10))
+            self.next_btn.set_state("normal")
+            self.finish_btn.pack_forget()
+        elif current_tab == 2:  # Local Storage (optional)
+            self.back_btn.set_state("normal")
+            self.next_btn.pack(side=tk.RIGHT, padx=(0, 10))
+            self.next_btn.set_state("normal")
+            self.finish_btn.pack_forget()
+        elif current_tab == 3:  # OneDrive Folder
             self.back_btn.set_state("normal")
             self.next_btn.pack(side=tk.RIGHT, padx=(0, 10))
             self.finish_btn.pack_forget()
-        elif current_tab == 2:  # Backup Storage
+            # Disable Next button if no backup path selected
+            if not self.backup_path_var.get():
+                self.next_btn.set_state("disabled")
+            else:
+                self.next_btn.set_state("normal")
+        elif current_tab == 4:  # Snowflake Account
             self.back_btn.set_state("normal")
             self.next_btn.pack(side=tk.RIGHT, padx=(0, 10))
+            self.next_btn.set_state("normal")
             self.finish_btn.pack_forget()
-        elif current_tab == 3:  # Summary
+        elif current_tab == 5:  # Summary
             self.back_btn.set_state("normal")
             self.next_btn.pack_forget()
             self.finish_btn.pack(side=tk.RIGHT)
@@ -1139,22 +1386,32 @@ class FirstRunDialog:
         """Go to next page."""
         current = self.notebook.index(self.notebook.select())
 
-        # Validate current page before proceeding
-        if current == 1:  # Local Storage page
-            if not self.local_path_var.get():
+        # Determine next tab (skip Local Storage tab)
+        if current == 0:  # Welcome -> Setup Instructions
+            next_tab = 1
+        elif current == 1:  # Setup Instructions -> OneDrive Folder (skip Local Storage)
+            next_tab = 3
+        elif current == 3:  # OneDrive Folder -> Snowflake Account
+            next_tab = 4
+        elif current == 4:  # Snowflake Account -> Summary
+            next_tab = 5
+        else:
+            return  # Already at the end
+
+        # Validate before proceeding
+        if current == 3:  # OneDrive Folder page
+            if not self.backup_path_var.get():
                 DialogHelper.show_message(
                     self.dialog,
                     DialogHelper.t("Error"),
-                    DialogHelper.t("Please select a local storage location."),
+                    DialogHelper.t("Please select your synchronized OneDrive folder."),
                     message_type="error",
                 )
                 return
 
-        if current < 3:
-            # Enable the next tab before switching
-            self.notebook.tab(current + 1, state="normal")
-            # Now switch to it
-            self.notebook.select(current + 1)
+        # Enable and switch to next tab
+        self.notebook.tab(next_tab, state="normal")
+        self.notebook.select(next_tab)
 
     def _go_back(self):
         """Go to previous page."""
@@ -1174,25 +1431,33 @@ class FirstRunDialog:
         try:
             # Get the selected paths
             local_path = Path(self.local_path_var.get())
-            backup_path = (
-                Path(self.backup_path_var.get()) if self.use_backup_var.get() else None
-            )
+            backup_path = Path(self.backup_path_var.get())  # Always required now
 
-            # Create local folder structure (WITHOUT register folder)
-            self._create_folder_structure(local_path, is_shared=False)
-
-            # Handle backup path - use it directly, don't look for "GeoVue Chip Tray Photos"
-            if backup_path:
-                # Create structure if needed (WITH register folder)
-                if not self.backup_existing:
-                    self._create_folder_structure(backup_path, is_shared=True)
+            # Use FileManager to create folder structures
+            if hasattr(self.gui_manager, 'file_manager') and self.gui_manager.file_manager:
+                # Create local folder structure (FileManager handles skipping register for local)
+                if not hasattr(self, 'local_existing') or not self.local_existing:
+                    self.gui_manager.file_manager.create_local_folder_structure(str(local_path))
+                
+                # Create OneDrive folder structure if needed
+                if backup_path:
+                    if not hasattr(self, 'backup_existing') or not self.backup_existing:
+                        self.gui_manager.file_manager.create_folder_structure(str(backup_path))
+            else:
+                self.logger.error("FileManager not available for folder creation")
+                raise Exception("FileManager not available")
 
             # Prepare result
+            sf_user = ""
+            if hasattr(self, "snowflake_user_var"):
+                sf_user = self.snowflake_user_var.get().strip()
+
             self.result = {
-                "storage_type": "both" if backup_path else "local",
+                "storage_type": "both",  # Always both now
                 "local_folder_path": str(local_path),
-                "shared_folder_path": str(backup_path) if backup_path else None,
+                "shared_folder_path": str(backup_path),
                 "folder_paths": self._get_folder_paths(local_path, backup_path),
+                "snowflake_user": sf_user,
             }
 
             self.dialog.destroy()
@@ -1206,27 +1471,19 @@ class FirstRunDialog:
             )
 
     def _create_folder_structure(self, base_path: Path, is_shared: bool = False):
-        """Create the required folder structure."""
-        # Create main folders
-        for key, folder_name in self.REQUIRED_FOLDERS.items():
-            # Skip register folder for local path - it only goes in shared
-            if key == "register" and not is_shared:
-                continue
-
-            folder_path = base_path / folder_name
-            folder_path.mkdir(parents=True, exist_ok=True)
-
-            # Create subfolders
-            if key in self.REQUIRED_SUBFOLDERS:
-                for subfolder in self.REQUIRED_SUBFOLDERS[key]:
-                    (folder_path / subfolder).mkdir(exist_ok=True)
-
-        # Only create register in shared folder
-        if is_shared:
-            register_dir = base_path / self.REQUIRED_FOLDERS["register"]
-            if not (register_dir / "Chip_Tray_Register.xlsx").exists():
-                # Create the JSON manager, it will handle template copy
-                json_manager = JSONRegisterManager(str(register_dir), self.logger)
+        """Use FileManager to create the required folder structure."""
+        if hasattr(self.gui_manager, 'file_manager') and self.gui_manager.file_manager:
+            # Use FileManager's method to create folders
+            if is_shared:
+                # For shared/OneDrive, create all folders including register
+                self.gui_manager.file_manager.create_folder_structure(str(base_path))
+            else:
+                # For local, FileManager will handle skipping the register folder
+                self.gui_manager.file_manager.create_local_folder_structure(str(base_path))
+        else:
+            # Fallback if FileManager not available (shouldn't happen)
+            self.logger.error("FileManager not available for folder creation")
+            raise Exception("FileManager not available")
 
     def _get_folder_paths(self, local_path: Path, backup_path: Path = None) -> dict:
         """Get all folder paths for configuration."""
@@ -1249,13 +1506,6 @@ class FirstRunDialog:
                 local_path / self.REQUIRED_FOLDERS["compartments"]
             ),
             "drill_traces": str(local_path / self.REQUIRED_FOLDERS["traces"]),
-            "debugging": str(local_path / self.REQUIRED_FOLDERS["debugging"]),
-            "blur_analysis": str(
-                local_path / self.REQUIRED_FOLDERS["debugging"] / "Blur Analysis"
-            ),
-            "debug_images": str(
-                local_path / self.REQUIRED_FOLDERS["debugging"] / "Debug Images"
-            ),
         }
 
         # Add backup/OneDrive paths if configured
@@ -1300,6 +1550,9 @@ class FirstRunDialog:
                         backup_path
                         / self.REQUIRED_FOLDERS["compartments"]
                         / "Compartment Images for Review"
+                    ),
+                    "shared_folder_cross_sections": str(
+                        backup_path / self.REQUIRED_FOLDERS["cross_sections"]
                     ),
                 }
             )

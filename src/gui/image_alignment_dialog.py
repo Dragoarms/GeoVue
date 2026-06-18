@@ -17,6 +17,7 @@ import gc
 
 from gui.compartment_registration_dialog import CompartmentRegistrationDialog
 from gui.dialog_helper import DialogHelper
+from processing.ArucoMarkersAndBlurDetectionStep.aruco_manager import ArucoManager
 
 
 class ImageAlignmentDialog:
@@ -52,7 +53,8 @@ class ImageAlignmentDialog:
         image_path=None,
         scale_data=None,
         boundary_analysis=None,
-        app=None,  # Add app parameter
+        app=None,
+        initial_mode=None,
     ):
         """Initialize the image alignment dialog."""
         self.logger = logging.getLogger(__name__)
@@ -94,6 +96,7 @@ class ImageAlignmentDialog:
             "scale_data": scale_data,
             "boundary_analysis": boundary_analysis,
             "app": self.app,  # NOW this will have the correct value
+            "initial_mode": initial_mode,  # Pass through initial_mode
         }
 
         # Image transformation state
@@ -103,15 +106,35 @@ class ImageAlignmentDialog:
 
         # Store working copies - avoid copying large images unnecessarily
         self.source_image = image.copy() if image is not None else None
+        
+        # Check for major orientation issues BEFORE creating dialog
+        # This handles 90°, 180°, 270° rotations from camera orientation
+        if self.source_image is not None and markers:
+            self.source_image, self._major_rotation_applied = self._check_and_fix_major_orientation(
+                self.source_image, markers, config
+            )
+
+            # Re-detect markers on the rotated image so boundary logic uses correct positions
+            aruco = ArucoManager(config)
+            markers = aruco.improve_marker_detection(self.source_image)
+            self.original_params["markers"] = markers  # update forwarded params
+        else:
+            self._major_rotation_applied = 0.0
+            
         self.transformed_image = (
             self.source_image.copy() if self.source_image is not None else None
         )
-        
+
+        # Store major rotation in params for reference by callers
+        self.original_params["major_rotation_applied"] = self._major_rotation_applied
+
         # Store reference to original image but don't copy it yet (memory optimization)
         # We'll copy it only when we need to transform it
         self._original_image_ref = original_image
         self.high_res_image = None  # Will be created when needed
-        self._using_reference_mode = False  # Track if we're using reference mode for large images
+        self._using_reference_mode = (
+            False  # Track if we're using reference mode for large images
+        )
 
         # Calculate the center of rotation
         self._calculate_transform_center()
@@ -153,31 +176,133 @@ class ImageAlignmentDialog:
             f"Transform center calculated at: ({center_x:.1f}, {center_y:.1f})"
         )
 
+    def _check_and_fix_major_orientation(
+            self, 
+            image: np.ndarray, 
+            markers: Dict[int, np.ndarray],
+            config: Dict
+        ) -> Tuple[np.ndarray, float]:
+            """
+            Check and fix major orientation issues (90°, 180°, 270°) before fine adjustment.
+            
+            Args:
+                image: Source image
+                markers: Detected marker positions
+                config: Configuration with marker IDs
+                
+            Returns:
+                Tuple of (corrected_image, rotation_angle_applied)
+            """
+            if not markers:
+                return image, 0.0
+                
+            corner_ids = config.get("corner_marker_ids", [0, 1, 2, 3])
+            compartment_ids = config.get("compartment_marker_ids", list(range(4, 24)))
+            
+            h, w = image.shape[:2]
+            
+            # Get detected markers by type
+            corner_markers = [(mid, markers[mid]) for mid in corner_ids if mid in markers]
+            comp_markers = [
+                (mid, markers[mid]) 
+                for mid in compartment_ids 
+                if mid in markers and mid != 24
+            ]
+            
+            # Need minimum markers
+            if len(corner_markers) < 1 or len(comp_markers) < 2:
+                self.logger.debug("Insufficient markers for major orientation detection")
+                return image, 0.0
+                
+            # Analyze marker positions
+            is_landscape = w > h
+            
+            # Calculate average positions
+            corner_centers = [np.mean(corners, axis=0) for _, corners in corner_markers]
+            comp_centers = [(mid, np.mean(corners, axis=0)) for mid, corners in comp_markers]
+            
+            corner_avg = np.mean(corner_centers, axis=0)
+            comp_avg = np.mean([c for _, c in comp_centers], axis=0)
+            
+            # Check marker ID ordering vs X position
+            comp_centers_sorted = sorted(comp_centers, key=lambda x: x[0])  # By ID
+            comp_centers_by_x = sorted(comp_centers, key=lambda x: x[1][0])  # By X position
+            
+            id_order_correct = True
+            if len(comp_centers_sorted) >= 2:
+                ids_by_id = [c[0] for c in comp_centers_sorted]
+                ids_by_x = [c[0] for c in comp_centers_by_x]
+                correlation = np.corrcoef(ids_by_id, ids_by_x)[0, 1]
+                id_order_correct = correlation > 0
+                
+            # Determine rotation needed
+            rotation_angle = 0.0
+            rotated_image = image
+            
+            if not is_landscape:
+                # Portrait orientation - needs 90° rotation
+                if corner_avg[0] > comp_avg[0]:  # Corners to the right
+                    self.logger.info("Portrait image - rotating 90° counter-clockwise")
+                    rotated_image = cv2.rotate(image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    rotation_angle = 90.0
+                else:
+                    self.logger.info("Portrait image - rotating 90° clockwise")
+                    rotated_image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+                    rotation_angle = -90.0
+            else:
+                # Landscape - check if upside down
+                if comp_avg[1] < corner_avg[1] or not id_order_correct:
+                    self.logger.info("Landscape image upside down - rotating 180°")
+                    rotated_image = cv2.rotate(image, cv2.ROTATE_180)
+                    rotation_angle = 180.0
+                    
+            if rotation_angle != 0.0:
+                self.logger.info(f"Applied major orientation correction: {rotation_angle}°")
+                
+            return rotated_image, rotation_angle
+
     def _get_high_res_image(self):
         """Get high-res image, creating copy only when needed (memory optimization)."""
         if self.high_res_image is None and self._original_image_ref is not None:
             try:
                 # Check available memory before copying large image
                 import psutil
+
                 available_memory_mb = psutil.virtual_memory().available / (1024 * 1024)
-                
+
                 # Estimate memory needed for image copy (height * width * channels * bytes_per_pixel)
-                if hasattr(self._original_image_ref, 'shape'):
+                if hasattr(self._original_image_ref, "shape"):
                     h, w = self._original_image_ref.shape[:2]
-                    channels = self._original_image_ref.shape[2] if len(self._original_image_ref.shape) > 2 else 1
+                    channels = (
+                        self._original_image_ref.shape[2]
+                        if len(self._original_image_ref.shape) > 2
+                        else 1
+                    )
                     estimated_mb = (h * w * channels) / (1024 * 1024)
-                    
-                    self.logger.info(f"Creating high-res image copy: {w}x{h}x{channels} (~{estimated_mb:.1f} MB)")
+
+                    self.logger.info(
+                        f"Creating high-res image copy: {w}x{h}x{channels} (~{estimated_mb:.1f} MB)"
+                    )
                     self.logger.info(f"Available memory: {available_memory_mb:.1f} MB")
-                    
-                    if estimated_mb > available_memory_mb * 0.5:  # Don't use more than 50% of available memory
-                        self.logger.warning(f"Large image ({estimated_mb:.1f} MB) may cause memory issues.")
-                        self.logger.warning(f"Available memory: {available_memory_mb:.1f} MB")
-                        
+
+                    if (
+                        estimated_mb > available_memory_mb * 0.5
+                    ):  # Don't use more than 50% of available memory
+                        self.logger.warning(
+                            f"Large image ({estimated_mb:.1f} MB) may cause memory issues."
+                        )
+                        self.logger.warning(
+                            f"Available memory: {available_memory_mb:.1f} MB"
+                        )
+
                         # Instead of automatically resizing, use reference and warn user
                         # This preserves full quality but uses minimal memory until transformation
-                        self.logger.info("Using memory-efficient reference mode to preserve image quality")
-                        self.high_res_image = self._original_image_ref  # Use reference, not copy
+                        self.logger.info(
+                            "Using memory-efficient reference mode to preserve image quality"
+                        )
+                        self.high_res_image = (
+                            self._original_image_ref
+                        )  # Use reference, not copy
                         self._using_reference_mode = True
                     else:
                         # Safe to copy - sufficient memory available
@@ -186,7 +311,7 @@ class ImageAlignmentDialog:
                 else:
                     # Fallback if shape is not available
                     self.high_res_image = self._original_image_ref.copy()
-                    
+
             except ImportError:
                 # psutil not available, proceed without memory check
                 self.logger.warning("psutil not available for memory checking")
@@ -194,23 +319,32 @@ class ImageAlignmentDialog:
             except Exception as e:
                 self.logger.error(f"Error creating high-res image copy: {e}")
                 self.high_res_image = self._original_image_ref.copy()
-        
+
         return self.high_res_image
-    
+
     def cleanup_memory(self):
         """Clean up memory by releasing image references."""
         try:
             self.logger.debug("Cleaning up image alignment dialog memory")
-            
+
             # Clear image references
             self.source_image = None
             self.transformed_image = None
             self.high_res_image = None
             self._original_image_ref = None
-            
-            # Force garbage collection
+
+            # Clear wrapped dialog reference
+            if hasattr(self, "wrapped_dialog"):
+                self.wrapped_dialog = None
+
+            # Force garbage collection multiple times for stubborn references
+            import gc
+
             gc.collect()
-            
+            gc.collect()  # Sometimes need multiple passes
+
+            self.logger.debug("Image alignment dialog memory cleanup completed")
+
         except Exception as e:
             self.logger.error(f"Error during memory cleanup: {e}")
 
@@ -314,8 +448,13 @@ class ImageAlignmentDialog:
                     )
 
                     # Check if we're in reference mode and need to handle memory carefully
-                    if hasattr(self, '_using_reference_mode') and self._using_reference_mode:
-                        self.logger.info("Applying transformation in memory-efficient mode")
+                    if (
+                        hasattr(self, "_using_reference_mode")
+                        and self._using_reference_mode
+                    ):
+                        self.logger.info(
+                            "Applying transformation in memory-efficient mode"
+                        )
                         # Transform directly without additional copying
                         transformed_highres = cv2.warpAffine(
                             high_res_image,
@@ -342,13 +481,23 @@ class ImageAlignmentDialog:
                     result["transformation_matrix"] = M
                     result["cumulative_rotation"] = self.cumulative_rotation
                     result["cumulative_offset_y"] = self.cumulative_offset_y
+                    result["transform_center"] = self.transform_center  # Add this!
 
                     # Boundaries stay the same - no transformation needed!
                     result["boundaries_need_transformation"] = False
 
-        # Clean up memory before returning
+        # Ensure cleanup happens even if wrapped_dialog doesn't call it
+        try:
+            if hasattr(self, "wrapped_dialog"):
+                # Clean up wrapped dialog's resources
+                if hasattr(self.wrapped_dialog, "_cleanup_all_resources"):
+                    self.wrapped_dialog._cleanup_all_resources()
+        except Exception as e:
+            self.logger.warning(f"Error cleaning wrapped dialog: {e}")
+
+        # Clean up our own memory
         self.cleanup_memory()
-        
+
         return result
 
 
@@ -374,6 +523,16 @@ class ImageAlignmentInternalDialog(CompartmentRegistrationDialog):
         if "app" in kwargs:
             logger.debug(f"kwargs['app']: {kwargs['app']}")
 
+        # Extract initial_mode before passing to parent (parent doesn't accept it)
+        initial_mode = kwargs.pop("initial_mode", None)
+
+        # Extract major_rotation_applied before passing to parent
+        # (CompartmentRegistrationDialog.__init__ does not accept this kwarg)
+        self.major_rotation_applied = kwargs.pop("major_rotation_applied", None)
+        logger.debug(
+            f"major_rotation_applied from kwargs: {self.major_rotation_applied}"
+        )
+
         # Ensure app reference is available
         if "app" not in kwargs and hasattr(alignment_handler, "app"):
             kwargs["app"] = alignment_handler.app
@@ -382,9 +541,64 @@ class ImageAlignmentInternalDialog(CompartmentRegistrationDialog):
         logger.debug(
             f"Final kwargs keys before super().__init__: {list(kwargs.keys())}"
         )
+
+        # Call parent init ONCE
+        super().__init__(**kwargs)
+
+        # Reference the alignment handler for transformation state
+        self.image_aligner = alignment_handler  # Reference to the alignment handler
+
+        # DO NOT initialize transformation attributes here - they should be read from
+        # the alignment_handler dynamically via properties to avoid stale state
+
+        # If initial_mode was provided and differs from what parent determined, override it
+        if initial_mode is not None and initial_mode != self.current_mode:
+            logger.debug(
+                f"Overriding parent mode {self.current_mode} with requested mode {initial_mode}"
+            )
+            self.current_mode = initial_mode
+
         logger.debug("=== END ImageAlignmentInternalDialog INIT ===")
 
-        super().__init__(**kwargs)
+    @property
+    def transformation_applied(self):
+        """Read transformation state from alignment handler."""
+        if hasattr(self, "image_aligner"):
+            # Consider transformation applied if any rotation or offset exists
+            return (
+                self.image_aligner.cumulative_rotation != 0
+                or self.image_aligner.cumulative_offset_y != 0
+            )
+        return False
+
+    @property
+    def transformation_matrix(self):
+        """Get transformation matrix from alignment handler."""
+        if hasattr(self, "image_aligner"):
+            M, _ = self.image_aligner.get_final_transformation_matrix()
+            return M
+        return None
+
+    @property
+    def cumulative_offset_y(self):
+        """Get cumulative offset from alignment handler."""
+        if hasattr(self, "image_aligner"):
+            return self.image_aligner.cumulative_offset_y
+        return 0.0
+
+    @property
+    def cumulative_rotation(self):
+        """Get cumulative rotation from alignment handler."""
+        if hasattr(self, "image_aligner"):
+            return self.image_aligner.cumulative_rotation
+        return 0.0
+
+    @property
+    def transform_center(self):
+        """Get transform center from alignment handler."""
+        if hasattr(self, "image_aligner"):
+            return self.image_aligner.transform_center
+        return [0.0, 0.0]
 
     def _adjust_height(self, delta):
         """Override: Move image instead of boundaries."""
@@ -429,11 +643,23 @@ class ImageAlignmentInternalDialog(CompartmentRegistrationDialog):
         # Store the transformed image
         self.display_image = transformed_image.copy()
 
+        # Transformation state is now read dynamically from alignment_handler via properties
+        # Log current transformation state for debugging
+        self.logger.info(
+            f"Transformation state: rotation={self.cumulative_rotation:.2f}°, "
+            f"offset_y={self.cumulative_offset_y:.1f}px, "
+            f"matrix shape={self.transformation_matrix.shape if self.transformation_matrix is not None else 'None'}"
+        )
+
         # Update the static visualization cache to use transformed image
         self.static_viz_cache = None  # Force recreation
 
         # Update visualization
         self._update_visualization()
+
+        self.logger.info(
+            f"Transformation applied: rotation={self.alignment_handler.cumulative_rotation:.2f}°, offset_y={self.alignment_handler.cumulative_offset_y:.1f}px"
+        )
 
         # Update zoom windows if in adjustment mode
         if self.current_mode == self.MODE_ADJUST_BOUNDARIES:

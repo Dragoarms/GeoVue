@@ -27,7 +27,7 @@ def create_custom_checkbox(parent, text, variable, theme_colors, command=None, t
         highlightbackground=theme_colors["field_border"],
         highlightthickness=1,
     )
-    checkbox_frame.pack(side=tk.LEFT, padx=(0, 5))
+    checkbox_frame.pack(side=tk.LEFT, padx=(0, 8))
     checkbox_frame.pack_propagate(False)
 
     checkmark = tk.Label(
@@ -35,7 +35,7 @@ def create_custom_checkbox(parent, text, variable, theme_colors, command=None, t
         text="✓",
         bg=theme_colors["checkbox_bg"],
         fg=theme_colors["checkbox_fg"],
-        font=("Arial", 12, "bold")
+        font=("Segoe UI", 11, "bold")
     )
     
 

@@ -45,55 +45,63 @@ class GUIManager:
         # Define theme colors for dark and light themes
         self.theme_modes = {
             "dark": {
-                "background": "#1e1e1e",  # Dark background
-                "secondary_bg": "#252526",  # Slightly lighter background for contrast
-                "text": "#e0e0e0",  # Light text
-                "row_invalid": "#3a2222",  # QAQC manager theme colours
-                "row_valid": "#223a22",  # QAQC manager theme colours
-                "row_neutral": "#1e1e1e",  # QAQC manager theme colours
-                "accent_blue": "#3a7ca5",  # Muted blue accent
-                "accent_green": "#4a8259",  # Muted green accent
-                "accent_red": "#9e4a4a",  # Muted red for quit button
-                "accent_yellow": "#e5c07b",  # Muted yellow accent
-                "field_bg": "#2d2d2d",  # Form field background
-                "field_border": "#3f3f3f",  # Form field border
-                "hover_highlight": "#3a3a3a",  # Highlight color for hover effects
-                "accent_error": "#5c2d2d",  # Light red for error/invalid state
-                "accent_valid": "#2d5c2d",  # Light green for valid state
-                "checkbox_bg": "#353535",  # Checkbox background
-                "checkbox_fg": "#4a8259",  # Checkbox foreground when checked
-                "progress_bg": "#252526",  # Progress bar background
-                "progress_fg": "#4a8259",  # Progress bar foreground
-                "menu_bg": "#252526",  # Menu background
-                "menu_fg": "#e0e0e0",  # Menu text (was #2d2d2d, too dark for contrast)
-                "menu_active_bg": "#3a7ca5",  # Menu active background
-                "menu_active_fg": "#e0e0e0",  # Menu active text (was #ffffff)
-                "border": "#3f3f3f",  # Border color
-                "separator": "#3f3f3f",  # Separator color
+                "background": "#121418",  # Deep charcoal - rich and modern
+                "secondary_bg": "#1a1d24",  # Slightly elevated surface
+                "tertiary_bg": "#232830",  # Card/section background
+                "text": "#f0f2f5",  # Crisp white text
+                "subtext": "#8b919a",  # Muted secondary text
+                "row_invalid": "#2d1f1f",  # Subtle red tint for invalid
+                "row_valid": "#1f2d1f",  # Subtle green tint for valid
+                "row_neutral": "#121418",  # Matches background
+                "accent_blue": "#4d9be6",  # Vibrant blue accent
+                "accent_green": "#47b881",  # Fresh green accent
+                "accent_red": "#e05252",  # Clear red for actions
+                "accent_yellow": "#f0b429",  # Warm amber accent
+                "accent_teal": "#38b2ac",  # Teal for highlights
+                "field_bg": "#1e222a",  # Input field background
+                "field_border": "#2d333d",  # Subtle field borders
+                "hover_highlight": "#2a303c",  # Hover state
+                "accent_error": "#3d2222",  # Error background
+                "accent_valid": "#1f3d2a",  # Valid/success background
+                "checkbox_bg": "#232830",  # Checkbox background
+                "checkbox_fg": "#47b881",  # Checkbox check color
+                "progress_bg": "#1e222a",  # Progress track
+                "progress_fg": "#47b881",  # Progress fill
+                "menu_bg": "#1a1d24",  # Menu background
+                "menu_fg": "#f0f2f5",  # Menu text
+                "menu_active_bg": "#4d9be6",  # Menu selection
+                "menu_active_fg": "#ffffff",  # Menu active text
+                "border": "#2d333d",  # General borders
+                "separator": "#2d333d",  # Divider lines
+                "shadow": "#0a0b0d",  # Shadow color for depth
             },
             "light": {
-                "background": "#f5f5f5",  # Light background
-                "secondary_bg": "#e8e8e8",  # Slightly darker background for contrast
-                "text": "#333333",  # Dark text
-                "accent_blue": "#4a90c0",  # Blue accent
-                "accent_green": "#5aa06c",  # Green accent
-                "accent_red": "#c05a5a",  # Red for quit button
-                "accent_yellow": "#e5c07b",  # Muted yellow accent
-                "field_bg": "#ffffff",  # Form field background
-                "field_border": "#cccccc",  # Form field border
-                "hover_highlight": "#dddddd",  # Highlight color for hover effects
-                "accent_error": "#ffebeb",  # Light red for error/invalid state
-                "accent_valid": "#ebffeb",  # Light green for valid state
+                "background": "#f8f9fb",  # Clean light background
+                "secondary_bg": "#eef1f5",  # Subtle contrast
+                "tertiary_bg": "#ffffff",  # Cards and elevated surfaces
+                "text": "#1a1d24",  # Dark text
+                "subtext": "#6b7280",  # Muted secondary text
+                "accent_blue": "#3182ce",  # Professional blue
+                "accent_green": "#38a169",  # Fresh green
+                "accent_red": "#e53e3e",  # Alert red
+                "accent_yellow": "#d69e2e",  # Warm amber
+                "accent_teal": "#319795",  # Teal highlight
+                "field_bg": "#ffffff",  # Input background
+                "field_border": "#d1d5db",  # Input borders
+                "hover_highlight": "#e5e7eb",  # Hover state
+                "accent_error": "#fff5f5",  # Error background
+                "accent_valid": "#f0fff4",  # Success background
                 "checkbox_bg": "#ffffff",  # Checkbox background
-                "checkbox_fg": "#5aa06c",  # Checkbox foreground when checked
-                "progress_bg": "#e8e8e8",  # Progress bar background
-                "progress_fg": "#5aa06c",  # Progress bar foreground
-                "menu_bg": "#f0f0f0",  # Menu background
-                "menu_fg": "#333333",  # Menu text
-                "menu_active_bg": "#4a90c0",  # Menu active background
+                "checkbox_fg": "#38a169",  # Checkbox check color
+                "progress_bg": "#e5e7eb",  # Progress track
+                "progress_fg": "#38a169",  # Progress fill
+                "menu_bg": "#ffffff",  # Menu background
+                "menu_fg": "#1a1d24",  # Menu text
+                "menu_active_bg": "#3182ce",  # Menu selection
                 "menu_active_fg": "#ffffff",  # Menu active text
-                "border": "#cccccc",  # Border color
-                "separator": "#dddddd",  # Separator color
+                "border": "#d1d5db",  # General borders
+                "separator": "#e5e7eb",  # Divider lines
+                "shadow": "#9ca3af",  # Shadow color
             },
         }
 
@@ -101,17 +109,18 @@ class GUIManager:
         self.current_theme = self._load_theme_preference() or "dark"
         self.theme_colors = self.theme_modes[self.current_theme]
 
-        # Font configurations
+        # Font configurations - using Segoe UI for modern Windows look
+        # Falls back gracefully on other systems
         self.fonts = {
-            "title": ("Arial", 16, "bold"),
-            "subtitle": ("Arial", 14, "bold"),
-            "heading": ("Arial", 12, "bold"),
-            "normal": ("Arial", 10),
-            "small": ("Arial", 9),
-            "code": ("Consolas", 10),
-            "button": ("Arial", 11, "bold"),
-            "label": ("Arial", 11, "bold"),  # for form labels
-            "entry": ("Arial", 12),  # for text entries
+            "title": ("Segoe UI", 18, "bold"),
+            "subtitle": ("Segoe UI Semibold", 14),
+            "heading": ("Segoe UI Semibold", 11),
+            "normal": ("Segoe UI", 10),
+            "small": ("Segoe UI", 9),
+            "code": ("Cascadia Code", 10),
+            "button": ("Segoe UI Semibold", 10),
+            "label": ("Segoe UI", 10),  # Regular weight for cleaner look
+            "entry": ("Segoe UI", 10),
         }
 
     def t(self, text):
@@ -198,6 +207,153 @@ class GUIManager:
             else self.t("Switch to Dark Theme")
         )
 
+    # def configure_ttk_styles(self, root=None):
+    #     """
+    #     Configure ttk styles based on current theme.
+
+    #     Args:
+    #         root: Optional root window for style configuration
+    #     """
+    #     print(f"DEBUG: configure_ttk_styles called, root: {root}")
+    #     print(f"DEBUG: root type: {type(root).__name__}, id: {id(root)}")
+
+    #     if root is not None:
+    #         try:
+    #             print(
+    #                 f"DEBUG: root exists: {root.winfo_exists()}, class: {root.winfo_class()}"
+    #             )
+    #             print(f"DEBUG: root geometry: {root.winfo_geometry()}")
+    #         except Exception as e:
+    #             print(f"DEBUG: Error checking root widget: {str(e)}")
+
+    #     style = ttk.Style(root) if root else ttk.Style()
+    #     print(f"DEBUG: Created ttk.Style with root: {root is not None}")
+
+    #     # Set theme colors
+    #     colors = self.theme_colors
+
+    #     # CRITICAL: Set dropdown colors FIRST, before any styles
+    #     if root:
+    #         self._set_dropdown_colors(root)
+
+    #     # Configure frame styles with complete styling
+    #     style.configure("TFrame", background=colors["background"])
+    #     style.configure("Main.TFrame", background=colors["background"])
+    #     style.configure("Header.TFrame", background=colors["secondary_bg"])
+    #     style.configure("Content.TFrame", background=colors["background"])
+    #     style.configure("Footer.TFrame", background=colors["background"])
+    #     style.configure(
+    #         "Section.TFrame",
+    #         background=colors["secondary_bg"],
+    #         borderwidth=1,
+    #         relief="raised",
+    #         bordercolor=colors["border"],
+    #     )
+
+    #     # Configure LabelFrame styles
+    #     style.configure(
+    #         "TLabelframe",
+    #         background=colors["background"],
+    #         foreground=colors["text"],
+    #         bordercolor=colors["border"],
+    #     )
+    #     style.configure(
+    #         "TLabelframe.Label",
+    #         background=colors["background"],
+    #         foreground=colors["text"],
+    #         font=self.fonts["heading"],
+    #     )
+
+    #     # Configure label styles with complete styling
+    #     style.configure(
+    #         "TLabel",
+    #         background=colors["background"],
+    #         foreground=colors["text"],
+    #         font=self.fonts["normal"],
+    #     )
+    #     style.configure(
+    #         "Title.TLabel",
+    #         # CHECK
+    #         background=colors["background"],
+    #         foreground=colors["text"],
+    #         font=self.fonts["title"],
+    #     )
+    #     style.configure(
+    #         "SectionTitle.TLabel",
+    #         background=colors["secondary_bg"],
+    #         foreground=colors["text"],
+    #         font=self.fonts["subtitle"],
+    #     )
+    #     style.configure(
+    #         "Content.TLabel", background=colors["background"], foreground=colors["text"]
+    #     )
+    #     style.configure(
+    #         "Value.TLabel",
+    #         background=colors["background"],
+    #         foreground=colors["accent_blue"],
+    #         font=self.fonts["normal"],
+    #     )
+    #     style.configure(
+    #         "Instructions.TLabel",
+    #         background=colors["background"],
+    #         foreground=colors["text"],
+    #         font=self.fonts["title"],
+    #         padding=15,
+    #     )
+
+    #     # Configure combobox styles - unified approach
+    #     for style_name in ["TCombobox", "ThemedCustom.TCombobox"]:
+    #         style.configure(
+    #             style_name,
+    #             fieldbackground=colors["field_bg"],
+    #             background=colors["field_bg"],
+    #             foreground=colors["text"],
+    #             bordercolor=colors["field_border"],
+    #             lightcolor=colors["field_bg"],
+    #             darkcolor=colors["field_bg"],
+    #             arrowcolor=colors["text"],
+    #             insertcolor=colors["text"],
+    #             relief="flat",
+    #             borderwidth=1,
+    #         )
+
+    #         style.map(
+    #             style_name,
+    #             fieldbackground=[
+    #                 ("readonly", colors["field_bg"]),
+    #                 ("focus", colors["field_bg"]),
+    #                 ("disabled", colors["secondary_bg"]),
+    #                 ("active", colors["field_bg"]),
+    #             ],
+    #             foreground=[
+    #                 ("readonly", colors["text"]),
+    #                 ("focus", colors["text"]),
+    #                 ("disabled", colors["field_border"]),
+    #                 ("active", colors["text"]),
+    #             ],
+    #             background=[
+    #                 ("readonly", colors["field_bg"]),
+    #                 ("focus", colors["field_bg"]),
+    #                 ("disabled", colors["secondary_bg"]),
+    #                 ("active", colors["field_bg"]),
+    #                 ("pressed", colors["field_bg"]),
+    #             ],
+    #             arrowcolor=[
+    #                 ("disabled", colors["field_border"]),
+    #                 ("pressed", colors["accent_blue"]),
+    #                 ("active", colors["accent_blue"]),
+    #                 ("!active", colors["text"]),
+    #             ],
+    #             bordercolor=[
+    #                 ("focus", colors["accent_blue"]),
+    #                 ("!focus", colors["field_border"]),
+    #             ],
+    #         )
+
+    #     # Apply dropdown list colors globally
+    #     if root:
+    #         self._set_dropdown_colors(root)
+
     def configure_ttk_styles(self, root=None):
         """
         Configure ttk styles based on current theme.
@@ -222,6 +378,10 @@ class GUIManager:
 
         # Set theme colors
         colors = self.theme_colors
+
+        # CRITICAL: Set dropdown colors FIRST, before any styles
+        if root:
+            self._set_dropdown_colors(root)
 
         # Configure frame styles with complete styling
         style.configure("TFrame", background=colors["background"])
@@ -260,7 +420,6 @@ class GUIManager:
         )
         style.configure(
             "Title.TLabel",
-            # CHECK
             background=colors["background"],
             foreground=colors["text"],
             font=self.fonts["title"],
@@ -288,75 +447,54 @@ class GUIManager:
             padding=15,
         )
 
-        # Configure combobox styles
-        style.configure(
-            "TCombobox",
-            fieldbackground=colors["field_bg"],
-            background=colors["field_bg"],
-            foreground=colors["text"],
-            bordercolor=colors["field_border"],
-            lightcolor=colors["field_bg"],
-            darkcolor=colors["field_bg"],
-            arrowcolor=colors["text"],
-            insertcolor=colors["text"],
-        )
+        # Configure combobox styles - unified approach
+        for style_name in ["TCombobox", "ThemedCustom.TCombobox", "Custom.TCombobox"]:
+            style.configure(
+                style_name,
+                fieldbackground=colors["field_bg"],
+                background=colors["field_bg"],
+                foreground=colors["text"],
+                bordercolor=colors["field_border"],
+                lightcolor=colors["field_bg"],
+                darkcolor=colors["field_bg"],
+                arrowcolor=colors["text"],
+                insertcolor=colors["text"],
+                relief="flat",
+                borderwidth=1,
+            )
 
-        style.map(
-            "TCombobox",
-            fieldbackground=[
-                ("readonly", colors["field_bg"]),
-                ("focus", colors["field_bg"]),
-                ("disabled", colors["secondary_bg"]),
-            ],
-            foreground=[
-                ("readonly", colors["text"]),
-                ("focus", colors["text"]),
-                ("disabled", colors["field_border"]),
-            ],
-            background=[
-                ("readonly", colors["field_bg"]),
-                ("focus", colors["field_bg"]),
-                ("disabled", colors["secondary_bg"]),
-            ],
-            arrowcolor=[
-                ("active", colors["accent_blue"]),
-                ("pressed", colors["accent_blue"]),
-                ("!active", colors["text"]),
-            ],
-        )
-
-        # Also configure the custom style
-        style.configure(
-            "ThemedCustom.TCombobox",
-            fieldbackground=colors["field_bg"],
-            background=colors["field_bg"],
-            foreground=colors["text"],
-            bordercolor=colors["field_border"],
-            lightcolor=colors["field_bg"],
-            darkcolor=colors["field_bg"],
-            arrowcolor=colors["text"],
-        )
-
-        style.map(
-            "ThemedCustom.TCombobox",
-            fieldbackground=[
-                ("readonly", colors["field_bg"]),
-                ("disabled", colors["secondary_bg"]),
-            ],
-            foreground=[
-                ("readonly", colors["text"]),
-                ("disabled", colors["field_border"]),
-            ],
-            background=[
-                ("readonly", colors["field_bg"]),
-                ("disabled", colors["secondary_bg"]),
-            ],
-            arrowcolor=[
-                ("disabled", colors["field_border"]),
-                ("pressed", colors["accent_blue"]),
-                ("active", colors["accent_blue"]),
-            ],
-        )
+            style.map(
+                style_name,
+                fieldbackground=[
+                    ("readonly", colors["field_bg"]),
+                    ("focus", colors["field_bg"]),
+                    ("disabled", colors["secondary_bg"]),
+                    ("active", colors["field_bg"]),
+                ],
+                foreground=[
+                    ("readonly", colors["text"]),
+                    ("focus", colors["text"]),
+                    ("disabled", colors["field_border"]),
+                    ("active", colors["text"]),
+                ],
+                background=[
+                    ("readonly", colors["field_bg"]),
+                    ("focus", colors["field_bg"]),
+                    ("disabled", colors["secondary_bg"]),
+                    ("active", colors["field_bg"]),
+                    ("pressed", colors["field_bg"]),
+                ],
+                arrowcolor=[
+                    ("disabled", colors["field_border"]),
+                    ("pressed", colors["accent_blue"]),
+                    ("active", colors["accent_blue"]),
+                    ("!active", colors["text"]),
+                ],
+                bordercolor=[
+                    ("focus", colors["accent_blue"]),
+                    ("!focus", colors["field_border"]),
+                ],
+            )
 
         # Configure button styles with complete styling
         style.configure(
@@ -366,39 +504,6 @@ class GUIManager:
             "TButton",
             background=[("active", colors["hover_highlight"])],
             foreground=[("active", colors["text"])],
-        )
-
-        style.configure(
-            "Custom.TCombobox",
-            fieldbackground=colors["field_bg"],
-            background=colors["field_bg"],
-            foreground=colors["text"],
-            bordercolor=colors["field_border"],
-            lightcolor=colors["field_bg"],
-            darkcolor=colors["field_bg"],
-            arrowcolor=colors["text"],
-            insertcolor=colors["text"],
-        )
-
-        style.map(
-            "Custom.TCombobox",
-            fieldbackground=[
-                ("readonly", colors["field_bg"]),
-                ("disabled", colors["secondary_bg"]),
-            ],
-            foreground=[
-                ("readonly", colors["text"]),
-                ("disabled", colors["field_border"]),
-            ],
-            background=[
-                ("readonly", colors["field_bg"]),
-                ("disabled", colors["secondary_bg"]),
-            ],
-            arrowcolor=[
-                ("disabled", colors["field_border"]),
-                ("pressed", colors["accent_blue"]),
-                ("active", colors["accent_blue"]),
-            ],
         )
 
         # Configure checkbox styles with complete styling
@@ -530,6 +635,26 @@ class GUIManager:
             tabmargins=[2, 5, 2, 0],
         )
 
+        # Configure Treeview styles
+        style.configure(
+            "Treeview",
+            background=colors["field_bg"],
+            foreground=colors["text"],
+            fieldbackground=colors["field_bg"],
+            borderwidth=0,
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=colors["secondary_bg"],
+            foreground=colors["text"],
+            relief="flat",
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", colors.get("accent_blue", "#3a7ca5"))],
+            foreground=[("selected", "#ffffff")],
+        )
+
         # QAQC Review Visual Feedback Styles
         style.configure(
             "ToBeReplaced.TLabelframe",
@@ -613,6 +738,35 @@ class GUIManager:
 
         # Force theme reloading - important for complete theme switching
         style.theme_use(style.theme_use())
+
+    def _set_dropdown_colors(self, root):
+        """Set dropdown colors on the root window - must be called early."""
+        colors = self.theme_colors
+        try:
+            # Set with highest priority (priority 80)
+            root.option_add("*TCombobox*Listbox.background", colors["field_bg"], 80)
+            root.option_add("*TCombobox*Listbox.foreground", colors["text"], 80)
+            root.option_add(
+                "*TCombobox*Listbox.selectBackground",
+                colors.get("accent_blue", "#3a7ca5"),
+                80,
+            )
+            root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff", 80)
+            root.option_add("*TCombobox*Listbox.font", str(self.fonts["normal"]), 80)
+
+            # Also set without TCombobox prefix for broader compatibility
+            root.option_add("*Listbox.background", colors["field_bg"], 80)
+            root.option_add("*Listbox.foreground", colors["text"], 80)
+            root.option_add(
+                "*Listbox.selectBackground", colors.get("accent_blue", "#3a7ca5"), 80
+            )
+            root.option_add("*Listbox.selectForeground", "#ffffff", 80)
+
+            print(f"DEBUG: Dropdown colors set on root with priority 80")
+            print(f"  Background: {colors['field_bg']}")
+            print(f"  Foreground: {colors['text']}")
+        except Exception as e:
+            self.logger.error(f"Could not set dropdown colors: {e}")
 
     def create_modern_button(
         self, parent, text, color, command, icon=None, grid_pos=None
@@ -710,6 +864,45 @@ class GUIManager:
             validate_func=validate_func,
         )
 
+    def create_searchable_optionmenu(
+        self,
+        parent,
+        items,
+        variable=None,
+        width=20,
+        placeholder=None,
+        on_change=None,
+        dropdown_mode="toplevel",
+    ):
+        """
+        Create a themed, searchable dropdown widget for data values.
+
+        Args:
+            parent: parent widget
+            items: list of data values (hole IDs, file names, etc.)
+            variable: optional StringVar for selected value
+            width: width of the entry field
+            placeholder: optional placeholder text
+            on_change: optional callback when selection changes
+            dropdown_mode: "toplevel" or "overlay"
+
+        Returns:
+            ThemedSearchableOptionMenu instance
+        """
+        from gui.widgets.themed_searchable_optionmenu import ThemedSearchableOptionMenu
+
+        widget = ThemedSearchableOptionMenu(
+            parent=parent,
+            gui_manager=self,
+            items=items,
+            variable=variable,
+            width=width,
+            placeholder=placeholder,
+            on_change=on_change,
+            dropdown_mode=dropdown_mode,
+        )
+        return widget
+
     def create_entry_with_validation(
         self, parent, textvariable, validate_func=None, width=None, placeholder=None
     ):
@@ -748,6 +941,7 @@ class GUIManager:
             validate_func=validate_func,
             values=values,
             placeholder=placeholder,
+            gui_manager=self,  # Add this line
         )
 
     def create_text_display(self, parent, height=10, wrap=tk.WORD, readonly=True):
@@ -1040,6 +1234,21 @@ class GUIManager:
             bd=0,
         )
 
+    def style_combobox(self, combobox):
+        """
+        Force refresh styling on a combobox widget.
+
+        Args:
+            combobox: The ttk.Combobox widget to style
+        """
+        if isinstance(combobox, ttk.Combobox):
+            combobox.configure(style="ThemedCustom.TCombobox")
+            # Force state refresh to apply styling
+            current_state = str(combobox["state"])
+            if "readonly" in current_state:
+                combobox.state(["!readonly"])
+                combobox.state(["readonly"])
+
     def configure_standard_tags(self, text_widget):
         """
         Configure standard tags for a text widget.
@@ -1301,8 +1510,8 @@ class GUIManager:
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Frame inside canvas for content
-        content_frame = ttk.Frame(canvas, style="Content.TFrame", padding=15)
+        # Frame inside canvas for content with refined padding
+        content_frame = ttk.Frame(canvas, style="Content.TFrame", padding=20)
         canvas_window = canvas.create_window(
             (0, 0), window=content_frame, anchor="nw", tags="content_frame"
         )
@@ -1318,11 +1527,12 @@ class GUIManager:
             lambda e: canvas.itemconfigure("content_frame", width=e.width),
         )
 
-        # Enable mousewheel scrolling
+        # Enable mousewheel scrolling - bind to canvas and content frame
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        content_frame.bind("<MouseWheel>", _on_mousewheel)
 
         # 3. Footer frame - fixed at bottom
         footer_frame = ttk.Frame(main_container, style="Footer.TFrame", height=100)
@@ -1341,7 +1551,7 @@ class GUIManager:
             "root": root,
         }
 
-    def create_section_frame(self, parent, title=None, padding=10):
+    def create_section_frame(self, parent, title=None, padding=12):
         """
         Create a section frame with optional title.
 
@@ -1353,22 +1563,22 @@ class GUIManager:
         Returns:
             Frame widget
         """
-        # Create a section frame
+        # Create a section frame with refined spacing
         section_frame = ttk.Frame(parent, style="Section.TFrame", padding=padding)
-        section_frame.pack(fill=tk.X, pady=(0, 10))
+        section_frame.pack(fill=tk.X, pady=(0, 12))
 
         # Add title if provided
         if title:
             title_label = ttk.Label(
                 section_frame, text=self.t(title), style="SectionTitle.TLabel"
             )
-            title_label.pack(anchor="w", pady=(0, 5))
+            title_label.pack(anchor="w", pady=(0, 8))
 
         return section_frame
 
-    def create_status_section(self, parent, height=10):
+    def create_status_section(self, parent, height=15):
         """
-        Create a status text section with progress bar.
+        Create a status text section.
 
         Args:
             parent: Parent widget
@@ -1377,20 +1587,7 @@ class GUIManager:
         Returns:
             Dictionary with status components
         """
-        # Progress section
-        progress_frame = self.create_section_frame(parent, title="Progress")
-
-        progress_var = tk.DoubleVar()
-        progress_bar = ttk.Progressbar(
-            progress_frame,
-            variable=progress_var,
-            orient=tk.HORIZONTAL,
-            mode="determinate",
-            style="Themed.Horizontal.TProgressbar",
-        )
-        progress_bar.pack(fill=tk.X, pady=5)
-
-        # Status section
+        # Status section (no progress bar - takes up more space)
         status_frame = self.create_section_frame(parent, title="Detailed Status")
 
         # Status text with scrollbar
@@ -1410,10 +1607,13 @@ class GUIManager:
         # Configure tags for status text
         self.configure_standard_tags(status_text)
 
+        # Return dummy progress_var and progress_bar for backwards compatibility
+        progress_var = tk.DoubleVar()
+
         return {
-            "progress_frame": progress_frame,
+            "progress_frame": None,
             "progress_var": progress_var,
-            "progress_bar": progress_bar,
+            "progress_bar": None,
             "status_frame": status_frame,
             "status_text": status_text,
         }

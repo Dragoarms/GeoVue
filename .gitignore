@@ -1,0 +1,48 @@
+# Python runtime/cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local test/output scratch
+.claude/settings.local.json
+.pytest-tmp/
+codex_tmp_*/
+codex_pytest_tmp_*/
+pytest-cache-files-*/
+
+# Build/package outputs
+build/
+dist/
+*.egg-info/
+GeoVue_v2.8.1_Installer/
+
+# Large generated/local data
+archive/
+ml_output/
+ml_detection/classifier_images/
+ml_detection/visual_label_classifier_images/
+ml_detection/grain_segmentation_labels/
+ml_detection/lithology_classifier_images/
+ml_detection/dataset_audit/
+
+# Logs and local runtime files
+*.log
+*.tmp
+*.bak
+*.pid
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini

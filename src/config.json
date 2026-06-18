@@ -1,4 +1,5 @@
 {
+    "version": "2.8.1",
     "log_level": "INFO",
     "language": "en",
     "theme": "dark",
@@ -68,7 +69,7 @@
     "compartment_width_cm": 2.0,
     "compartment_spacing_mm": 3.0,
     "compartment_spacing_mm_overrides": {
-        "10-11": 5.0
+        "10-11": 8
     },
     "enable_ocr": false,
     "ocr_confidence_threshold": 70.0,

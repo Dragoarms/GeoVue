@@ -1,5 +1,6 @@
 import tkinter as tk
 from gui.dialog_helper import DialogHelper
+import logging
 
 
 class ModernButton:
@@ -8,7 +9,17 @@ class ModernButton:
     """
 
     def __init__(
-        self, parent, text, color, command, icon=None, theme_colors=None, fonts=None
+        self,
+        parent,
+        text,
+        color,
+        command,
+        icon=None,
+        theme_colors=None,
+        fonts=None,
+        enabled=True,
+        width=None,
+        height=None,
     ):
         """
         Initialize a modern styled button. Uses dialog manager to translate display text.
@@ -21,7 +32,11 @@ class ModernButton:
             icon: Optional text icon
             theme_colors: Theme colors dictionary
             fonts: Fonts dictionary from GUI manager
+            enabled: Whether button is enabled
+            width: Optional width (not currently used, for API compatibility)
+            height: Optional height (not currently used, for API compatibility)
         """
+        self.logger = logging.getLogger(__name__)
         self.parent = parent
         self.text = text
         self.base_color = color
@@ -29,39 +44,49 @@ class ModernButton:
         self.icon = icon
         self.theme_colors = theme_colors or {}
         self.fonts = fonts or {}
-        self.enabled = True
+        self.enabled = enabled
+        self.width = width
+        self.height = height
 
         # translate all button text
         text = DialogHelper.t(text)
 
-        # Create the button frame
+        # Create the button frame with subtle border for depth
+        border_color = self._lighten_color(color, 0.1)
         self.frame = tk.Frame(
             parent,
             background=color,
-            highlightbackground=color,
+            highlightbackground=border_color,
             highlightthickness=1,
             bd=0,
             cursor="hand2",
         )
 
         # Prefix with icon if provided
-        display_text = f"{icon} {text}" if icon else text
+        display_text = f"{icon}  {text}" if icon else text
 
         # Use the button font from GUI manager, with fallback
-        button_font = self.fonts.get("button", ("Arial", 11))
+        button_font = self.fonts.get("button", ("Segoe UI Semibold", 10))
 
-        # Create the label for button text
+        # Create the label for button text with automatic contrast
+        text_color = self._get_contrast_color(color)
         self.label = tk.Label(
             self.frame,
             text=display_text,
             background=color,
-            foreground="white",
-            font=button_font,  # <-- Use the font from GUI manager
-            padx=10,
-            pady=5,
+            foreground=text_color,
+            font=button_font,
+            padx=8,
+            pady=4,
             cursor="hand2",
+            width=self.width if self.width is not None else 0,
+            height=self.height if self.height is not None else 0,
         )
         self.label.pack(fill=tk.BOTH, expand=True)
+
+        # Apply initial enabled state
+        if not self.enabled:
+            self.set_state("disabled")
 
         # Bind events
         self.frame.bind("<Enter>", self._on_enter)
@@ -133,12 +158,21 @@ class ModernButton:
     def configure_color(self, new_color):
         """Change the button's color dynamically."""
         self.base_color = new_color
+        text_color = self._get_contrast_color(new_color)
 
-        # Update the frame and label backgrounds
+        # Update the frame and label backgrounds and text color
         if hasattr(self, "frame") and self.frame:
             self.frame.config(background=new_color)
         if hasattr(self, "label") and self.label:
-            self.label.config(background=new_color)
+            self.label.config(background=new_color, foreground=text_color)
+    
+    def _update_colors(self):
+        """Update colors after base_color change. Alias for configure_color."""
+        self.configure_color(self.base_color)
+
+    def update_color(self, new_color):
+        """Alias for configure_color for backward compatibility."""
+        self.configure_color(new_color)
 
     def _on_enter(self, event):
         """Handle mouse enter event."""
@@ -147,31 +181,44 @@ class ModernButton:
 
         # Use a lighter color for hover effect
         hover_color = self._lighten_color(self.base_color, 0.15)
+        text_color = self._get_contrast_color(hover_color)
         self.frame.config(background=hover_color)
-        self.label.config(background=hover_color)
+        self.label.config(background=hover_color, foreground=text_color)
 
     def _on_leave(self, event):
         """Handle mouse leave event."""
         if not self.enabled:
             return
 
-        # Restore original color
+        # Restore original color with proper contrast
+        text_color = self._get_contrast_color(self.base_color)
         self.frame.config(background=self.base_color)
-        self.label.config(background=self.base_color)
+        self.label.config(background=self.base_color, foreground=text_color)
 
     def _on_click(self, event):
         """Handle mouse click event."""
+        self.logger.debug(f"Button '{self.text}' clicked, enabled={self.enabled}")
+        
         if not self.enabled:
+            self.logger.debug(f"Button '{self.text}' is disabled, ignoring click")
             return
 
         # Use a darker color for click effect
         click_color = self._darken_color(self.base_color, 0.15)
+        text_color = self._get_contrast_color(click_color)
         self.frame.config(background=click_color)
-        self.label.config(background=click_color)
+        self.label.config(background=click_color, foreground=text_color)
 
         # Execute command
         if self.command:
-            self.command()
+            self.logger.debug(f"Executing command for button '{self.text}'")
+            try:
+                self.command()
+                self.logger.debug(f"Command executed successfully for button '{self.text}'")
+            except Exception as e:
+                self.logger.error(f"Error executing command for button '{self.text}': {e}", exc_info=True)
+        else:
+            self.logger.warning(f"No command defined for button '{self.text}'")
 
         # Reset color after a short delay
         self.frame.after(100, self._reset_color)
@@ -241,10 +288,11 @@ class ModernButton:
         """Reset button color to original."""
         try:
             if self.frame and self.frame.winfo_exists():
+                text_color = self._get_contrast_color(self.base_color)
                 self.frame.config(background=self.base_color)
 
             if self.label and self.label.winfo_exists():
-                self.label.config(background=self.base_color)
+                self.label.config(background=self.base_color, foreground=text_color)
         except (tk.TclError, RuntimeError) as e:
             # Widget already destroyed, ignore error
             pass
@@ -284,6 +332,42 @@ class ModernButton:
 
         # Convert to RGB
         return tuple(int(color_hex[i : i + 2], 16) for i in (0, 2, 4))
+
+    def _get_contrast_color(self, bg_color):
+        """
+        Calculate appropriate text color (black or white) for maximum contrast.
+        Uses WCAG relative luminance formula.
+
+        Args:
+            bg_color: Background color in hex format
+
+        Returns:
+            str: Either "white" or "black" for best contrast
+        """
+        try:
+            # Get RGB values
+            r, g, b = self._hex_to_rgb(bg_color)
+
+            # Calculate relative luminance (WCAG formula)
+            # Convert to 0-1 range
+            r = r / 255.0
+            g = g / 255.0
+            b = b / 255.0
+
+            # Apply gamma correction
+            r = r / 12.92 if r <= 0.03928 else ((r + 0.055) / 1.055) ** 2.4
+            g = g / 12.92 if g <= 0.03928 else ((g + 0.055) / 1.055) ** 2.4
+            b = b / 12.92 if b <= 0.03928 else ((b + 0.055) / 1.055) ** 2.4
+
+            # Calculate luminance
+            luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+            # Use white text for dark backgrounds (luminance < 0.5)
+            # Use black text for light backgrounds (luminance >= 0.5)
+            return "white" if luminance < 0.5 else "black"
+        except:
+            # Fallback to white if any error occurs
+            return "white"
 
     def pack(self, **kwargs):
         """Pack the button frame."""
@@ -375,6 +459,10 @@ class ModernButton:
 
         if "command" in kwargs:
             self.command = kwargs.pop("command")
+
+        if "color" in kwargs:
+            # Use the existing configure_color method
+            self.configure_color(kwargs.pop("color"))
 
         # Handle font separately - apply it to the label, not the frame
         if "font" in kwargs:

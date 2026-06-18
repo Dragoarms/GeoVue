@@ -43,6 +43,19 @@ datas += [
     )
 ]
 
+# Refresh resource data from files that actually exist.
+datas = []
+resource_root = os.path.join("src", "resources")
+for root, dirnames, filenames in os.walk(resource_root):
+    dirnames[:] = [dirname for dirname in dirnames if dirname != "__pycache__"]
+    relative_dir = os.path.relpath(root, resource_root)
+    target_dir = "resources" if relative_dir == "." else os.path.join("resources", relative_dir)
+
+    for filename in filenames:
+        if filename.endswith((".py", ".pyc", ".pyo")):
+            continue
+        datas.append((os.path.join(root, filename), target_dir))
+
 # config .json file
 datas += [
     ("src/config.json", "."),  # ← this line ensures dist/GeoVue/_internal/config.json exists
@@ -56,7 +69,36 @@ a = Analysis(
     pathex=["src"],            # where to find launcher.py & other modules
     binaries=[],
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=[
+        # snowflake-connector-python (externalbrowser SSO auth)
+        "snowflake.connector",
+        "snowflake.connector.auth",
+        "snowflake.connector.auth_default",
+        "snowflake.connector.auth_webbrowser",
+        "snowflake.connector.connection",
+        "snowflake.connector.cursor",
+        "snowflake.connector.errors",
+        "snowflake.connector.network",
+        "snowflake.connector.ssl_wrap_socket",
+        "snowflake.connector.vendored",
+        "snowflake.connector.vendored.urllib3",
+        "snowflake.connector.vendored.urllib3.contrib",
+        "snowflake.connector.vendored.urllib3.contrib.pyopenssl",
+        # crypto dependencies
+        "cryptography",
+        "cryptography.hazmat.primitives",
+        "cryptography.hazmat.primitives.asymmetric",
+        "cryptography.hazmat.backends",
+        "cryptography.hazmat.backends.openssl",
+        "oscrypto",
+        "asn1crypto",
+        "pyOpenSSL",
+        "OpenSSL",
+        "OpenSSL.SSL",
+        # parquet cache
+        "pyarrow",
+        "pyarrow.pandas_compat",
+    ],
     hookspath=[],
     runtime_hooks=[],
     excludes=[

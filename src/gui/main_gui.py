@@ -3,26 +3,44 @@ import os
 import re
 import cv2
 import numpy as np
+from datetime import datetime
 import logging
 import tkinter as tk
 from tkinter import ttk, filedialog
+from pathlib import Path
 import queue
 import shutil
 import platform
 import subprocess
+import time
 from typing import Dict, List, Optional, Any, Tuple, Union
 import traceback
 
+# Bulk Renamer integration (PEP-8: imports near top; safe optional import)
+try:
+    from utils.bulk_photo_renamer import (
+        PhotoRenamerGUI,
+    )  # assuming module on PYTHONPATH
+except Exception:
+    PhotoRenamerGUI = None
+
+# Use DialogHelper for consistent dialogs
 from gui.dialog_helper import DialogHelper
 
 # from processing.drillhole_trace_generator import DrillholeTraceGenerator
 from gui.widgets import *
 
+# Note: batch_processor is imported dynamically in _start_auto_batch_processing
+
 # from processing.QAQCStep.qaqc_manager import QAQCManager
 from gui.logging_review_dialog import LoggingReviewDialog
 from gui.embedding_training_dialog import EmbeddingTrainingDialog
+from gui.DrillholeCorrelation.drillhole_selection_dialog import DrillholeSelectionDialog
+from gui.DrillholeCorrelation.correlation_dialog import CorrelationDialog
+import os
 from utils.json_register_manager import JSONRegisterManager
 from utils.register_synchronizer import RegisterSynchronizer
+from utils.file_deduplication_manager import UIDDeduplicationManager
 from gui.progress_dialog import ProgressDialog
 from utils.image_processing_depth_validation import DepthValidator
 
@@ -41,6 +59,7 @@ class MainGUI:
         """Initialize with reference to main application."""
         self.app = app  # Reference to main app for accessing components
         self.root = app.root  # Use the existing root window
+        self.root.app = app  # Also store on root for dialog access
         self.progress_queue = queue.Queue()
         self.processing_complete = False
         self.active_threads = []  # Track active threads
@@ -49,15 +68,27 @@ class MainGUI:
         # Add a logger instance
         self.logger = logging.getLogger(__name__)
 
+        # Add custom handler to route cloud sync logs to status box
+        self._setup_sync_logger()
+        self.root = app.root  # Use the existing root window
+        self.progress_queue = queue.Queue()
+        self.processing_complete = False
+        self.active_threads = []  # Track active threads
+        self.after_id = None  # Initialize after_id to None
+
         # Get references to app components for easier access
         self.file_manager = app.file_manager
         self.gui_manager = app.gui_manager
+        self.config_manager = (
+            app.config_manager
+        )  # ADD THIS LINE - store the actual ConfigManager instance
         self.translator = app.translator
         self.blur_detector = app.blur_detector
         self.aruco_manager = app.aruco_manager
         self.qaqc_manager = app.qaqc_manager
         self.depth_validator = app.depth_validator
         self.trace_generator = app.trace_generator  # Yes, get this from app too
+        self.drillhole_data_manager = app.drillhole_data_manager  # For collar data
 
         # Set a flag to check if processing is active
         self.is_processing_image = False
@@ -85,6 +116,30 @@ class MainGUI:
 
         # Delay the first check_progress call
         self.root.after(1000, self.check_progress)
+
+        # Snowflake user prompt — only fires if no email was configured at startup.
+        # Scheduled here so it runs after the main window is fully visible.
+        if hasattr(self.app, "_pending_snowflake_prompt"):
+            on_status, sm = self.app._pending_snowflake_prompt
+            del self.app._pending_snowflake_prompt
+
+            def _prompt_and_start():
+                try:
+                    from gui.snowflake_user_dialog import SnowflakeUserDialog
+                    dlg = SnowflakeUserDialog(
+                        self.root, self.gui_manager, self.app.config_manager
+                    )
+                    email = dlg.show()
+                    if email:
+                        sm.set_user_hint(email)
+                        sm.start_phase1(on_status=on_status)
+                        logger.info(f"Snowflake Phase 1 launched after prompt (user={email})")
+                    else:
+                        logger.info("Snowflake Phase 1 skipped — user dismissed prompt")
+                except Exception as e:
+                    logger.warning(f"Snowflake user prompt failed: {e}")
+
+            self.root.after(1500, _prompt_and_start)
 
     def _close_launcher_splash(self):
         """Close any splash screen from launcher."""
@@ -169,11 +224,11 @@ class MainGUI:
                 )
                 logo_label.pack(side=tk.LEFT, padx=(0, 20))
 
-                # Add GeoVue title next to logo
+                # Add GeoVue title next to logo with refined typography
                 title_label = tk.Label(
                     center_container,
                     text="GeoVue",
-                    font=("Arial", 24, "bold"),
+                    font=("Segoe UI Light", 28),
                     bg=self.gui_manager.theme_colors["secondary_bg"],
                     fg=self.gui_manager.theme_colors["text"],
                 )
@@ -187,7 +242,7 @@ class MainGUI:
             title_label = tk.Label(
                 center_container,
                 text="GeoVue",
-                font=("Arial", 24, "bold"),
+                font=("Segoe UI Light", 28),
                 bg=self.gui_manager.theme_colors["secondary_bg"],
                 fg=self.gui_manager.theme_colors["text"],
             )
@@ -197,12 +252,35 @@ class MainGUI:
         self.header_frame.configure(height=100)
         self.header_frame.pack_propagate(False)
 
-        # Create input section with tighter padding
-        input_frame = self.gui_manager.create_section_frame(
-            self.content_frame, padding=5
+        # Snowflake connection badge — top-right of header
+        self._sf_badge = tk.Label(
+            self.header_frame,
+            text="⚪ Snowflake",
+            font=("Arial", 8),
+            bg=self.gui_manager.theme_colors["secondary_bg"],
+            fg=self.gui_manager.theme_colors["subtext"],
+            cursor="hand2",
         )
+        self._sf_badge.place(relx=1.0, rely=0.0, anchor="ne", x=-8, y=6)
+        self._sf_badge.bind("<Button-1>", self._on_sf_badge_click)
+
+        # Subscribe to session manager state changes
+        self._subscribe_snowflake_status()
+
+        # =====================================================
+        # IMAGE PROCESSING - Collapsible Frame
+        # =====================================================
+        processing_collapsible = self.gui_manager.create_collapsible_frame(
+            self.content_frame,
+            title=self.t("Image Processing"),
+            expanded=False,
+        )
+        self.processing_collapsible = processing_collapsible
 
         # Input folder field
+        input_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
+        input_frame.pack(fill=tk.X, pady=(0, 5))
+
         self.folder_var = tk.StringVar()
         folder_frame, self.folder_entry = self.gui_manager.create_field_with_label(
             input_frame,
@@ -210,7 +288,7 @@ class MainGUI:
             self.folder_var,
             field_type="entry",
             validate_func=self._update_input_folder_color,
-            width=None,  # Let it expand naturally
+            width=None,
         )
 
         # Browse button in folder_frame
@@ -222,10 +300,9 @@ class MainGUI:
         )
         browse_button.pack(side=tk.RIGHT, padx=(5, 0))
 
-        # Output settings section
-        output_frame = self.gui_manager.create_section_frame(
-            self.content_frame, padding=5
-        )
+        # Output settings
+        output_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
+        output_frame.pack(fill=tk.X, pady=2)
 
         # Local output
         self.output_folder_var = tk.StringVar(
@@ -249,7 +326,7 @@ class MainGUI:
         info_button.pack(side=tk.RIGHT, padx=(5, 0))
 
         # Output format
-        format_frame = ttk.Frame(output_frame, style="Content.TFrame")
+        format_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
         format_frame.pack(fill=tk.X, pady=2)
 
         format_label = ttk.Label(
@@ -279,16 +356,128 @@ class MainGUI:
         format_dropdown.pack()
 
         # Debug images checkbox
-        debug_frame = ttk.Frame(output_frame, style="Content.TFrame")
+        debug_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
         debug_frame.pack(fill=tk.X, pady=2)
 
         self.debug_var = tk.BooleanVar(value=self.config["save_debug_images"])
 
-        # Custom styled checkbox
         debug_check = self.gui_manager.create_custom_checkbox(
             debug_frame, text=self.t("Save Debug Images"), variable=self.debug_var
         )
         debug_check.pack(anchor="w")
+
+        # Auto-loop batch processing checkbox
+        auto_loop_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
+        auto_loop_frame.pack(fill=tk.X, pady=2)
+
+        self.auto_loop_var = tk.BooleanVar(value=False)
+
+        auto_loop_check = self.gui_manager.create_custom_checkbox(
+            auto_loop_frame,
+            text=self.t("Auto-Loop Mode (Skip manual steps)"),
+            variable=self.auto_loop_var,
+            command=self._toggle_auto_loop_mode,
+        )
+        auto_loop_check.pack(anchor="w")
+
+        # Add info label for auto-loop mode
+        auto_info_label = ttk.Label(
+            auto_loop_frame,
+            text=self.t(
+                "   Automatically processes images with valid filename metadata"
+            ),
+            font=("Segoe UI", 8),
+            foreground=self.gui_manager.theme_colors["field_border"],
+            style="Content.TLabel",
+        )
+        auto_info_label.pack(anchor="w", padx=(20, 0))
+
+        # Auto-loop duplicate handling option
+        self.auto_skip_duplicates_var = tk.BooleanVar(value=False)
+
+        auto_skip_dup_check = self.gui_manager.create_custom_checkbox(
+            auto_loop_frame,
+            text=self.t("   Skip existing/duplicate intervals"),
+            variable=self.auto_skip_duplicates_var,
+        )
+        auto_skip_dup_check.pack(anchor="w", padx=(20, 0))
+
+        skip_dup_info_label = ttk.Label(
+            auto_loop_frame,
+            text=self.t(
+                "      Uncheck to extract duplicates (e.g., wet/dry pairs) for manual selection"
+            ),
+            font=("Segoe UI", 8),
+            foreground=self.gui_manager.theme_colors["field_border"],
+            style="Content.TLabel",
+        )
+        skip_dup_info_label.pack(anchor="w", padx=(40, 0))
+
+        # Processing buttons row
+        processing_buttons_frame = ttk.Frame(
+            processing_collapsible.content_frame, style="Content.TFrame"
+        )
+        processing_buttons_frame.pack(fill=tk.X, pady=(10, 5))
+
+        # Process Photos button (primary action)
+        self.process_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Process Photos"),
+            color=self.gui_manager.theme_colors["accent_green"],
+            command=self.start_processing,
+            icon="▶",
+        )
+        self.process_button.pack(side=tk.LEFT, padx=(0, 5))
+
+        # Bulk Renamer button
+        bulk_renamer_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Bulk Renamer"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._open_bulk_renamer,
+            icon="✏",
+        )
+        bulk_renamer_button.pack(side=tk.LEFT, padx=5)
+
+        # Review Extracted Images button
+        review_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Review Extracted Images"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._start_image_review,
+            icon="🔍",
+        )
+        review_button.pack(side=tk.LEFT, padx=5)
+
+        # Calculate Image Properties button
+        validate_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Calculate Image Properties"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._generate_image_properties,
+            icon="🎨",
+        )
+        validate_button.pack(side=tk.LEFT, padx=5)
+
+        # Sync to Cloud button
+        sync_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Sync to Cloud"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._sync_to_cloud,
+            icon="☁",
+        )
+        sync_button.pack(side=tk.LEFT, padx=5)
+
+        # Snowflake Pre-Load button
+        self._sf_preload_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Pre-Load Snowflake Data"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._start_snowflake_phase2,
+            icon="❄",
+        )
+        self._sf_preload_button.pack(side=tk.LEFT, padx=5)
 
         # Create collapsible sections with the GUIManager
         # Shared Folder Path Settings
@@ -310,10 +499,15 @@ class MainGUI:
         register_path_exists = bool(
             self.file_manager.get_shared_path("register_excel", create_if_missing=False)
         )
-        drillhole_data_csv_exists = bool(
-            self.file_manager.get_shared_path(
-                "drillhole_data_csv", create_if_missing=False
-            )
+        # Check for datasets folder (contains CSV files for data manager)
+        datasets_dir = self.file_manager.get_shared_path("datasets", create_if_missing=False)
+        datasets_folder_exists = bool(datasets_dir and datasets_dir.exists())
+        # Check for cross sections folder (section PDFs for Section Tool integration)
+        cross_sections_dir = self.file_manager.get_shared_path(
+            "cross_sections", create_if_missing=False
+        )
+        cross_sections_folder_exists = bool(
+            cross_sections_dir and cross_sections_dir.exists()
         )
 
         # Expand if any paths are missing
@@ -322,7 +516,8 @@ class MainGUI:
             and processed_originals_exists
             and drill_traces_exists
             and register_path_exists
-            and drillhole_data_csv_exists
+            and datasets_folder_exists
+            and cross_sections_folder_exists
         )
 
         shared_collapsible = self.gui_manager.create_collapsible_frame(
@@ -336,7 +531,8 @@ class MainGUI:
         self.processed_originals_path_var = tk.StringVar()
         self.drill_traces_path_var = tk.StringVar()
         self.register_path_var = tk.StringVar()
-        self.drillhole_data_csv_var = tk.StringVar()
+        self.datasets_folder_var = tk.StringVar()
+        self.cross_sections_path_var = tk.StringVar()
 
         # Set display values using FileManager's paths or config
         config = self.app.config_manager.as_dict()
@@ -381,14 +577,25 @@ class MainGUI:
             else config.get("shared_folder_register_excel_path", "")
         )
 
-        # drillhole intervals CSVV
-        depth_csv_path = self.file_manager.get_shared_path(
-            "shared_folder_drillhole_intervals_csv", create_if_missing=False
+        # Drillhole Datasets folder (contains CSV files loaded by data manager)
+        datasets_path = self.file_manager.get_shared_path(
+            "datasets", create_if_missing=False
         )
-        self.drillhole_data_csv_var.set(
-            str(depth_csv_path)
-            if depth_csv_path
-            else config.get("shared_folder_drillhole_data_csv", "")
+
+        self.datasets_folder_var.set(
+            str(datasets_path)
+            if datasets_path
+            else config.get("shared_folder_datasets", "")
+        )
+
+        # Cross Sections folder (section PDFs for Section Tool integration)
+        cross_sections_path = self.file_manager.get_shared_path(
+            "cross_sections", create_if_missing=False
+        )
+        self.cross_sections_path_var.set(
+            str(cross_sections_path)
+            if cross_sections_path
+            else config.get("shared_folder_cross_sections", "")
         )
 
         # Create path input fields
@@ -426,293 +633,112 @@ class MainGUI:
         )
         self._create_shared_path_field(
             shared_collapsible.content_frame,
-            self.t("Drilling intervals CSV:"),
-            self.drillhole_data_csv_var,
-            drillhole_data_csv_exists,
-            is_file=True,  # This is a file, not a folder
-            path_key="drillhole_data_csv",
+            self.t("Drillhole Datasets Folder:"),
+            self.datasets_folder_var,
+            datasets_folder_exists,
+            is_file=False,  # This is a folder containing CSV files
+            path_key="datasets",
         )
-        # Create New Register button
+        self._create_shared_path_field(
+            shared_collapsible.content_frame,
+            self.t("Cross Sections Folder:"),
+            self.cross_sections_path_var,
+            cross_sections_folder_exists,
+            is_file=False,
+            path_key="cross_sections",
+        )
+        # Data Settings button (replaces obsolete Create New Register)
         button_container = ttk.Frame(
             shared_collapsible.content_frame, style="Content.TFrame"
         )
         button_container.pack(fill=tk.X, pady=(5, 0))
 
-        create_register_button = self.gui_manager.create_modern_button(
+        data_settings_button = self.gui_manager.create_modern_button(
             button_container,
-            text=self.t("Create New Register"),
+            text=self.t("Data Settings"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._open_data_settings,
+        )
+        data_settings_button.pack(side=tk.RIGHT)
+
+        # =====================================================
+        # IMAGE ANALYSIS AND REVIEW - Collapsible Frame
+        # =====================================================
+        analysis_collapsible = self.gui_manager.create_collapsible_frame(
+            self.content_frame,
+            title=self.t("Image Analysis and Review"),
+            expanded=False,
+        )
+        self.analysis_collapsible = analysis_collapsible
+
+        # Analysis buttons row
+        analysis_buttons_frame = ttk.Frame(
+            analysis_collapsible.content_frame, style="Content.TFrame"
+        )
+        analysis_buttons_frame.pack(fill=tk.X, pady=5)
+
+        # Review All Images button (prominent - renamed from Logging Review)
+        review_all_button = self.gui_manager.create_modern_button(
+            analysis_buttons_frame,
+            text=self.t("Review All Images"),
             color=self.gui_manager.theme_colors["accent_green"],
-            command=self._create_new_register,
+            command=self._start_logging_review,
+            icon="📋",
         )
-        create_register_button.pack(side=tk.RIGHT)
+        review_all_button.pack(side=tk.LEFT, padx=(0, 5))
 
-        # Blur Detection - Collapsible
-        blur_collapsible = self.gui_manager.create_collapsible_frame(
-            self.content_frame, title=self.t("Blur Detection"), expanded=False
-        )
-        self.blur_collapsible = blur_collapsible
-
-        # Enable blur detection checkbox
-        blur_enable_frame = ttk.Frame(
-            blur_collapsible.content_frame, style="Content.TFrame"
-        )
-        blur_enable_frame.pack(fill=tk.X, pady=(0, 5))
-
-        self.blur_enable_var = tk.BooleanVar(value=self.config["enable_blur_detection"])
-        blur_enable_check = self.gui_manager.create_custom_checkbox(
-            blur_enable_frame,
-            text=self.t("Enable Blur Detection"),
-            variable=self.blur_enable_var,
-            command=self._toggle_blur_settings,
-        )
-        blur_enable_check.pack(anchor="w")
-
-        # Blur settings container
-        blur_settings_frame = ttk.Frame(
-            blur_collapsible.content_frame, style="Content.TFrame"
-        )
-        blur_settings_frame.pack(fill=tk.X, padx=(20, 5))
-
-        # Blur threshold
-        threshold_frame = ttk.Frame(blur_settings_frame, style="Content.TFrame")
-        threshold_frame.pack(fill=tk.X, pady=2)
-
-        threshold_label = ttk.Label(
-            threshold_frame,
-            text=self.t("Blur Threshold:"),
-            anchor="w",
-            style="Content.TLabel",
-        )
-        threshold_label.pack(side=tk.LEFT)
-
-        self.blur_threshold_var = tk.DoubleVar(value=self.config["blur_threshold"])
-
-        threshold_slider_frame = ttk.Frame(threshold_frame, style="Content.TFrame")
-        threshold_slider_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-
-        threshold_slider = ttk.Scale(
-            threshold_slider_frame,
-            from_=10.0,
-            to=500.0,
-            orient=tk.HORIZONTAL,
-            variable=self.blur_threshold_var,
-            style="Horizontal.TScale",
-        )
-        threshold_slider.pack(fill=tk.X)
-
-        threshold_value = ttk.Label(threshold_frame, width=5, style="Value.TLabel")
-        threshold_value.pack(side=tk.RIGHT)
-
-        # Update threshold value label when slider changes
-        def update_threshold_label(*args):
-            threshold_value.config(text=f"{self.blur_threshold_var.get():.1f}")
-
-        self.blur_threshold_var.trace_add("write", update_threshold_label)
-        update_threshold_label()  # Initial update
-
-        # ROI ratio
-        roi_frame = ttk.Frame(blur_settings_frame, style="Content.TFrame")
-        roi_frame.pack(fill=tk.X, pady=2)
-
-        roi_label = ttk.Label(
-            roi_frame, text=self.t("ROI Ratio:"), anchor="w", style="Content.TLabel"
-        )
-        roi_label.pack(side=tk.LEFT)
-
-        self.blur_roi_var = tk.DoubleVar(value=self.config["blur_roi_ratio"])
-
-        roi_slider_frame = ttk.Frame(roi_frame, style="Content.TFrame")
-        roi_slider_frame.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5))
-
-        roi_slider = ttk.Scale(
-            roi_slider_frame,
-            from_=0.1,
-            to=1.0,
-            orient=tk.HORIZONTAL,
-            variable=self.blur_roi_var,
-            style="Horizontal.TScale",
-        )
-        roi_slider.pack(fill=tk.X)
-
-        roi_value = ttk.Label(roi_frame, width=5, style="Value.TLabel")
-        roi_value.pack(side=tk.RIGHT)
-
-        # Update ROI value label when slider changes
-        def update_roi_label(*args):
-            roi_value.config(text=f"{self.blur_roi_var.get():.2f}")
-
-        self.blur_roi_var.trace_add("write", update_roi_label)
-        update_roi_label()  # Initial update
-
-        # Flag blurry images
-        flag_blurry_frame = ttk.Frame(blur_settings_frame, style="Content.TFrame")
-        flag_blurry_frame.pack(fill=tk.X, pady=2)
-
-        self.flag_blurry_var = tk.BooleanVar(value=self.config["flag_blurry_images"])
-        flag_blurry_check = self.gui_manager.create_custom_checkbox(
-            flag_blurry_frame,
-            text=self.t("Flag Blurry Images"),
-            variable=self.flag_blurry_var,
-        )
-        flag_blurry_check.pack(anchor="w")
-
-        # Save blur visualizations
-        save_viz_frame = ttk.Frame(blur_settings_frame, style="Content.TFrame")
-        save_viz_frame.pack(fill=tk.X, pady=2)
-
-        self.save_blur_viz_var = tk.BooleanVar(
-            value=self.config["save_blur_visualizations"]
-        )
-        save_viz_check = self.gui_manager.create_custom_checkbox(
-            save_viz_frame,
-            text=self.t("Save Blur Analysis Visualizations"),
-            variable=self.save_blur_viz_var,
-        )
-        save_viz_check.pack(anchor="w")
-
-        # Blurry threshold percentage
-        threshold_pct_frame = ttk.Frame(blur_settings_frame, style="Content.TFrame")
-        threshold_pct_frame.pack(fill=tk.X, pady=2)
-
-        threshold_pct_label = ttk.Label(
-            threshold_pct_frame,
-            text=self.t("Quality Alert Threshold:"),
-            anchor="w",
-            style="Content.TLabel",
-        )
-        threshold_pct_label.pack(side=tk.LEFT)
-
-        self.blur_threshold_pct_var = tk.DoubleVar(
-            value=self.config["blurry_threshold_percentage"]
-        )
-
-        threshold_pct_slider_frame = ttk.Frame(
-            threshold_pct_frame, style="Content.TFrame"
-        )
-        threshold_pct_slider_frame.pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 5)
-        )
-
-        threshold_pct_slider = ttk.Scale(
-            threshold_pct_slider_frame,
-            from_=5.0,
-            to=100.0,
-            orient=tk.HORIZONTAL,
-            variable=self.blur_threshold_pct_var,
-            style="Horizontal.TScale",
-        )
-        threshold_pct_slider.pack(fill=tk.X)
-
-        threshold_pct_value = ttk.Label(
-            threshold_pct_frame, width=5, style="Value.TLabel"
-        )
-        threshold_pct_value.pack(side=tk.RIGHT)
-
-        # Update threshold percentage value label when slider changes
-        def update_threshold_pct_label(*args):
-            threshold_pct_value.config(text=f"{self.blur_threshold_pct_var.get():.1f}%")
-
-        self.blur_threshold_pct_var.trace_add("write", update_threshold_pct_label)
-        update_threshold_pct_label()  # Initial update
-
-        # Calibration and help buttons
-        button_frame = ttk.Frame(blur_settings_frame, style="Content.TFrame")
-        button_frame.pack(fill=tk.X, pady=(5, 0))
-
-        calibrate_button = self.gui_manager.create_modern_button(
-            button_frame,
-            text=self.t("Calibrate Blur Detection"),
+        # Original Image Viewer button
+        original_viewer_button = self.gui_manager.create_modern_button(
+            analysis_buttons_frame,
+            text=self.t("Original Image Viewer"),
             color=self.gui_manager.theme_colors["accent_blue"],
-            command=self._show_blur_calibration_dialog,
+            command=self._open_original_image_viewer,
+            icon="🖼",
         )
-        calibrate_button.pack(side=tk.LEFT, padx=(0, 5))
+        original_viewer_button.pack(side=tk.LEFT, padx=5)
 
-        help_button = self.gui_manager.create_modern_button(
-            button_frame,
-            text="?",
+        # Drillhole Correlation button
+        correlation_button = self.gui_manager.create_modern_button(
+            analysis_buttons_frame,
+            text=self.t("Drillhole Correlation"),
             color=self.gui_manager.theme_colors["accent_blue"],
-            command=self._show_blur_help,
+            command=self._open_drillhole_correlation,
+            icon="📊",
         )
-        help_button.pack(side=tk.RIGHT)
+        correlation_button.pack(side=tk.LEFT, padx=5)
 
-        # Store blur settings widgets for toggling
-        self.blur_settings_controls = [blur_settings_frame]
-
-        # OCR Settings - Collapsible
-        ocr_collapsible = self.gui_manager.create_collapsible_frame(
-            self.content_frame, title=self.t("OCR Settings"), expanded=False
+        report_button = self.gui_manager.create_modern_button(
+            analysis_buttons_frame,
+            text=self.t("Logging Review Report"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._open_logging_review_report,
+            icon="📄",
         )
-        self.ocr_collapsible = ocr_collapsible
+        report_button.pack(side=tk.LEFT, padx=5)
 
-        # Enable OCR checkbox
-        ocr_enable_frame = ttk.Frame(
-            ocr_collapsible.content_frame, style="Content.TFrame"
+        # Missing Trays button
+        missing_trays_button = self.gui_manager.create_modern_button(
+            analysis_buttons_frame,
+            text=self.t("Chip Tray Inventory"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._find_missing_trays,
+            icon="📋",
         )
-        ocr_enable_frame.pack(fill=tk.X, pady=(0, 5))
+        missing_trays_button.pack(side=tk.LEFT, padx=5)
 
-        self.ocr_enable_var = tk.BooleanVar(value=self.config["enable_ocr"])
-        ocr_enable_check = self.gui_manager.create_custom_checkbox(
-            ocr_enable_frame,
-            text=self.t("Enable OCR"),
-            variable=self.ocr_enable_var,
-            command=self._toggle_ocr_settings,
-        )
-        ocr_enable_check.pack(anchor="w")
-
-        # OCR settings container
-        ocr_settings_frame = ttk.Frame(
-            ocr_collapsible.content_frame, style="Content.TFrame"
-        )
-        ocr_settings_frame.pack(fill=tk.X, padx=(20, 5))
-
-        # Prefix validation
-        prefix_validation_frame = ttk.Frame(ocr_settings_frame, style="Content.TFrame")
-        prefix_validation_frame.pack(fill=tk.X, pady=2)
-
-        self.prefix_validation_var = tk.BooleanVar(
-            value=self.config.get("enable_prefix_validation", True)
-        )
-        prefix_validation_check = self.gui_manager.create_custom_checkbox(
-            prefix_validation_frame,
-            text=self.t("Validate Hole ID Prefixes"),
-            variable=self.prefix_validation_var,
-            command=self._toggle_prefix_settings,
-        )
-        prefix_validation_check.pack(anchor="w")
-
-        # Prefix list
-        prefix_frame = ttk.Frame(ocr_settings_frame, style="Content.TFrame")
-        prefix_frame.pack(fill=tk.X, pady=2, padx=(20, 0))
-
-        prefix_label = ttk.Label(
-            prefix_frame,
-            text=self.t("Valid Prefixes (comma separated):"),
-            anchor="w",
-            style="Content.TLabel",
-        )
-        prefix_label.pack(side=tk.LEFT)
-
-        # Convert list to comma-separated string for display
-        prefix_str = ", ".join(
-            self.config.get("valid_hole_prefixes", ["BA", "NB", "SB", "KM"])
-        )
+        # Initialize default values for removed settings (for backwards compatibility)
+        self.blur_enable_var = tk.BooleanVar(value=self.config.get("enable_blur_detection", False))
+        self.blur_threshold_var = tk.DoubleVar(value=self.config.get("blur_threshold", 100.0))
+        self.blur_roi_var = tk.DoubleVar(value=self.config.get("blur_roi_ratio", 0.5))
+        self.flag_blurry_var = tk.BooleanVar(value=self.config.get("flag_blurry_images", False))
+        self.save_blur_viz_var = tk.BooleanVar(value=self.config.get("save_blur_visualizations", False))
+        self.blur_threshold_pct_var = tk.DoubleVar(value=self.config.get("blurry_threshold_percentage", 25.0))
+        self.ocr_enable_var = tk.BooleanVar(value=self.config.get("enable_ocr", False))
+        self.prefix_validation_var = tk.BooleanVar(value=self.config.get("enable_prefix_validation", True))
+        prefix_str = ", ".join(self.config.get("valid_hole_prefixes", ["BA", "NB", "SB", "KM"]))
         self.prefix_var = tk.StringVar(value=prefix_str)
 
-        prefix_entry = self.gui_manager.create_entry_with_validation(
-            prefix_frame, self.prefix_var
-        )
-        prefix_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
-
-        # Store reference to OCR control widgets for toggling
-        self.prefix_controls = [prefix_frame]
-        self.ocr_controls = [prefix_validation_frame] + self.prefix_controls
-
-        # Initialize visibility based on checkbox states
-        self._toggle_blur_settings()
-        self._toggle_ocr_settings()
-        self._toggle_prefix_settings()
-
-        # Create status and progress section
+        # Create status section (no progress bar)
         status_components = self.gui_manager.create_status_section(self.content_frame)
         self.progress_var = status_components["progress_var"]
         self.progress_bar = status_components["progress_bar"]
@@ -721,53 +747,18 @@ class MainGUI:
         # Create footer buttons
         button_configs = [
             {
-                "name": "process_button",
-                "text": self.t("Process Photos"),
+                "name": "start_processing_button",
+                "text": self.t("Start Image Processing"),
                 "color": self.gui_manager.theme_colors["accent_green"],
-                "command": self.start_processing,
+                "command": self._open_processing_section,
                 "icon": "▶",
             },
             {
-                "name": "review_button",
-                "text": self.t("Review Extracted Images"),
+                "name": "start_analysis_button",
+                "text": self.t("Start Image Analysis"),
                 "color": self.gui_manager.theme_colors["accent_blue"],
-                "command": self._start_image_review,
-                "icon": "🔍",
-            },
-            {
-                "name": "validate_button",
-                "text": self.t("Validate Register"),
-                "color": self.gui_manager.theme_colors["accent_blue"],
-                "command": self._validate_register_entries,
-                "icon": "✓",
-            },
-            {
-                "name": "logging_button",
-                "text": self.t("Logging Review"),
-                "color": self.gui_manager.theme_colors["accent_blue"],
-                "command": self._start_logging_review,
-                "icon": "📋",
-            },
-            {
-                "name": "trace_button",
-                "text": self.t("Generate Drillhole Trace"),
-                "color": self.gui_manager.theme_colors["accent_blue"],
-                "command": self.on_generate_trace,
+                "command": self._open_analysis_section,
                 "icon": "📊",
-            },
-            {
-                "name": "embedding_button",
-                "text": self.t("Embedding Tool"),
-                "color": self.gui_manager.theme_colors["accent_blue"],
-                "command": self._open_embedding_dialog,
-                "icon": "🧩",
-            },
-            {
-                "name": "cloud_sync_button",
-                "text": self.t("Sync to Cloud"),
-                "color": self.gui_manager.theme_colors["accent_blue"],
-                "command": self._sync_to_cloud,
-                "icon": "☁",
             },
             {
                 "name": "quit_button",
@@ -778,7 +769,7 @@ class MainGUI:
             },
         ]
 
-        _, self.buttons = self.gui_manager.create_button_row(
+        self.button_row_frame, self.buttons = self.gui_manager.create_button_row(
             self.footer_frame,
             button_configs,
             side="bottom",
@@ -786,6 +777,14 @@ class MainGUI:
             padx=10,
             pady=10,
         )
+
+        # Store button references for backwards compatibility
+        self.buttons["process_button"] = self.process_button
+
+        # Set up toggle callbacks for collapsible frames to update footer buttons
+        self.processing_collapsible.set_on_toggle(self._on_collapsible_toggle)
+        self.shared_collapsible.set_on_toggle(self._on_collapsible_toggle)
+        self.analysis_collapsible.set_on_toggle(self._on_collapsible_toggle)
 
         # Create menu definitions
         menu_defs = {
@@ -797,6 +796,29 @@ class MainGUI:
                 },
                 {"type": "separator"},
                 {"type": "command", "label": self.t("Exit"), "command": self.quit_app},
+            ],
+            self.t("Settings"): [
+                {
+                    "type": "command",
+                    "label": self.t("Data Settings"),
+                    "command": self._open_data_settings,
+                },
+                {
+                    "type": "command",
+                    "label": self.t("Color Maps"),
+                    "command": self._open_color_map_settings,
+                },
+                {"type": "separator"},
+                {
+                    "type": "command",
+                    "label": self.t("Classification Manager"),
+                    "command": self._open_classification_manager,
+                },
+                {
+                    "type": "command",
+                    "label": self.t("Tag Manager"),
+                    "command": self._open_tag_manager,
+                },
             ],
             self.t("Help"): [
                 {
@@ -835,24 +857,20 @@ class MainGUI:
         # Size and center the main window after everything is created
         def size_and_center_window():
             # First, temporarily set a large size so everything can lay out
-            self.root.geometry("1200x900")
+            self.root.geometry("1200x800")
             self.root.update_idletasks()
 
             # Now get the actual required sizes
-            # For width, check the widest element
             header_width = self.header_frame.winfo_reqwidth()
             footer_width = self.footer_frame.winfo_reqwidth()
-
-            # For the content, get the canvas width (not the content frame inside it)
             canvas_width = self.canvas.winfo_reqwidth()
 
             # Use the widest component
             required_width = max(
                 header_width, footer_width, canvas_width, 1000
-            )  # Min 1000 for buttons
+            )
 
-            # For height, be more conservative
-            window_height = 900  # Fixed reasonable height
+            window_height = 800
 
             # Get screen dimensions
             screen_width = self.root.winfo_screenwidth()
@@ -884,10 +902,447 @@ class MainGUI:
         if self.config.get("check_for_updates", True):
             self.root.after(2000, self._check_updates_at_startup)
 
-    def _validate_register_entries(self):
-        """Validate register entries using RegisterSynchronizer."""
+    def _toggle_blur_settings(self):
+        """Backwards compatibility stub - blur settings removed from UI."""
+        pass
+
+    def _toggle_ocr_settings(self):
+        """Backwards compatibility stub - OCR settings removed from UI."""
+        pass
+
+    def _toggle_prefix_settings(self):
+        """Backwards compatibility stub - prefix settings removed from UI."""
+        pass
+
+    def _show_blur_calibration_dialog(self):
+        """Backwards compatibility stub - blur calibration removed from UI."""
+        DialogHelper.show_message(
+            self.root,
+            self.t("Feature Removed"),
+            self.t("Blur calibration has been removed from the interface."),
+            message_type="info"
+        )
+
+    def _show_blur_help(self):
+        """Backwards compatibility stub - blur help removed from UI."""
+        pass
+
+    def _on_collapsible_toggle(self, frame, expanded):
+        """Handle collapsible frame toggle events to update footer buttons."""
+        # When a frame is expanded, collapse other frames (accordion behavior)
+        if expanded:
+            collapsibles = [
+                self.processing_collapsible,
+                self.shared_collapsible,
+                self.analysis_collapsible,
+            ]
+            for collapsible in collapsibles:
+                if collapsible != frame and collapsible.expanded:
+                    # Temporarily disable callback to avoid recursion
+                    old_callback = collapsible.on_toggle
+                    collapsible.on_toggle = None
+                    collapsible.toggle()
+                    collapsible.on_toggle = old_callback
+
+        # Update footer buttons based on current state
+        self._update_footer_buttons()
+
+    def _update_footer_buttons(self):
+        """Update the footer button bar based on which collapsible frame is open."""
+        # Destroy existing button row
+        if hasattr(self, 'button_row_frame') and self.button_row_frame:
+            self.button_row_frame.destroy()
+
+        # Determine which buttons to show
+        accent_green = self.gui_manager.theme_colors["accent_green"]
+        accent_blue = self.gui_manager.theme_colors["accent_blue"]
+        accent_red = self.gui_manager.theme_colors["accent_red"]
+
+        # Check which frame is expanded
+        processing_open = hasattr(self, 'processing_collapsible') and self.processing_collapsible.expanded
+        shared_open = hasattr(self, 'shared_collapsible') and self.shared_collapsible.expanded
+        analysis_open = hasattr(self, 'analysis_collapsible') and self.analysis_collapsible.expanded
+
+        if processing_open:
+            # Show processing buttons
+            button_configs = [
+                {
+                    "name": "process_button",
+                    "text": self.t("Process Photos"),
+                    "color": accent_green,
+                    "command": self.start_processing,
+                    "icon": "▶",
+                },
+                {
+                    "name": "bulk_renamer_button",
+                    "text": self.t("Bulk Renamer"),
+                    "color": accent_blue,
+                    "command": self._open_bulk_renamer,
+                    "icon": "✏",
+                },
+                {
+                    "name": "review_extracted_button",
+                    "text": self.t("Review Extracted"),
+                    "color": accent_blue,
+                    "command": self._start_image_review,
+                    "icon": "🔍",
+                },
+                {
+                    "name": "quit_button",
+                    "text": self.t("Quit"),
+                    "color": accent_red,
+                    "command": self.quit_app,
+                    "icon": "✖",
+                },
+            ]
+        elif analysis_open:
+            # Show analysis buttons
+            button_configs = [
+                {
+                    "name": "review_all_button",
+                    "text": self.t("Review All Images"),
+                    "color": accent_green,
+                    "command": self._start_logging_review,
+                    "icon": "📋",
+                },
+                {
+                    "name": "original_viewer_button",
+                    "text": self.t("Original Viewer"),
+                    "color": accent_blue,
+                    "command": self._open_original_image_viewer,
+                    "icon": "🖼",
+                },
+                {
+                    "name": "correlation_button",
+                    "text": self.t("Drillhole Correlation"),
+                    "color": accent_blue,
+                    "command": self._open_drillhole_correlation,
+                    "icon": "📊",
+                },
+                {
+                    "name": "quit_button",
+                    "text": self.t("Quit"),
+                    "color": accent_red,
+                    "command": self.quit_app,
+                    "icon": "✖",
+                },
+            ]
+        elif shared_open:
+            # Show shared settings buttons
+            button_configs = [
+                {
+                    "name": "data_settings_button",
+                    "text": self.t("Data Settings"),
+                    "color": accent_blue,
+                    "command": self._open_data_settings,
+                    "icon": "⚙",
+                },
+                {
+                    "name": "quit_button",
+                    "text": self.t("Quit"),
+                    "color": accent_red,
+                    "command": self.quit_app,
+                    "icon": "✖",
+                },
+            ]
+        else:
+            # Show intro buttons (all frames collapsed)
+            button_configs = [
+                {
+                    "name": "start_processing_button",
+                    "text": self.t("Start Image Processing"),
+                    "color": accent_green,
+                    "command": self._open_processing_section,
+                    "icon": "▶",
+                },
+                {
+                    "name": "start_analysis_button",
+                    "text": self.t("Start Image Analysis"),
+                    "color": accent_blue,
+                    "command": self._open_analysis_section,
+                    "icon": "📊",
+                },
+                {
+                    "name": "quit_button",
+                    "text": self.t("Quit"),
+                    "color": accent_red,
+                    "command": self.quit_app,
+                    "icon": "✖",
+                },
+            ]
+
+        # Create new button row
+        self.button_row_frame, self.buttons = self.gui_manager.create_button_row(
+            self.footer_frame,
+            button_configs,
+            side="bottom",
+            anchor="se",
+            padx=10,
+            pady=10,
+        )
+
+        # Store process button reference for backwards compatibility
+        if "process_button" in self.buttons:
+            pass  # Already stored with correct name
+        elif hasattr(self, 'process_button'):
+            self.buttons["process_button"] = self.process_button
+
+    def _open_processing_section(self):
+        """Expand the Image Processing collapsible frame and scroll to it."""
+        if hasattr(self, 'processing_collapsible'):
+            # Expand if not already expanded
+            if not self.processing_collapsible.expanded:
+                self.processing_collapsible.toggle()
+            # Scroll to make it visible
+            self.root.after(100, lambda: self._scroll_to_widget(self.processing_collapsible))
+
+    def _open_analysis_section(self):
+        """Expand the Image Analysis and Review collapsible frame and scroll to it."""
+        if hasattr(self, 'analysis_collapsible'):
+            # Expand if not already expanded
+            if not self.analysis_collapsible.expanded:
+                self.analysis_collapsible.toggle()
+            # Scroll to make it visible
+            self.root.after(100, lambda: self._scroll_to_widget(self.analysis_collapsible))
+
+    def _scroll_to_widget(self, widget):
+        """Scroll the canvas to make the given widget visible."""
         try:
-            # Check if we have a register path
+            # Update the canvas to ensure geometry is calculated
+            self.canvas.update_idletasks()
+            # Get widget position relative to canvas
+            widget_y = widget.winfo_y()
+            canvas_height = self.canvas.winfo_height()
+            # Scroll to position
+            self.canvas.yview_moveto(widget_y / max(1, self.canvas.bbox("all")[3]))
+        except Exception as e:
+            self.logger.debug(f"Could not scroll to widget: {e}")
+
+    def _open_data_settings(self):
+        """Open the Data Settings dialog for column configuration."""
+        try:
+            from gui.column_settings_dialog import ColumnSettingsDialog
+            
+            # Get data coordinator from app
+            data_coordinator = getattr(self.app, 'data_coordinator', None)
+            
+            if not data_coordinator or not data_coordinator.is_initialized:
+                from gui.dialog_helper import DialogHelper
+                DialogHelper.show_message(
+                    self.root,
+                    self.t("Data Not Loaded"),
+                    self.t("Please wait for data to finish loading, or check that data sources are configured."),
+                    message_type="warning"
+                )
+                return
+            
+            dialog = ColumnSettingsDialog(
+                parent=self.root,
+                gui_manager=self.gui_manager,
+                data_coordinator=data_coordinator,
+                config_manager=self.app.config_manager,
+                on_save_callback=self._on_data_settings_saved,
+            )
+            
+            dialog.show()
+            
+        except ImportError as e:
+            self.logger.error(f"Could not import ColumnSettingsDialog: {e}")
+            from gui.dialog_helper import DialogHelper
+            DialogHelper.show_message(
+                self.root,
+                self.t("Error"),
+                self.t("Column Settings dialog not available."),
+                message_type="error"
+            )
+        except Exception as e:
+            self.logger.error(f"Error opening Data Settings: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+    
+    def _on_data_settings_saved(self):
+        """Callback when data settings are saved."""
+        self.logger.info("Data settings saved - refreshing data coordinator")
+        # Optionally refresh UI or data coordinator here
+        self.update_status(self.t("Data settings updated."), "info")
+    
+    def _open_color_map_settings(self):
+        """Open the Color Map Editor dialog."""
+        try:
+            from gui.color_map_editor_dialog import ColorMapEditorDialog
+            
+            # Get data coordinator for color maps and data
+            data_coordinator = getattr(self.app, 'data_coordinator', None)
+            
+            dialog = ColorMapEditorDialog(
+                parent=self.root,
+                gui_manager=self.gui_manager,
+                data_coordinator=data_coordinator,
+                on_save_callback=lambda: self.update_status(self.t("Color map saved."), "info"),
+            )
+            
+            dialog.show()
+            
+        except ImportError as e:
+            self.logger.error(f"Could not import ColorMapEditorDialog: {e}")
+        except Exception as e:
+            self.logger.error(f"Error opening Color Map settings: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+    
+    def _open_classification_manager(self):
+        """Open the Classification Manager dialog."""
+        # If you have an existing classification manager dialog, call it here
+        # For now, show a placeholder message
+        from gui.dialog_helper import DialogHelper
+        DialogHelper.show_message(
+            self.root,
+            self.t("Classification Manager"),
+            self.t("Classification Manager dialog - coming soon."),
+            message_type="info"
+        )
+    
+    def _open_tag_manager(self):
+        """Open the Tag Manager dialog."""
+        # If you have an existing tag manager dialog, call it here
+        # For now, show a placeholder message
+        from gui.dialog_helper import DialogHelper
+        DialogHelper.show_message(
+            self.root,
+            self.t("Tag Manager"),
+            self.t("Tag Manager dialog - coming soon."),
+            message_type="info"
+        )
+
+    def _open_original_image_viewer(self):
+        """Open the Original Image Viewer dialog."""
+        try:
+            from gui.original_image_viewer_dialog import open_original_image_viewer
+            
+            # Create a new instance of the viewer (allows multiple windows)
+            viewer = open_original_image_viewer(
+                parent=self.root,
+                file_manager=self.file_manager,
+                gui_manager=self.gui_manager,
+                json_register_manager=self.app.register_manager
+            )
+            
+            logger.info("Opened Original Image Viewer dialog")
+            
+        except Exception as e:
+            logger.error(f"Error opening Original Image Viewer: {e}")
+            import traceback
+            traceback.print_exc()
+            DialogHelper.show_message(
+                self.root,
+                self.t("Error"),
+                self.t(f"Failed to open Original Image Viewer:\n\n{str(e)}"),
+                message_type="error"
+            )
+    
+    def _open_bulk_renamer(self):
+        """
+        Open the Bulk Photo Renamer using DialogHelper (PEP-8: docstring).
+        Assumes PhotoRenamerGUI and DialogHelper are importable.
+        """
+        try:
+            # Guard missing modules with themed message dialog
+            if PhotoRenamerGUI is None or DialogHelper is None:
+                if DialogHelper:
+                    DialogHelper.show_message(
+                        self.root,
+                        self.t("Error"),
+                        self.t("Bulk Renamer or DialogHelper module not found."),
+                        message_type="error",
+                    )
+                else:
+                    self.update_status(
+                        self.t("Bulk Renamer or DialogHelper module not found."),
+                        "error",
+                    )
+                return
+
+            # Create a normal window (not transient) that can be maximized
+            dialog = tk.Toplevel(self.root)
+            dialog.title(self.t("Photo Bulk Renamer"))
+
+            # Apply theme if gui_manager available
+            if self.gui_manager:
+                self.gui_manager.apply_theme(dialog)
+                dialog.configure(bg=self.gui_manager.theme_colors["background"])
+
+            # Make it maximizable (not transient)
+            dialog.transient(None)  # Explicitly set to not be transient
+            dialog.resizable(True, True)
+
+            # Start maximized
+            dialog.state("zoomed")  # Windows/Linux
+            # For cross-platform compatibility, also try:
+            try:
+                dialog.attributes("-zoomed", True)  # Alternative for some systems
+            except:
+                pass
+
+            # Instantiate the renamer inside the dialog (consistent theming/focus)
+            # Pass gui_manager for consistent theming
+            renamer = PhotoRenamerGUI(dialog, gui_manager=self.gui_manager)
+
+            # Try to preload CSV via existing paths (silent fallback)
+            # Look for drillhole_data.csv in the datasets folder
+            try:
+                csv_path = None
+                datasets_folder = self.file_manager.get_shared_path(
+                    "datasets", create_if_missing=False
+                )
+                if datasets_folder and datasets_folder.exists():
+                    # Look for drillhole_data.csv in the datasets folder
+                    potential_csv = datasets_folder / "drillhole_data.csv"
+                    if potential_csv.exists():
+                        csv_path = str(potential_csv)
+                if csv_path and os.path.exists(csv_path):
+                    # assuming renamer.validator.load_csv works
+                    if getattr(
+                        renamer, "validator", None
+                    ) and renamer.validator.load_csv(csv_path):
+                        if hasattr(renamer, "csv_label"):
+                            renamer.csv_label.config(
+                                text=f"✓ {os.path.basename(csv_path)}",
+                                foreground="green",
+                            )
+            except Exception:
+                pass  # non-fatal preload
+
+            # Let layout calculate natural size then center with constraints
+            dialog.update_idletasks()
+            DialogHelper.center_dialog(
+                dialog,
+                parent=self.root,
+                size_ratio=0.9,
+                min_width=900,
+                min_height=600,
+                max_width=None,
+                max_height=None,
+            )
+
+            # Block until closed (DialogHelper already grabs/focuses)
+            dialog.wait_window()
+
+        except Exception as e:
+            self.logger.error(f"Failed to open Bulk Renamer: {e}")
+            if DialogHelper:
+                DialogHelper.show_message(
+                    self.root,
+                    self.t("Error"),
+                    self.t("Failed to open Bulk Renamer."),
+                    message_type="error",
+                )
+            else:
+                self.update_status(self.t("Failed to open Bulk Renamer."), "error")
+
+    def _generate_image_properties(self):
+        """Generate image properties register (hex colors, chip size, etc) by scanning approved compartment folders."""
+        try:
+            # Check if we have a register path (we need this to know where to save the properties file)
             register_path = self.file_manager.get_shared_path(
                 "register_excel", create_if_missing=False
             )
@@ -902,283 +1357,371 @@ class MainGUI:
                 )
                 return
 
-            # Check if register data exists
+            # Get base path for properties file
             base_path = str(register_path.parent)
-            if not JSONRegisterManager.has_existing_data_static(base_path):
+
+            # Create JSON manager
+            json_manager = JSONRegisterManager(base_path, self.logger)
+
+            # Get ONLY approved compartments folder (not review - those don't have wet/dry yet)
+            approved_path = self.file_manager.get_shared_path("approved_compartments")
+
+            if not approved_path or not approved_path.exists():
                 DialogHelper.show_message(
                     self.root,
                     self.t("Error"),
-                    self.t("No register data found at the configured location."),
+                    self.t("Approved compartments folder not found or not configured."),
                     message_type="error",
                 )
                 return
 
-            # Create synchronizer
-            synchronizer = RegisterSynchronizer(self.file_manager, self.config)
-
-            # Set JSON manager
-            synchronizer.set_json_manager(base_path)
-
-            # Check for multiple users
-            merge_check = synchronizer.check_and_merge_user_registers()
-
-            if merge_check.get("merge_needed"):
-                # Build merge confirmation message
-                summary = merge_check.get("summary", {})
-                message = self.t("Multiple user register files detected:\n\n")
-
-                # Show user file counts
-                for file_type, users in summary.get("user_files", {}).items():
-                    if users:
-                        message += f"\n{file_type.title()}:\n"
-                        for user_info in users:
-                            message += f"  • {user_info['user']}: {user_info['count']} records\n"
-
-                message += "\n" + self.t(
-                    "Would you like to merge all user data before validation?"
-                )
-                message += "\n\n" + self.t("This will:")
-                message += "\n" + self.t(
-                    "• Combine all user registers into your register"
-                )
-                message += "\n" + self.t(
-                    "• Resolve conflicts by checking which files exist"
-                )
-                message += "\n" + self.t("• Reset other user files to empty structure")
-
-                merge_response = DialogHelper.confirm_dialog(
-                    self.root,
-                    self.t("Merge User Registers?"),
-                    message,
-                    yes_text=self.t("Merge"),
-                    no_text=self.t("Skip"),
-                )
-
-                if merge_response:
-                    # Perform merge with progress dialog
-                    merge_progress = ProgressDialog(
-                        self.root,
-                        self.t("Merging User Registers"),
-                        self.t("Initializing merge..."),
-                    )
-
-                    try:
-                        # Run merge with progress callback
-                        merge_result = synchronizer.perform_user_merge(
-                            progress_callback=lambda msg, pct: merge_progress.update_progress(
-                                msg, pct
-                            )
-                        )
-
-                        if merge_result["success"]:
-                            merge_stats = merge_result["stats"]
-
-                            # Show merge results
-                            if merge_stats.get("errors"):
-                                DialogHelper.show_message(
-                                    self.root,
-                                    self.t("Merge Completed with Errors"),
-                                    self.t(
-                                        "Merge completed but some errors occurred:\n\n"
-                                    )
-                                    + "\n".join(merge_stats["errors"]),
-                                    message_type="warning",
-                                )
-                            else:
-                                # Build result message
-                                result_lines = [
-                                    self.t("Merge completed successfully:"),
-                                    "",
-                                ]
-
-                                # Add counts with duplicate info
-                                if merge_stats["compartments_merged"] > 0:
-                                    result_lines.append(
-                                        self.t("Compartments merged:")
-                                        + f" {merge_stats['compartments_merged']}"
-                                    )
-                                if merge_stats.get("compartments_duplicates", 0) > 0:
-                                    result_lines.append(
-                                        self.t("Compartments skipped (duplicates):")
-                                        + f" {merge_stats['compartments_duplicates']}"
-                                    )
-                                if merge_stats["compartments_conflicts"] > 0:
-                                    result_lines.append(
-                                        self.t("Compartment conflicts resolved:")
-                                        + f" {merge_stats['compartments_conflicts']}"
-                                    )
-
-                                if merge_stats["originals_merged"] > 0:
-                                    result_lines.append(
-                                        self.t("Originals merged:")
-                                        + f" {merge_stats['originals_merged']}"
-                                    )
-                                if merge_stats.get("originals_duplicates", 0) > 0:
-                                    result_lines.append(
-                                        self.t("Originals skipped (duplicates):")
-                                        + f" {merge_stats['originals_duplicates']}"
-                                    )
-                                if merge_stats["originals_conflicts"] > 0:
-                                    result_lines.append(
-                                        self.t("Original conflicts resolved:")
-                                        + f" {merge_stats['originals_conflicts']}"
-                                    )
-
-                                if merge_stats["reviews_merged"] > 0:
-                                    result_lines.append(
-                                        self.t("Reviews merged:")
-                                        + f" {merge_stats['reviews_merged']}"
-                                    )
-                                if merge_stats.get("reviews_duplicates", 0) > 0:
-                                    result_lines.append(
-                                        self.t("Reviews skipped (duplicates):")
-                                        + f" {merge_stats['reviews_duplicates']}"
-                                    )
-
-                                if merge_stats["corners_merged"] > 0:
-                                    result_lines.append(
-                                        self.t("Corners merged:")
-                                        + f" {merge_stats['corners_merged']}"
-                                    )
-                                if merge_stats.get("corners_duplicates", 0) > 0:
-                                    result_lines.append(
-                                        self.t("Corners skipped (duplicates):")
-                                        + f" {merge_stats['corners_duplicates']}"
-                                    )
-
-                                DialogHelper.show_message(
-                                    self.root,
-                                    self.t("Merge Complete"),
-                                    "\n".join(result_lines),
-                                    message_type="info",
-                                )
-                        else:
-                            error_msg = merge_result.get("error", "Unknown error")
-                            DialogHelper.show_message(
-                                self.root,
-                                self.t("Merge Error"),
-                                self.t("Failed to merge user registers:")
-                                + f"\n{error_msg}",
-                                message_type="error",
-                            )
-                            return
-
-                    finally:
-                        merge_progress.close()
-
-            # Now run validation with progress dialog
+            # Create progress dialog
             progress_dialog = ProgressDialog(
                 self.root,
-                self.t("Validating Register"),
-                self.t("Initializing validation..."),
+                self.t("Generating Image Properties"),
+                self.t("Scanning folders..."),
             )
 
             try:
-                # Update synchronizer's progress callback
-                synchronizer.progress_callback = (
-                    lambda msg, pct: progress_dialog.update_progress(msg, pct)
-                )
+                # Recursively scan for all compartment image files in approved folder
+                # Structure: approved_compartments/PROJECT_CODE/HOLE_ID/*.png
+                image_files = []
 
-                # Run synchronization (validation + sync)
-                results = progress_dialog.run_with_progress(
-                    synchronizer.synchronize_all
-                )
+                # Use rglob for recursive search through project/hole subfolders
+                for file_path in approved_path.rglob("*.png"):
+                    image_files.append(str(file_path))
+                for file_path in approved_path.rglob("*.jpg"):
+                    image_files.append(str(file_path))
+                for file_path in approved_path.rglob("*.jpeg"):
+                    image_files.append(str(file_path))
 
-                # Process results
-                if results and results.get("success", False):
-                    # Build result message
-                    message_lines = [
-                        self.t("Validation Complete"),
-                        "",
-                        self.t("Files checked and register updated:"),
-                    ]
-
-                    # Missing files
-                    if results.get("missing_files_compartments", 0) > 0:
-                        message_lines.append(
-                            self.t("Missing compartment images:")
-                            + f" {results['missing_files_compartments']}"
-                        )
-                    if results.get("missing_files_originals", 0) > 0:
-                        message_lines.append(
-                            self.t("Missing original images:")
-                            + f" {results['missing_files_originals']}"
-                        )
-
-                    # New files found
-                    if results.get("compartments_added", 0) > 0:
-                        message_lines.append(
-                            self.t("New compartments found:")
-                            + f" {results['compartments_added']}"
-                        )
-                    if results.get("originals_added", 0) > 0:
-                        message_lines.append(
-                            self.t("New originals found:")
-                            + f" {results['originals_added']}"
-                        )
-                    if results.get("originals_updated", 0) > 0:
-                        message_lines.append(
-                            self.t("Originals updated:")
-                            + f" {results['originals_updated']}"
-                        )
-
-                    # Hex colors
-                    if (
-                        results.get("hex_colors_calculated", 0) > 0
-                        or results.get("hex_colors_failed", 0) > 0
-                    ):
-                        message_lines.extend(
-                            [
-                                "",
-                                self.t("Hex colors calculated:")
-                                + f" {results.get('hex_colors_calculated', 0)}",
-                                self.t("Hex color failures:")
-                                + f" {results.get('hex_colors_failed', 0)}",
-                            ]
-                        )
-
-                    # Missing files note
-                    total_missing = results.get(
-                        "missing_files_compartments", 0
-                    ) + results.get("missing_files_originals", 0)
-                    if total_missing > 0:
-                        message_lines.extend(
-                            [
-                                "",
-                                self.t(
-                                    "Entries have been marked as MISSING_FILE in the register."
-                                ),
-                                self.t(
-                                    "These files may have been deleted from the shared folder."
-                                ),
-                            ]
-                        )
-
+                if not image_files:
                     DialogHelper.show_message(
                         self.root,
-                        self.t("Validation Results"),
-                        "\n".join(message_lines),
+                        self.t("No Images"),
+                        self.t("No compartment images found in approved folder."),
                         message_type="info",
                     )
+                    return
+
+                progress_dialog.update_progress(
+                    self.t("Found {} images. Loading existing properties...").format(
+                        len(image_files)
+                    ),
+                    3,
+                )
+                if progress_dialog.dialog and progress_dialog.dialog.winfo_exists():
+                    progress_dialog.dialog.update()
+
+                # Load existing properties once for batch processing using JSONRegisterManager
+                all_props = json_manager.get_all_image_properties()
+                self.logger.info(f"Loaded {len(all_props)} existing image properties from register")
+
+                progress_dialog.update_progress(
+                    self.t("Processing {} images...").format(len(image_files)), 5
+                )
+                if progress_dialog.dialog and progress_dialog.dialog.winfo_exists():
+                    progress_dialog.dialog.update()
+
+                # Track results
+                calculated = 0
+                cached = 0
+                failed = 0
+                skipped_no_classification = 0
+                errors = []
+
+                # Build an interval-based dictionary to consolidate wet/dry
+                # Key: (hole_id, depth_from, depth_to), Value: {wet_hex, dry_hex, etc}
+                interval_props = {}
+                
+                # Build lookup dictionary from existing properties for fast skip logic
+                # Key: (hole_id, depth_from, depth_to), Value: {Wet_Hex, Dry_Hex, etc}
+                existing_intervals = {}
+                for prop in all_props:
+                    key = (
+                        prop.get("HoleID"),
+                        prop.get("Depth_From"),
+                        prop.get("Depth_To"),
+                    )
+                    existing_intervals[key] = prop
+                
+                self.logger.info(f"Found {len(existing_intervals)} existing intervals in register")
+
+                # Process each image file
+                for idx, file_path in enumerate(image_files):
+                    try:
+                        filename = os.path.basename(file_path)
+
+                        # Check if image has wet/dry classification in filename
+                        filename_lower = filename.lower()
+                        if (
+                            "_wet" not in filename_lower
+                            and "_dry" not in filename_lower
+                        ):
+                            skipped_no_classification += 1
+                            self.logger.debug(
+                                f"Skipping {filename} - no wet/dry classification"
+                            )
+                            continue
+
+                        # Parse filename for metadata (HoleID_DepthFrom-DepthTo_Wet/Dry format)
+                        # Example: KM0002_CC_001_Dry.png or BELD001_100-120_Wet.png
+                        hole_id = "Unknown"
+                        depth_from = 0
+                        depth_to = 0
+
+                        try:
+                            # Remove extension
+                            name_no_ext = os.path.splitext(filename)[0]
+                            parts = name_no_ext.split("_")
+
+                            if len(parts) >= 2:
+                                hole_id = parts[0]
+
+                                # Look for depth pattern (FROM-TO or just TO)
+                                for part in parts[1:]:
+                                    if "-" in part:
+                                        # Found depth range: 100-120
+                                        depth_parts = part.split("-")
+                                        if len(depth_parts) == 2:
+                                            depth_from = int(float(depth_parts[0]))
+                                            depth_to = int(float(depth_parts[1]))
+                                            break
+                                    elif (
+                                        part.isdigit()
+                                        or part.replace(".", "").isdigit()
+                                    ):
+                                        # Single depth value is the TO depth, calculate FROM
+                                        # Example: BA0131_CC_071_Dry.png means TO=71m, so FROM=70m (1m interval)
+                                        depth_to = int(float(part))
+                                        # Always assume 1m interval for single depth values
+                                        depth_from = depth_to - 1
+                                        break
+                        except Exception as parse_error:
+                            self.logger.debug(
+                                f"Could not parse filename {filename}: {parse_error}"
+                            )
+                            # Continue with Unknown/0 values
+
+                        # Determine moisture status
+                        moisture = "Unknown"
+                        if "_Wet" in filename or "_wet" in filename:
+                            moisture = "Wet"
+                        elif "_Dry" in filename or "_dry" in filename:
+                            moisture = "Dry"
+
+                        # Create interval key
+                        interval_key = (hole_id, depth_from, depth_to)
+
+                        # Check if we can skip this image (hex already exists in register)
+                        skip_calculation = False
+                        if interval_key in existing_intervals:
+                            existing_prop = existing_intervals[interval_key]
+                            if moisture == "Wet" and existing_prop.get("Wet_Hex"):
+                                # Wet hex already calculated, skip
+                                skip_calculation = True
+                                cached += 1
+                                # Copy existing to interval_props if not already there
+                                if interval_key not in interval_props:
+                                    interval_props[interval_key] = existing_prop.copy()
+                                    # Ensure Combined_Hex is calculated (for legacy data)
+                                    if "Combined_Hex" not in interval_props[interval_key]:
+                                        dry_hex = interval_props[interval_key].get("Dry_Hex", "")
+                                        wet_hex = interval_props[interval_key].get("Wet_Hex", "")
+                                        interval_props[interval_key]["Combined_Hex"] = dry_hex if dry_hex else wet_hex
+                            elif moisture == "Dry" and existing_prop.get("Dry_Hex"):
+                                # Dry hex already calculated, skip
+                                skip_calculation = True
+                                cached += 1
+                                # Copy existing to interval_props if not already there
+                                if interval_key not in interval_props:
+                                    interval_props[interval_key] = existing_prop.copy()
+                                    # Ensure Combined_Hex is calculated (for legacy data)
+                                    if "Combined_Hex" not in interval_props[interval_key]:
+                                        dry_hex = interval_props[interval_key].get("Dry_Hex", "")
+                                        wet_hex = interval_props[interval_key].get("Wet_Hex", "")
+                                        interval_props[interval_key]["Combined_Hex"] = dry_hex if dry_hex else wet_hex
+
+                        if skip_calculation:
+                            # Skip this image, hex color already exists
+                            continue
+
+                        # Calculate hex color (only if not skipped)
+                        color_result = self.file_manager.calculate_robust_hex_color(
+                            file_path, method="LAB_shadow_compensated"
+                        )
+
+                        # Get or create interval entry
+                        if interval_key not in interval_props:
+                            interval_props[interval_key] = {
+                                "HoleID": hole_id,
+                                "Depth_From": depth_from,
+                                "Depth_To": depth_to,
+                                "Wet_Hex": "",
+                                "Dry_Hex": "",
+                                "Combined_Hex": "",
+                                "Calculation_Method": color_result["method"],
+                                "Calculated_Date": datetime.now().isoformat(),
+                            }
+                            calculated += 1
+
+                        # Update hex color for this moisture type
+                        if moisture == "Wet" and color_result["valid"]:
+                            interval_props[interval_key]["Wet_Hex"] = color_result[
+                                "hex_color"
+                            ]
+                        elif moisture == "Dry" and color_result["valid"]:
+                            interval_props[interval_key]["Dry_Hex"] = color_result[
+                                "hex_color"
+                            ]
+                        
+                        # Update Combined_Hex (prefer Dry, fallback to Wet)
+                        dry_hex = interval_props[interval_key].get("Dry_Hex", "")
+                        wet_hex = interval_props[interval_key].get("Wet_Hex", "")
+                        interval_props[interval_key]["Combined_Hex"] = dry_hex if dry_hex else wet_hex
+
+                        # Checkpoint: Save every 1,000 processed files
+                        if (idx + 1) % 1000 == 0:
+                            # Convert interval_props to list
+                            checkpoint_props = list(interval_props.values())
+                            # Merge with existing all_props (update or append)
+                            existing_keys = {
+                                (
+                                    p.get("HoleID"),
+                                    p.get("Depth_From"),
+                                    p.get("Depth_To"),
+                                ): i
+                                for i, p in enumerate(all_props)
+                            }
+                            for prop in checkpoint_props:
+                                key = (
+                                    prop["HoleID"],
+                                    prop["Depth_From"],
+                                    prop["Depth_To"],
+                                )
+                                if key in existing_keys:
+                                    all_props[existing_keys[key]] = prop
+                                else:
+                                    all_props.append(prop)
+
+                            # Write checkpoint to disk
+                            if json_manager.save_image_properties_batch(all_props):
+                                self.logger.info(
+                                    f"Checkpoint saved at {idx + 1} images"
+                                )
+
+                        # Update progress every 100 files or at milestones
+                        if (idx + 1) % 100 == 0 or (idx + 1) == len(image_files):
+                            progress = 5 + int((idx + 1) / len(image_files) * 90)
+                            progress_dialog.update_progress(
+                                self.t("Processed {}/{}: {}...").format(
+                                    idx + 1, len(image_files), filename[:30]
+                                ),
+                                progress,
+                            )
+                            # Force UI update
+                            if (
+                                progress_dialog.dialog
+                                and progress_dialog.dialog.winfo_exists()
+                            ):
+                                progress_dialog.dialog.update()
+
+                    except Exception as e:
+                        failed += 1
+                        error_msg = f"{os.path.basename(file_path)}: {str(e)}"
+                        errors.append(error_msg)
+                        self.logger.error(f"Error processing image: {error_msg}")
+
+                # Final merge and write to disk
+                progress_dialog.update_progress(
+                    self.t("Finalizing and saving all properties..."), 95
+                )
+                if progress_dialog.dialog and progress_dialog.dialog.winfo_exists():
+                    progress_dialog.dialog.update()
+
+                # Convert final interval_props to list
+                final_props = list(interval_props.values())
+
+                # Merge with existing all_props
+                existing_keys = {
+                    (p.get("HoleID"), p.get("Depth_From"), p.get("Depth_To")): i
+                    for i, p in enumerate(all_props)
+                }
+                for prop in final_props:
+                    key = (prop["HoleID"], prop["Depth_From"], prop["Depth_To"])
+                    if key in existing_keys:
+                        all_props[existing_keys[key]] = prop
+                    else:
+                        all_props.append(prop)
+
+                if not json_manager.save_image_properties_batch(all_props):
+                    self.logger.error("Failed to save final image properties batch")
+
+                progress_dialog.update_progress(self.t("Complete!"), 100)
+                # Force final UI update
+                if progress_dialog.dialog and progress_dialog.dialog.winfo_exists():
+                    progress_dialog.dialog.update()
+
+                # Build result message
+                message_lines = [
+                    self.t("Image Properties Generation Complete"),
+                    "",
+                    self.t("Total images scanned: {}").format(len(image_files)),
+                    self.t("Newly calculated: {}").format(calculated),
+                    self.t("Retrieved from cache: {}").format(cached),
+                ]
+
+                if skipped_no_classification > 0:
+                    message_lines.append(
+                        self.t("Skipped (no wet/dry): {}").format(
+                            skipped_no_classification
+                        )
+                    )
+
+                if failed > 0:
+                    message_lines.append("")
+                    message_lines.append(self.t("Failed: {}").format(failed))
+
+                    if len(errors) <= 10:
+                        message_lines.append("")
+                        message_lines.append(self.t("Errors:"))
+                        for error in errors[:10]:
+                            message_lines.append(f"  • {error}")
+                    else:
+                        message_lines.append(
+                            f"  (showing first 10 of {len(errors)} errors)"
+                        )
+                        for error in errors[:10]:
+                            message_lines.append(f"  • {error}")
+
+                message_lines.append("")
+                message_lines.append(
+                    self.t("Properties saved to: {}/Register_Data/{}").format(
+                        base_path, json_manager.IMAGE_PROPERTIES_JSON
+                    )
+                )
+
+                # Show appropriate message type
+                if failed == 0:
+                    msg_type = "info"
+                elif failed < len(image_files) / 2:
+                    msg_type = "warning"
                 else:
-                    error_msg = (
-                        results.get("error", "Unknown error")
-                        if results
-                        else "No results returned"
-                    )
-                    DialogHelper.show_message(
-                        self.root,
-                        self.t("Error"),
-                        self.t("Validation failed:") + f"\n{error_msg}",
-                        message_type="error",
-                    )
+                    msg_type = "error"
+
+                DialogHelper.show_message(
+                    self.root,
+                    self.t("Generation Results"),
+                    "\n".join(message_lines),
+                    message_type=msg_type,
+                )
 
             finally:
                 if progress_dialog.dialog and progress_dialog.dialog.winfo_exists():
                     progress_dialog.close()
 
         except Exception as e:
-            self.logger.error(f"Error in _validate_register_entries: {str(e)}")
+            self.logger.error(f"Error in _generate_image_properties: {str(e)}")
             self.logger.error(traceback.format_exc())
             DialogHelper.show_message(
                 self.root,
@@ -1186,6 +1729,45 @@ class MainGUI:
                 self.t("An error occurred:") + f"\n{str(e)}",
                 message_type="error",
             )
+
+    def _setup_sync_logger(self):
+        """Setup a custom logger handler for cloud sync operations."""
+        import logging
+
+        class StatusBoxHandler(logging.Handler):
+            """Custom handler that routes logs to the GUI status box."""
+
+            def __init__(self, gui):
+                super().__init__()
+                self.gui = gui
+
+            def emit(self, record):
+                try:
+                    msg = self.format(record)
+                    # Determine status type based on log level
+                    if record.levelno >= logging.ERROR:
+                        status_type = "error"
+                    elif record.levelno >= logging.WARNING:
+                        status_type = "warning"
+                    elif record.levelno >= logging.INFO:
+                        status_type = "info"
+                    else:
+                        status_type = "info"
+
+                    # Use after to ensure it runs on the main thread
+                    if hasattr(self.gui, "root") and self.gui.root.winfo_exists():
+                        self.gui.root.after(
+                            0, lambda: self.gui.update_status(msg, status_type)
+                        )
+                except:
+                    pass
+
+        # Add handler to cloud sync logger
+        sync_logger = logging.getLogger("utils.cloud_sync_manager")
+        sync_logger.setLevel(logging.DEBUG)  # Show debug messages
+        handler = StatusBoxHandler(self)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        sync_logger.addHandler(handler)
 
     # Add a new direct update method for other scripts to call
     def direct_status_update(self, message, status_type="info", progress=None):
@@ -1326,6 +1908,20 @@ class MainGUI:
                 )
                 self.logger.info(
                     f"Saved shared register data folder: {register_data_path}"
+                )
+                paths_found = True
+
+            # Cross Sections folder (section PDFs for Section Tool integration)
+            cross_sections_path = self.file_manager.get_shared_path(
+                "cross_sections", create_if_missing=False
+            )
+            if cross_sections_path and cross_sections_path.exists():
+                self.app.config_manager.set(
+                    "shared_folder_cross_sections", str(cross_sections_path)
+                )
+                self.cross_sections_path_var.set(str(cross_sections_path))
+                self.logger.info(
+                    f"Saved shared cross sections folder: {cross_sections_path}"
                 )
                 paths_found = True
 
@@ -1736,12 +2332,12 @@ class MainGUI:
                 self._update_translations_recursive(container)
 
             # Update collapsible frame titles
+            if hasattr(self, "processing_collapsible"):
+                self.processing_collapsible.set_text(self.t("Image Processing"))
             if hasattr(self, "shared_collapsible"):
                 self.shared_collapsible.set_text(self.t("Shared Folder Settings"))
-            if hasattr(self, "blur_collapsible"):
-                self.blur_collapsible.set_text(self.t("Blur Detection"))
-            if hasattr(self, "ocr_collapsible"):
-                self.ocr_collapsible.set_text(self.t("OCR Settings"))
+            if hasattr(self, "analysis_collapsible"):
+                self.analysis_collapsible.set_text(self.t("Image Analysis and Review"))
 
             # Update shared folder path labels
             if hasattr(self, "shared_collapsible"):
@@ -1756,8 +2352,16 @@ class MainGUI:
                                     subchild.config(
                                         text=self.t("Processed Originals Folder:")
                                     )
-                                elif "Drill" in subchild.cget("text"):
+                                elif "Drill Traces" in subchild.cget("text"):
                                     subchild.config(text=self.t("Drill Traces Folder:"))
+                                elif "Drillhole Datasets" in subchild.cget("text"):
+                                    subchild.config(
+                                        text=self.t("Drillhole Datasets Folder:")
+                                    )
+                                elif "Cross Sections" in subchild.cget("text"):
+                                    subchild.config(
+                                        text=self.t("Cross Sections Folder:")
+                                    )
                                 elif "Excel" in subchild.cget("text"):
                                     subchild.config(text=self.t("Excel Register:"))
 
@@ -1766,7 +2370,7 @@ class MainGUI:
                 button_texts = {
                     "process_button": "Process Photos",
                     "review_button": "Review Extracted Images",
-                    "validate_button": "Validate Register",
+                    "validate_button": "Calculate Image Properties",
                     "logging_button": "Logging Review",
                     "trace_button": "Generate Drillhole Trace",
                     "quit_button": "Quit",
@@ -1893,6 +2497,29 @@ class MainGUI:
                         "type": "command",
                         "label": self.t("Exit"),
                         "command": self.quit_app,
+                    },
+                ],
+                self.t("Settings"): [
+                    {
+                        "type": "command",
+                        "label": self.t("Data Settings"),
+                        "command": self._open_data_settings,
+                    },
+                    {
+                        "type": "command",
+                        "label": self.t("Color Maps"),
+                        "command": self._open_color_map_settings,
+                    },
+                    {"type": "separator"},
+                    {
+                        "type": "command",
+                        "label": self.t("Classification Manager"),
+                        "command": self._open_classification_manager,
+                    },
+                    {
+                        "type": "command",
+                        "label": self.t("Tag Manager"),
+                        "command": self._open_tag_manager,
                     },
                 ],
                 self.t("Help"): [
@@ -2094,12 +2721,7 @@ class MainGUI:
         """
         if is_file:
             # Determine file types based on path_key
-            if path_key == "drillhole_data_csv":
-                title = self.t("Select drilling intervals CSV")
-                filetypes = [("CSV files", "*.csv"), ("All files", "*.*")]
-                # Optionally set initial file if you know the expected name
-                initialfile = "drillhole_data.csv"
-            elif path_key == "register_excel":
+            if path_key == "register_excel":
                 title = self.t("Select Excel Register")
                 filetypes = [("Excel files", "*.xlsx"), ("All files", "*.*")]
                 initialfile = None
@@ -2125,11 +2747,6 @@ class MainGUI:
                 # Update FileManager immediately if path_key provided
                 if path_key and self.file_manager:
                     self.file_manager.update_shared_path(path_key, file_path)
-
-                # For drillhole intervals CSV, reload the validator
-                if path_key == "drillhole_data_csv" and self.app.depth_validator:
-                    self.app.depth_validator.reload(file_path)
-                    self._update_depth_csv_status()
 
         else:
             # Browse for folder
@@ -2337,9 +2954,40 @@ class MainGUI:
                 message_type="error",
             )
 
+    def _toggle_auto_loop_mode(self):
+        """Handle auto-loop mode toggle"""
+        if self.auto_loop_var.get():
+            # Show information dialog
+            message = (
+                "Auto-Loop Mode will:\n\n"
+                "✔ Process images with metadata in filename (e.g., BA001_0-20m.jpg)\n"
+                "✔ Skip images missing compartment markers\n"
+                "✔ Skip images with markers out of sequence\n"
+                "✔ Use filename metadata instead of manual input\n\n"
+                "Duplicate Handling:\n"
+                "• Check 'Skip existing/duplicate intervals' to only extract NEW images\n"
+                "• Uncheck to extract duplicates (wet/dry pairs) for manual selection\n\n"
+                "Images that fail quality checks will be logged for manual review.\n\n"
+                "Continue with Auto-Loop Mode?"
+            )
+
+            if not DialogHelper.confirm_dialog(self.root, "Auto-Loop Mode", message):
+                self.auto_loop_var.set(False)
+                return
+
+            self.logger.info("Auto-Loop Mode enabled")
+        else:
+            self.logger.info("Auto-Loop Mode disabled")
+
     def start_processing(self):
         """Start processing in a scheduled manner on the main thread."""
         self.logger.debug("Entered start_processing()")
+
+        # Check if auto-loop mode is enabled
+        auto_loop_mode = (
+            self.auto_loop_var.get() if hasattr(self, "auto_loop_var") else False
+        )
+
         folder_path = self.folder_var.get()
         if not folder_path:
             DialogHelper.show_message(
@@ -2427,8 +3075,13 @@ class MainGUI:
         self.failed_count = 0
         self.processing_complete = False
 
-        # Start the processing cycle with a single timer
-        self.root.after(100, self._process_cycle)
+        # Start processing based on mode
+        if auto_loop_mode:
+            # Use batch processor for automatic processing
+            self._start_auto_batch_processing()
+        else:
+            # Start the processing cycle with a single timer
+            self.root.after(100, self._process_cycle)
 
     def _process_cycle(self):
         """Process cycle that handles one image at a time and only continues after completion."""
@@ -2560,8 +3213,48 @@ class MainGUI:
             if not hasattr(qaqc_manager, "main_gui") or qaqc_manager.main_gui is None:
                 qaqc_manager.set_main_gui(self)
 
-            # Start the review process - this will check Temp_Review folder automatically
-            qaqc_manager.start_review_process()
+            # Create a simple "Loading..." dialog that shows immediately
+            loading_dialog = tk.Toplevel(self.root)
+            loading_dialog.title("Loading Review")
+            loading_dialog.transient(self.root)
+            loading_dialog.grab_set()
+
+            # Center it
+            window_width = 300
+            window_height = 100
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            x = (screen_width - window_width) // 2
+            y = (screen_height - window_height) // 2
+            loading_dialog.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+            # Add message
+            frame = ttk.Frame(loading_dialog, padding="20")
+            frame.pack(fill=tk.BOTH, expand=True)
+            ttk.Label(
+                frame,
+                text="Scanning review folders...\nPlease wait...",
+                justify=tk.CENTER,
+            ).pack(expand=True)
+
+            # Prevent closing
+            loading_dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+
+            # Force display
+            loading_dialog.update()
+
+            def run_review_process():
+                """Run on main thread after dialog shows."""
+                try:
+                    # Start the review process - this will check Temp_Review folder automatically
+                    qaqc_manager.start_review_process()
+                finally:
+                    # Close loading dialog
+                    if loading_dialog.winfo_exists():
+                        loading_dialog.destroy()
+
+            # Schedule on main thread after 50ms (lets dialog appear first)
+            self.root.after(50, run_review_process)
 
         except Exception as e:
             self.logger.error(f"Error starting image review: {str(e)}")
@@ -2574,6 +3267,40 @@ class MainGUI:
 
     def _start_logging_review(self):
         """Open the logging review dialog with register synchronization."""
+        # Guard: images + data must be loaded
+        if not self._has_geological_data():
+            dc = getattr(self.app, "data_coordinator", None)
+            if dc is None or not getattr(dc, "is_initialized", False):
+                msg = (
+                    "No image data is loaded.\n\n"
+                    "Ensure your shared folder paths are configured and "
+                    "the approved compartments folder contains images."
+                )
+            else:
+                stats = dc.get_stats()
+                images = stats.get("image_index", {}).get("images_indexed", 0)
+                if images == 0:
+                    msg = (
+                        "No compartment images have been indexed.\n\n"
+                        "Check that the approved compartments folder is correctly "
+                        "configured and contains images."
+                    )
+                else:
+                    msg = (
+                        f"{images:,} images are indexed, but no geological data "
+                        "is loaded yet.\n\n"
+                        "Either:\n"
+                        "• Configure CSV files in the Drillhole Datasets folder, or\n"
+                        "• Click 'Pre-Load Snowflake Data' to load from Snowflake."
+                    )
+            DialogHelper.show_message(
+                self.root,
+                self.t("Data Not Ready"),
+                msg,
+                message_type="warning",
+            )
+            return
+
         try:
             # Set wait cursor
             self.root.config(cursor="wait")
@@ -2589,25 +3316,6 @@ class MainGUI:
                     set_cursor_recursive(child)
 
             set_cursor_recursive(self.root)
-
-            # Prompt to validate register before continuing
-            response = DialogHelper.confirm_dialog(
-                self.root,
-                DialogHelper.t("Validate Register?"),
-                DialogHelper.t(
-                    "Would you like to validate the register before continuing?"
-                )
-                + "\n\n"
-                + DialogHelper.t(
-                    "This will check for missing files and sync with shared folders."
-                ),
-                yes_text=DialogHelper.t("Yes"),
-                no_text=DialogHelper.t("No"),
-            )
-
-            if response:
-                # User wants to validate - run validation
-                self._validate_register_entries()
 
             # Continue with opening logging review dialog
             self.logger.info("Opening logging review dialog...")
@@ -2629,8 +3337,11 @@ class MainGUI:
             from gui.logging_review_dialog import LoggingReviewDialog
 
             dialog = LoggingReviewDialog(
-                self.root, self.file_manager, self.gui_manager, self.config
+                self.root, self.file_manager, self.gui_manager, self.config_manager
             )
+
+            # Store reference so _notify_snowflake_loaded can reach it
+            self._active_logging_review_dialog = dialog
 
             # Set JSON manager if needed
             base_path = str(register_path.parent)
@@ -2659,6 +3370,36 @@ class MainGUI:
                     reset_cursor_recursive(child)
 
             reset_cursor_recursive(self.root)
+
+    def _open_logging_review_report(self):
+        """Open the logging review report dialog."""
+        try:
+            data_coordinator = getattr(self.app, "data_coordinator", None)
+            if not data_coordinator or not data_coordinator.is_initialized:
+                DialogHelper.show_message(
+                    self.root,
+                    self.t("Data Not Loaded"),
+                    self.t("Data is not loaded. Please load datasets before generating reports."),
+                    message_type="warning",
+                )
+                return
+
+            from gui.logging_review_report_dialog import LoggingReviewReportDialog
+
+            LoggingReviewReportDialog(
+                parent=self.root,
+                gui_manager=self.gui_manager,
+                data_coordinator=data_coordinator,
+                translator=self.t,
+            )
+        except Exception as e:
+            self.logger.error(f"Error opening logging review report dialog: {str(e)}")
+            DialogHelper.show_message(
+                self.root,
+                self.t("Error"),
+                self.t("Failed to open logging review report dialog.") + f"\n{str(e)}",
+                message_type="error",
+            )
 
     def _check_shared_paths(self):
         """Check if shared folder paths are available and accessible."""
@@ -2730,11 +3471,326 @@ class MainGUI:
                 self.t("Failed to open embedding tool") + f"\n{str(e)}",
                 message_type="error",
             )
-
-    def _sync_to_cloud(self):
-        """Sync local files to cloud storage."""
+    
+    def _open_drillhole_correlation(self):
+        """Open the drillhole correlation dialog."""
         try:
-            # Check if cloud storage is configured
+            import pandas as pd
+            
+            # Get collar data from DataCoordinator (CSV or Snowflake Phase 2)
+            self.logger.info("Loading collar data...")
+            
+            collar_data = pd.DataFrame()
+            data_coordinator = getattr(self.app, 'data_coordinator', None)
+            self.logger.debug(f"[COLLAR] data_coordinator from app: {data_coordinator is not None}")
+            
+            if data_coordinator and data_coordinator.is_initialized:
+                collar_data = data_coordinator.get_collar_data()
+                if collar_data.empty:
+                    available_sources = []
+                    geo_store = getattr(data_coordinator, "geological_store", None)
+                    if geo_store:
+                        available_sources = geo_store.list_sources()
+                    self.logger.warning(f"[COLLAR] No usable collar source found in: {available_sources}")
+            else:
+                self.logger.warning(f"[COLLAR] DataCoordinator not available or not initialized")
+            
+            if collar_data.empty:
+                # No collar data available - show error
+                from gui.dialog_helper import DialogHelper
+                self.logger.error("[COLLAR] No collar data found - cannot open correlation dialog")
+                DialogHelper.show_message(
+                    self.root,
+                    self.t("No Collar Data"),
+                    self.t("No collar data available.\n\n"
+                           "Click 'Pre-Load Snowflake Data' to load live collar data, "
+                           "or ensure 'excollar.csv' (or a collar dataset with HOLEID, X, Y columns) "
+                           "is in the 'Drillhole Datasets' folder."),
+                    message_type="error",
+                )
+                return
+            
+            self.logger.info(f"Loaded {len(collar_data)} collars for correlation")
+            
+            # Create dialog helper instance
+            from gui.dialog_helper import DialogHelper
+            dialog_helper = DialogHelper(self.root, self.translator)
+            
+            # Get previous selection if it exists (for remembering state)
+            initial_selection = getattr(self, '_last_drillhole_selection', None)
+            if initial_selection:
+                # Extract internal data from previous result
+                initial_selection = initial_selection.get('_internal')
+            
+            # Get initial holes from last selection if available
+            initial_holes = None
+            if hasattr(self, '_last_drillhole_selection') and self._last_drillhole_selection:
+                initial_holes = self._last_drillhole_selection.get('hole_ids', [])
+                self.logger.info(f"Using {len(initial_holes)} holes from last selection")
+            
+            # Initialize color map manager if not already available
+            color_map_manager = None
+            if hasattr(self, 'color_map_manager'):
+                color_map_manager = self.color_map_manager
+            else:
+                try:
+                    from processing.LoggingReviewStep.color_map_manager import ColorMapManager
+                    color_map_manager = ColorMapManager(self.config_manager)
+                    self.logger.info("Created ColorMapManager for correlation")
+                except ImportError:
+                    self.logger.warning("ColorMapManager not available - data visualization will be limited")
+            
+            # Data is already loaded in data_coordinator at startup
+            # Just verify it's available
+            if data_coordinator:
+                stats = data_coordinator.get_stats()
+                self.logger.info(f"[COLLAR] DataCoordinator has {stats.get('geological_store', {}).get('total_rows', 0)} rows loaded")
+            else:
+                self.logger.warning("[COLLAR] DataCoordinator not available - some features may be limited")
+            
+            # Open correlation dialog with all required managers
+            self.logger.info("Creating CorrelationDialog...")
+            self.logger.debug(f"[COLLAR] Passing data_coordinator as data_manager: {data_coordinator is not None}")
+            
+            dialog = CorrelationDialog(
+                parent=self.root,
+                gui_manager=self.gui_manager,
+                data_manager=data_coordinator,
+                file_manager=self.file_manager,
+                config_manager=self.config_manager,
+                color_map_manager=color_map_manager,
+                translator=self.translator,
+                dialog_helper=dialog_helper,
+                initial_holes=initial_holes
+            )
+            
+            self.logger.info("CorrelationDialog opened successfully")
+                
+        except Exception as e:
+            self.logger.error(f"Error opening drillhole selector: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            from gui.dialog_helper import DialogHelper
+            DialogHelper.show_message(
+                self.root,
+                self.t("Error"),
+                self.t("Failed to open drillhole selector") + f"\n{str(e)}",
+                message_type="error",
+            )
+
+    def _start_auto_batch_processing(self):
+        """Start automatic batch processing with quality checks"""
+        import threading
+
+        try:
+            # Import batch processor
+            from processing.batch_processor import BatchProcessor
+
+            # Get duplicate handling preference
+            skip_duplicates = (
+                self.auto_skip_duplicates_var.get()
+                if hasattr(self, "auto_skip_duplicates_var")
+                else False
+            )
+
+            # Create batch processor instance
+            batch_processor = BatchProcessor(
+                self.app, self.config, skip_duplicates=skip_duplicates
+            )
+
+            # Create progress dialog (non-modal to allow duplicate dialogs to interrupt)
+            progress_dialog = ProgressDialog(
+                self.root,
+                "Auto Batch Processing",
+                f"Processing {len(self.files_to_process)} images...",
+                modal=False,  # Allow duplicate dialogs to show over this
+            )
+
+            # Store reference so we can check cancellation
+            self._batch_processor = batch_processor
+            self._batch_progress_dialog = progress_dialog
+            self._batch_stats = None
+            self._batch_complete = False
+
+            def update_progress(message, percent, status=""):
+                """Update progress dialog - thread-safe"""
+                # Check for cancellation from dialog
+                if progress_dialog.is_cancelled():
+                    batch_processor.request_cancel()
+
+                # Update UI via after() for thread safety
+                self.root.after(0, lambda: progress_dialog.update_progress(message, percent, status))
+
+            def run_batch():
+                """Run batch processing in background thread"""
+                try:
+                    self._batch_stats = batch_processor.process_batch(
+                        self.files_to_process, progress_callback=update_progress
+                    )
+                except Exception as e:
+                    self.logger.error(f"Batch processing error: {e}")
+                    self._batch_stats = {"error": str(e), "processed": 0, "failed": 0, "skipped": 0, "total": 0}
+                finally:
+                    self._batch_complete = True
+                    # Schedule completion handler on main thread
+                    self.root.after(0, self._on_batch_complete)
+
+            # Start batch processing in background thread
+            self.logger.info(
+                f"Starting auto batch processing of {len(self.files_to_process)} images"
+            )
+
+            batch_thread = threading.Thread(target=run_batch, daemon=True)
+            batch_thread.start()
+
+        except Exception as e:
+            self.logger.error(f"Error starting auto batch processing: {str(e)}")
+            self.logger.error(traceback.format_exc())
+
+            DialogHelper.show_message(
+                self.root,
+                "Error",
+                f"Failed to start batch processing:\n{str(e)}",
+                message_type="error",
+            )
+
+            # Re-enable process button
+            if "process_button" in self.buttons:
+                self.buttons["process_button"].set_state("normal")
+
+    def _on_batch_complete(self):
+        """Handle batch processing completion on main thread"""
+        try:
+            # Close progress dialog
+            if hasattr(self, '_batch_progress_dialog') and self._batch_progress_dialog:
+                self._batch_progress_dialog.close()
+
+            stats = getattr(self, '_batch_stats', None) or {}
+
+            # Check for error
+            if "error" in stats:
+                DialogHelper.show_message(
+                    self.root,
+                    "Error",
+                    f"Batch processing failed:\n{stats['error']}",
+                    message_type="error",
+                )
+                if "process_button" in self.buttons:
+                    self.buttons["process_button"].set_state("normal")
+                return
+
+            # Update counts
+            self.successful_count = stats.get("processed", 0)
+            self.failed_count = stats.get("failed", 0)
+
+            # Generate and show report
+            batch_processor = getattr(self, '_batch_processor', None)
+            if batch_processor:
+                report = batch_processor.get_processing_report()
+
+                # Save report to file
+                report_path = os.path.join(
+                    self.config.get("local_folder_path", "."), "batch_processing_report.txt"
+                )
+                with open(report_path, "w") as f:
+                    f.write(report)
+
+            # Build summary message
+            was_cancelled = stats.get("cancelled", False)
+            if was_cancelled:
+                summary_message = (
+                    f"Batch Processing Cancelled\n\n"
+                    f"Completed before cancellation:\n"
+                    f"Successfully Processed: {stats.get('processed', 0)}\n"
+                    f"Skipped (Quality Issues): {stats.get('skipped', 0)}\n"
+                    f"Failed: {stats.get('failed', 0)}\n"
+                )
+            else:
+                summary_message = (
+                    f"Auto Batch Processing Complete!\n\n"
+                    f"Total Images: {stats.get('total', 0)}\n"
+                    f"Successfully Processed: {stats.get('processed', 0)}\n"
+                    f"Skipped (Quality Issues): {stats.get('skipped', 0)}\n"
+                    f"Failed: {stats.get('failed', 0)}\n\n"
+                )
+
+            if stats.get("skipped", 0) > 0:
+                summary_message += (
+                    f"Skipped files require manual processing.\n"
+                    f"See report for details: {report_path}\n\n"
+                )
+
+            if not was_cancelled:
+                summary_message += "Would you like to review skipped images now?"
+
+            if was_cancelled or stats.get("skipped", 0) == 0:
+                DialogHelper.show_message(
+                    self.root, "Batch Processing", summary_message, message_type="info"
+                )
+                if "process_button" in self.buttons:
+                    self.buttons["process_button"].set_state("normal")
+                if self.successful_count > 0:
+                    self.root.after(500, lambda: self._prompt_qaqc_review())
+            else:
+                review_skipped = DialogHelper.confirm_dialog(
+                    self.root, "Batch Processing Complete", summary_message
+                )
+
+                if review_skipped and batch_processor and batch_processor.skipped_files:
+                    # Switch to manual mode for skipped files
+                    self.auto_loop_var.set(False)
+                    self.files_to_process = batch_processor.skipped_files
+                    self.current_file_index = 0
+                    self.successful_count = 0
+                    self.failed_count = 0
+                    self.processing_complete = False
+
+                    # Start normal processing for skipped files
+                    self._process_cycle()
+                else:
+                    # Re-enable process button
+                    if "process_button" in self.buttons:
+                        self.buttons["process_button"].set_state("normal")
+
+                    # Prompt for QAQC if successful
+                    if self.successful_count > 0:
+                        self.root.after(500, lambda: self._prompt_qaqc_review())
+
+        except Exception as e:
+            self.logger.error(f"Error in batch completion handler: {str(e)}")
+            self.logger.error(traceback.format_exc())
+
+            DialogHelper.show_message(
+                self.root,
+                "Error",
+                f"Error completing batch processing:\n{str(e)}",
+                message_type="error",
+            )
+
+            if "process_button" in self.buttons:
+                self.buttons["process_button"].set_state("normal")
+
+    def _prompt_qaqc_review(self):
+        """Prompt to start QAQC review after processing"""
+        start_review = DialogHelper.confirm_dialog(
+            self.root,
+            DialogHelper.t("Processing Complete"),
+            DialogHelper.t(
+                f"Successfully processed {self.successful_count} images.\n\n"
+                f"Would you like to start the QAQC review process now?"
+            ),
+        )
+        if start_review and hasattr(self.app, "qaqc_manager"):
+            self.app.qaqc_manager.start_review_process()
+
+    
+    def _sync_to_cloud(self):
+        """Sync local files to cloud storage with UID verification."""
+        self.logger.info("=== SYNC TO CLOUD STARTED ===")
+        
+        try:
+            # Check if cloud storage is configured FIRST (this is fast)
             if not self.file_manager.shared_paths:
                 DialogHelper.show_message(
                     self.root,
@@ -2746,17 +3802,173 @@ class MainGUI:
                 )
                 return
 
-            # Create sync manager
-            from utils.cloud_sync_manager import CloudSyncManager
+            # Show progress dialog IMMEDIATELY - before any blocking operations
+            self.update_status("Preparing cloud sync...", "info")
+            
+            checking_dialog = ProgressDialog(
+                self.root,
+                self.t("Sync to Cloud"),
+                self.t("Preparing..."),
+                modal=False  # Don't use modal to avoid grab_set() issues
+            )
+            
+            # Force the dialog to appear NOW
+            checking_dialog.update_progress(self.t("Initializing..."), 2)
+            self.root.update_idletasks()
+            self.root.update()
+            
+            self.logger.debug("Progress dialog shown")
+            
+            # Container for background thread results
+            result_container = {
+                "summary": None, 
+                "error": None, 
+                "completed": False,
+                "dedup_results": None
+            }
+            
+            def progress_callback(msg, pct):
+                """Thread-safe progress callback."""
+                def update_ui():
+                    try:
+                        if checking_dialog and checking_dialog.dialog and checking_dialog.dialog.winfo_exists():
+                            checking_dialog.update_progress(msg, pct)
+                    except Exception:
+                        pass
+                self.root.after_idle(update_ui)
+            
+            def background_prepare():
+                """Background task: run deduplication and gather summary."""
+                self.logger.info("Background: Starting preparation...")
 
-            sync_manager = CloudSyncManager(self.file_manager, self.logger)
+                try:
+                    # Step 1: Run deduplication check (optimized - only checks potential duplicates)
+                    progress_callback(self.t("Running deduplication check..."), 5)
+                    try:
+                        dedup_manager = UIDDeduplicationManager(self.file_manager, self.logger)
+                        dedup_results = dedup_manager.find_and_remove_duplicates(dry_run=False)
+                        result_container["dedup_results"] = dedup_results
+                        self.logger.info(f"Background: Deduplication complete - {dedup_results}")
+                    except Exception as e:
+                        self.logger.warning(f"Background: Deduplication failed - {e}")
 
-            # Get summary first
-            summary = sync_manager.get_sync_summary()
+                    progress_callback(self.t("Preparation complete"), 20)
+                    
+                    # Step 2: Create sync manager and get summary (20% - 100%)
+                    progress_callback(self.t("Scanning files..."), 25)
+                    
+                    from utils.cloud_sync_manager import CloudSyncManager
+                    sync_manager = CloudSyncManager(self.file_manager, self.logger)
+                    
+                    # Get summary with progress updates
+                    def summary_progress(msg, pct):
+                        # Scale from 25% to 95%
+                        scaled_pct = 25 + int(pct * 0.70)
+                        progress_callback(msg, scaled_pct)
+                    
+                    summary = sync_manager.get_sync_summary(progress_callback=summary_progress)
+                    result_container["summary"] = summary
+                    result_container["sync_manager"] = sync_manager
+                    
+                    self.logger.info(f"Background: Summary complete - {summary}")
+                    progress_callback(self.t("Scan complete"), 100)
+                    
+                except Exception as e:
+                    self.logger.error(f"Background: Error - {e}")
+                    import traceback
+                    self.logger.error(traceback.format_exc())
+                    result_container["error"] = str(e)
+                finally:
+                    result_container["completed"] = True
+                    self.logger.info("Background: Finished")
+            
+            # Start background thread
+            self.logger.debug("Starting background preparation thread...")
+            prep_thread = threading.Thread(target=background_prepare, daemon=True)
+            prep_thread.start()
+            
+            # Poll for completion using after()
+            def check_preparation_complete():
+                if result_container["completed"]:
+                    self.logger.debug("Preparation complete, closing dialog...")
+                    try:
+                        checking_dialog.close()
+                    except Exception:
+                        pass
+                    
+                    # Process results on main thread
+                    self._process_sync_preparation(result_container)
+                else:
+                    # Check again in 100ms
+                    self.root.after(100, check_preparation_complete)
+            
+            # Start polling
+            self.root.after(100, check_preparation_complete)
+            
+        except Exception as e:
+            self.logger.error(f"Error in cloud sync: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            DialogHelper.show_message(
+                self.root,
+                self.t("Error"),
+                self.t("An error occurred during sync:") + f"\n{str(e)}",
+                message_type="error",
+            )
+
+    def _process_sync_preparation(self, result_container):
+        """Process the sync preparation results and show confirmation dialog."""
+        self.logger.debug("Processing sync preparation results...")
+        
+        try:
+            # Handle dedup results
+            dedup_results = result_container.get("dedup_results")
+            if dedup_results:
+                if dedup_results.get("files_removed", 0) > 0:
+                    self.logger.info(
+                        f"Deduplication removed {dedup_results['files_removed']} files, "
+                        f"saved {dedup_results.get('bytes_saved', 0) / (1024*1024):.2f} MB"
+                    )
+                if dedup_results.get("uid_conflicts", 0) > 0:
+                    self.update_status(
+                        f"⚠ Found {dedup_results['uid_conflicts']} UID conflicts requiring manual review",
+                        "warning",
+                    )
+            
+            # Handle errors
+            if result_container.get("error"):
+                DialogHelper.show_message(
+                    self.root,
+                    self.t("Error"),
+                    self.t("Error checking sync status:") + f"\n{result_container['error']}",
+                    message_type="error",
+                )
+                return
+            
+            summary = result_container.get("summary")
+            sync_manager = result_container.get("sync_manager")
+            
+            if not summary:
+                DialogHelper.show_message(
+                    self.root,
+                    self.t("Error"),
+                    self.t("Failed to get sync summary"),
+                    message_type="error",
+                )
+                return
+            
+            # Check if cloud is configured
+            if not summary.get("cloud_configured", False):
+                DialogHelper.show_message(
+                    self.root,
+                    self.t("Error"),
+                    self.t("No cloud storage configured. Please configure shared folders first."),
+                    message_type="error",
+                )
+                return
 
             # Build confirmation message
             message_lines = [self.t("Files to sync to cloud:"), ""]
-
             total_files = 0
             total_mb = 0
 
@@ -2775,12 +3987,39 @@ class MainGUI:
 
             if summary["approved_uploaded_files"] > 0:
                 message_lines.append(
-                    f"• {self.t('Approved compartments (already uploaded)')}: "
+                    f"• {self.t('Approved compartments (already in cloud)')}: "
                     f"{summary['approved_uploaded_files']} files "
                     f"({summary['approved_uploaded_size_mb']} MB)"
                 )
+                message_lines.append(
+                    f"  {self.t('(will be deleted locally to free space)')}"
+                )
                 total_files += summary["approved_uploaded_files"]
                 total_mb += summary["approved_uploaded_size_mb"]
+
+            if summary.get("approved_originals_uploaded_files", 0) > 0:
+                message_lines.append(
+                    f"• {self.t('Approved original images (already in cloud)')}: "
+                    f"{summary['approved_originals_uploaded_files']} files "
+                    f"({summary['approved_originals_uploaded_size_mb']} MB)"
+                )
+                message_lines.append(
+                    f"  {self.t('(will be deleted locally to free space)')}"
+                )
+                total_files += summary["approved_originals_uploaded_files"]
+                total_mb += summary["approved_originals_uploaded_size_mb"]
+
+            if summary.get("rejected_originals_uploaded_files", 0) > 0:
+                message_lines.append(
+                    f"• {self.t('Rejected original images (already in cloud)')}: "
+                    f"{summary['rejected_originals_uploaded_files']} files "
+                    f"({summary['rejected_originals_uploaded_size_mb']} MB)"
+                )
+                message_lines.append(
+                    f"  {self.t('(will be deleted locally to free space)')}"
+                )
+                total_files += summary["rejected_originals_uploaded_files"]
+                total_mb += summary["rejected_originals_uploaded_size_mb"]
 
             if total_files == 0:
                 DialogHelper.show_message(
@@ -2791,86 +4030,237 @@ class MainGUI:
                 )
                 return
 
-            message_lines.extend(
-                [
-                    "",
-                    f"{self.t('Total')}: {total_files} files ({total_mb:.1f} MB)",
-                    "",
-                    self.t(
-                        "Files will be moved to cloud and removed from local storage."
-                    ),
-                    self.t("Continue?"),
-                ]
-            )
+            action_descriptions = []
+            if summary["temp_review_files"] > 0:
+                action_descriptions.append(
+                    self.t("Review compartments will be moved to cloud and deleted locally.")
+                )
+            if summary["approved_uploaded_files"] > 0:
+                action_descriptions.append(
+                    self.t("Already-uploaded files will be deleted locally to free space.")
+                )
+
+            message_lines.extend([
+                "",
+                f"{self.t('Total')}: {total_files} files ({total_mb:.1f} MB)",
+                "",
+            ])
+            message_lines.extend(action_descriptions)
+            message_lines.append(self.t("Continue?"))
 
             if not DialogHelper.confirm_dialog(
                 self.root, self.t("Sync to Cloud"), "\n".join(message_lines)
             ):
+                self.update_status("Cloud sync cancelled", "info")
                 return
 
-            # Perform sync with progress dialog
-            progress_dialog = ProgressDialog(
-                self.root, self.t("Syncing to Cloud"), self.t("Initializing...")
-            )
-
-            try:
-                result = sync_manager.sync_compartments_to_cloud(
-                    progress_callback=lambda msg, pct: progress_dialog.update_progress(
-                        msg, pct
-                    )
-                )
-
-                if result["success"]:
-                    stats = result["stats"]
-
-                    # Build result message
-                    result_lines = [self.t("Cloud sync completed:"), ""]
-
-                    if stats["temp_moved"] > 0:
-                        result_lines.append(
-                            f"✓ {self.t('Review compartments moved')}: {stats['temp_moved']}"
-                        )
-                    if stats["approved_moved"] > 0:
-                        result_lines.append(
-                            f"✓ {self.t('Approved compartments moved')}: {stats['approved_moved']}"
-                        )
-                    if stats["already_in_cloud"] > 0:
-                        result_lines.append(
-                            f"• {self.t('Already in cloud (removed locally)')}: {stats['already_in_cloud']}"
-                        )
-                    if stats.get("mb_freed", 0) > 0:
-                        result_lines.append(
-                            f"\n{self.t('Space freed')}: {stats['mb_freed']:.1f} MB"
-                        )
-
-                    if stats["temp_failed"] > 0 or stats["approved_failed"] > 0:
-                        result_lines.append(
-                            f"\n⚠ {self.t('Failed')}: {stats['temp_failed'] + stats['approved_failed']} files"
-                        )
-
-                    DialogHelper.show_message(
-                        self.root,
-                        self.t("Sync Complete"),
-                        "\n".join(result_lines),
-                        message_type="info",
-                    )
-                else:
-                    DialogHelper.show_message(
-                        self.root,
-                        self.t("Sync Error"),
-                        result.get("error", "Unknown error"),
-                        message_type="error",
-                    )
-
-            finally:
-                progress_dialog.close()
-
+            # Run the actual sync
+            self._run_cloud_sync(sync_manager)
+            
         except Exception as e:
-            self.logger.error(f"Error in cloud sync: {str(e)}")
+            self.logger.error(f"Error processing sync preparation: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             DialogHelper.show_message(
                 self.root,
                 self.t("Error"),
-                self.t("An error occurred during sync:") + f"\n{str(e)}",
+                self.t("An error occurred:") + f"\n{str(e)}",
+                message_type="error",
+            )
+
+    def _run_cloud_sync(self, sync_manager):
+        """Run the actual cloud sync operation in background."""
+        self.logger.info("Starting cloud sync operation...")
+        
+        progress_dialog = ProgressDialog(
+            self.root,
+            self.t("Syncing to Cloud"),
+            self.t("Starting sync..."),
+            modal=False
+        )
+        
+        result_container = {"result": None, "completed": False}
+
+        def sync_progress_callback(msg, pct):
+            def update_gui():
+                try:
+                    if progress_dialog and progress_dialog.dialog and progress_dialog.dialog.winfo_exists():
+                        progress_dialog.update_progress(msg, pct)
+                    if msg and self.root.winfo_exists():
+                        self.update_status(msg, "info")
+                except Exception as e:
+                    self.logger.warning(f"GUI update error: {e}")
+            self.root.after_idle(update_gui)
+
+        def background_sync():
+            try:
+                result = sync_manager.sync_compartments_to_cloud(
+                    progress_callback=sync_progress_callback
+                )
+                result_container["result"] = result
+            except Exception as e:
+                self.logger.error(f"Background sync error: {e}")
+                result_container["result"] = {"success": False, "error": str(e)}
+            finally:
+                result_container["completed"] = True
+
+        sync_thread = threading.Thread(target=background_sync, daemon=True)
+        sync_thread.start()
+
+        def check_sync_complete():
+            if result_container["completed"]:
+                try:
+                    progress_dialog.close()
+                except Exception:
+                    pass
+                self._handle_sync_completion(result_container["result"])
+            else:
+                self.root.after(100, check_sync_complete)
+
+        self.root.after(100, check_sync_complete)
+
+    def _handle_sync_completion(self, result):
+        """Handle sync completion on main thread."""
+        try:
+            if result["success"]:
+                stats = result["stats"]
+
+                # First, update the status box with detailed results
+                self.update_status("=" * 50, "info")
+                self.update_status(self.t("CLOUD SYNC DETAILED RESULTS:"), "success")
+                self.update_status("=" * 50, "info")
+
+                # Show what was moved
+                if stats["temp_moved"] > 0:
+                    self.update_status(
+                        f"✓ Moved {stats['temp_moved']} review compartments to cloud",
+                        "success",
+                    )
+                if stats["approved_moved"] > 0:
+                    self.update_status(
+                        f"✓ Uploaded {stats['approved_moved']} approved compartments",
+                        "success",
+                    )
+                if stats.get("approved_cleaned", 0) > 0:
+                    self.update_status(
+                        f"✓ Cleaned up {stats['approved_cleaned']} uploaded compartments locally",
+                        "success",
+                    )
+                if stats.get("approved_originals_cleaned", 0) > 0:
+                    self.update_status(
+                        f"✓ Cleaned up {stats['approved_originals_cleaned']} uploaded original images",
+                        "success",
+                    )
+                if stats.get("rejected_originals_cleaned", 0) > 0:
+                    self.update_status(
+                        f"✓ Cleaned up {stats['rejected_originals_cleaned']} rejected originals",
+                        "success",
+                    )
+                if stats["already_in_cloud"] > 0:
+                    self.update_status(
+                        f"• Skipped {stats['already_in_cloud']} files (already in cloud)",
+                        "info",
+                    )
+                if stats.get("mb_freed", 0) > 0:
+                    self.update_status(
+                        f"💾 Total space freed: {stats['mb_freed']:.2f} MB",
+                        "success",
+                    )
+
+                # Show missing cloud files as warnings
+                if stats.get("missing_cloud_files", 0) > 0:
+                    self.update_status(
+                        f"⚠ Files marked as uploaded but missing from cloud: {stats['missing_cloud_files']}",
+                        "warning",
+                    )
+                    self.update_status(
+                        "  These files need manual review - they may have been deleted from cloud storage",
+                        "warning",
+                    )
+
+                # Show any errors
+                if stats.get("errors"):
+                    self.update_status("⚠ Errors encountered:", "warning")
+                    for error in stats["errors"][:5]:  # Show first 5 errors
+                        self.update_status(f"  - {error}", "warning")
+                    if len(stats["errors"]) > 5:
+                        self.update_status(
+                            f"  ... and {len(stats['errors']) - 5} more errors",
+                            "warning",
+                        )
+
+                self.update_status("=" * 50, "info")
+
+                # Build result message for dialog
+                result_lines = [self.t("Cloud sync completed:"), ""]
+
+                if stats["temp_moved"] > 0:
+                    result_lines.append(
+                        f"✓ {self.t('Review compartments moved')}: {stats['temp_moved']}"
+                    )
+                if stats["approved_moved"] > 0:
+                    result_lines.append(
+                        f"✓ {self.t('Approved compartments moved')}: {stats['approved_moved']}"
+                    )
+                if stats.get("approved_cleaned", 0) > 0:
+                    result_lines.append(
+                        f"✓ {self.t('Uploaded files cleaned up locally')}: {stats['approved_cleaned']}"
+                    )
+                if stats["already_in_cloud"] > 0:
+                    result_lines.append(
+                        f"• {self.t('Skipped (already in cloud)')}: {stats['already_in_cloud']}"
+                    )
+                if stats.get("mb_freed", 0) > 0:
+                    result_lines.append(
+                        f"\n{self.t('Space freed')}: {stats['mb_freed']:.1f} MB"
+                    )
+
+                # Show failures and warnings
+                total_failures = (
+                    stats.get("temp_failed", 0)
+                    + stats.get("approved_failed", 0)
+                    + stats.get("approved_originals_failed", 0)
+                    + stats.get("rejected_originals_failed", 0)
+                )
+
+                if total_failures > 0:
+                    result_lines.append(
+                        f"\n⚠ {self.t('Failed uploads')}: {total_failures} files"
+                    )
+
+                if stats.get("missing_cloud_files", 0) > 0:
+                    result_lines.append(
+                        f"⚠ {self.t('Missing from cloud')}: {stats['missing_cloud_files']} files"
+                    )
+                    result_lines.append(
+                        f"  {self.t('(marked as uploaded but not found in cloud)')}"
+                    )
+
+                if stats.get("errors"):
+                    result_lines.append(
+                        f"\n{self.t('See status box for error details')}"
+                    )
+
+                DialogHelper.show_message(
+                    self.root,
+                    self.t("Sync Complete"),
+                    "\n".join(result_lines),
+                    message_type="info",
+                )
+            else:
+                DialogHelper.show_message(
+                    self.root,
+                    self.t("Sync Error"),
+                    result.get("error", "Unknown error"),
+                    message_type="error",
+                )
+
+        except Exception as e:
+            self.logger.error(f"Error handling sync completion: {str(e)}")
+            DialogHelper.show_message(
+                self.root,
+                self.t("Error"),
+                self.t("Error processing sync results: ") + str(e),
                 message_type="error",
             )
 
@@ -3094,56 +4484,380 @@ class MainGUI:
             # Join paths with semicolons for display
             path_var.set(";".join(file_paths))
 
-    def _browse_depth_validation_csv(self):
-        """Browse for drillhole intervals CSV file."""
-        initial_dir = None
-        current_path = self.drillhole_data_csv_var.get()
-        if current_path and os.path.exists(os.path.dirname(current_path)):
-            initial_dir = os.path.dirname(current_path)
+    # ──────────────────────────────────────────────────────────────────────
+    # Snowflake UI helpers
+    # ──────────────────────────────────────────────────────────────────────
 
-        file_path = filedialog.askopenfilename(
-            title=self.translator.get(
-                "select_depth_csv", "Select drillhole intervals CSV"
-            ),
-            initialdir=initial_dir,
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-        )
+    def _subscribe_snowflake_status(self) -> None:
+        """Register a callback so the badge updates whenever session state changes."""
+        try:
+            from processing.DataManager.snowflake_session import (
+                get_session_manager, SessionState,
+            )
+            sm = get_session_manager()
 
-        if file_path:
-            self.drillhole_data_csv_var.set(file_path)
-            self.config_manager.set("shared_folder_drillhole_data_csv", file_path)
-            self._update_depth_csv_status(file_path)
+            def _on_state_change(state, message):
+                # Always update badge on main thread
+                self.root.after(0, lambda s=state, m=message: self._update_sf_badge(s, m))
 
-            # Update file manager if it exists
-            if hasattr(self, "file_manager") and self.file_manager:
-                self.file_manager.update_shared_path("drillhole_data.csv", file_path)
+                # Auto-trigger Phase 2 when Phase 1 completes
+                if state == SessionState.PHASE1_DONE:
+                    self.logger.info("Phase 1 complete — auto-starting Phase 2 (silent)")
+                    self.root.after(500, lambda: self._start_snowflake_phase2(
+                        force_refresh=False, silent=True
+                    ))
 
-    def _update_depth_csv_status(self, csv_path=None):
-        """Update the status indicator for drillhole intervals CSV."""
-        if not hasattr(self, "depth_csv_status_label"):
+            sm.add_status_callback(_on_state_change)
+            # Reflect current state immediately
+            self._update_sf_badge(sm.state, "")
+
+            # If Phase 1 already completed before we subscribed, auto-start Phase 2
+            if sm.state == SessionState.PHASE1_DONE:
+                self.logger.info("Phase 1 already complete at subscribe time — auto-starting Phase 2")
+                self.root.after(1000, lambda: self._start_snowflake_phase2(
+                    force_refresh=False, silent=True
+                ))
+        except Exception as e:
+            self.logger.debug(f"Could not subscribe to Snowflake status: {e}")
+
+    def _update_sf_badge(self, state, message: str) -> None:
+        """Update the Snowflake connection badge in the header."""
+        if not hasattr(self, "_sf_badge"):
             return
+        try:
+            from processing.DataManager.snowflake_session import SessionState
+            tc = self.gui_manager.theme_colors
+            state_map = {
+                SessionState.IDLE:           ("⚪ Snowflake",        tc["subtext"]),
+                SessionState.OFFLINE:        ("⚪ Snowflake",        tc["subtext"]),
+                SessionState.CONNECTING:     ("🟡 Connecting…",      tc["accent_yellow"]),
+                SessionState.PHASE1_LOADING: ("🟡 Loading collar…",  tc["accent_yellow"]),
+                SessionState.PHASE1_DONE:    ("🟢 SF: collar ready", tc["accent_green"]),
+                SessionState.PHASE2_LOADING: ("🟡 Loading data…",    tc["accent_yellow"]),
+                SessionState.READY:          ("🟢 SF: data loaded",  tc["accent_green"]),
+                SessionState.FAILED:         ("🔴 SF: offline",      tc["accent_red"]),
+            }
+            text, color = state_map.get(state, ("⚪ Snowflake", tc["subtext"]))
+            self._sf_badge.config(text=text, fg=color)
 
-        # Get path from parameter or from the StringVar
-        if csv_path is None:
-            csv_path = (
-                self.drillhole_data_csv_var.get()
-                if hasattr(self, "drillhole_data_csv_var")
-                else ""
+            # Enable/disable pre-load button based on state
+            if hasattr(self, "_sf_preload_button"):
+                loading_states = {SessionState.CONNECTING, SessionState.PHASE1_LOADING, SessionState.PHASE2_LOADING}
+                btn_state = "disabled" if state in loading_states else "normal"
+                try:
+                    self._sf_preload_button.configure(state=btn_state)
+                except Exception:
+                    pass
+        except Exception as e:
+            self.logger.debug(f"Badge update error: {e}")
+
+    def _on_sf_badge_click(self, event=None) -> None:
+        """Show a popover with Snowflake connection details."""
+        try:
+            from processing.DataManager.snowflake_session import get_session_manager, SessionState
+            sm = get_session_manager()
+            tc = self.gui_manager.theme_colors
+
+            popup = tk.Toplevel(self.root)
+            popup.overrideredirect(True)
+            popup.configure(bg=tc["secondary_bg"], relief="solid", bd=1)
+
+            # Position below the badge
+            bx = self._sf_badge.winfo_rootx()
+            by = self._sf_badge.winfo_rooty() + self._sf_badge.winfo_height() + 4
+            popup.geometry(f"+{bx}+{by}")
+
+            def _row(label, value, color=None):
+                f = tk.Frame(popup, bg=tc["secondary_bg"])
+                f.pack(fill=tk.X, padx=10, pady=1)
+                tk.Label(f, text=label, font=("Arial", 8), bg=tc["secondary_bg"],
+                         fg=tc["subtext"], width=14, anchor="w").pack(side=tk.LEFT)
+                tk.Label(f, text=value, font=("Arial", 8, "bold"), bg=tc["secondary_bg"],
+                         fg=color or tc["text"]).pack(side=tk.LEFT)
+
+            tk.Label(popup, text="Snowflake Connection",
+                     font=("Arial", 9, "bold"), bg=tc["secondary_bg"],
+                     fg=tc["text"]).pack(padx=10, pady=(8, 4))
+
+            _row("State:", sm.state.name)
+            _row("User:", sm.user or "—")
+            _row("Role:", sm.role or "—")
+            _row("Collar holes:", f"{len(sm.collar_depth_ranges):,}" if sm.collar_depth_ranges else "—")
+            _row("Phase 2:", sm.phase2_summary)
+            _row("Cache:", sm.cache_age_description())
+
+            if sm.error_message:
+                _row("Error:", sm.error_message[:60], tc["accent_red"])
+
+            btn_frame = tk.Frame(popup, bg=tc["secondary_bg"])
+            btn_frame.pack(fill=tk.X, padx=10, pady=(6, 8))
+
+            if sm.state in (SessionState.FAILED, SessionState.OFFLINE, SessionState.PHASE1_DONE):
+                ModernButton(btn_frame, text="Retry Phase 1",
+                             color=tc["accent_blue"],
+                             command=lambda: [popup.destroy(), sm.start_phase1()],
+                             theme_colors=tc, fonts=self.gui_manager.fonts).pack(side=tk.LEFT, padx=2)
+
+            ModernButton(btn_frame, text="Clear Cache",
+                         color=tc["secondary_bg"],
+                         command=lambda: [sm.clear_cache(), popup.destroy()],
+                         theme_colors=tc, fonts=self.gui_manager.fonts).pack(side=tk.LEFT, padx=2)
+
+            ModernButton(btn_frame, text="✕",
+                         color=tc["secondary_bg"],
+                         command=popup.destroy,
+                         theme_colors=tc, fonts=self.gui_manager.fonts).pack(side=tk.RIGHT)
+
+            # Dismiss on click-outside
+            popup.bind("<FocusOut>", lambda e: popup.destroy())
+            popup.focus_set()
+
+        except Exception as e:
+            self.logger.debug(f"SF badge popover error: {e}")
+
+    def _find_missing_trays(self) -> None:
+        """Open the Chip Tray Inventory dialog."""
+        try:
+            data_coordinator = getattr(self.app, "data_coordinator", None)
+            if not data_coordinator or not data_coordinator.is_initialized:
+                DialogHelper.show_message(
+                    self.root, "Chip Tray Inventory",
+                    "DataCoordinator not initialized. Please wait for startup to complete.",
+                    "warning",
+                )
+                return
+
+            if data_coordinator.image_index.image_count == 0:
+                DialogHelper.show_message(
+                    self.root, "Chip Tray Inventory",
+                    "No images indexed. Please ensure image folders are configured.",
+                    "warning",
+                )
+                return
+
+            from gui.chip_tray_inventory_dialog import ChipTrayInventoryDialog
+
+            register_manager = getattr(self.app, "register_manager", None)
+
+            ChipTrayInventoryDialog(
+                parent=self.root,
+                data_coordinator=data_coordinator,
+                register_manager=register_manager,
+                gui_manager=self.gui_manager,
             )
 
-        if not csv_path:
-            self.depth_csv_status_label.config(text="", foreground="gray")
+        except Exception as e:
+            self.logger.error(f"Error opening Chip Tray Inventory: {e}", exc_info=True)
+            DialogHelper.show_message(
+                self.root, "Error",
+                f"Failed to open Chip Tray Inventory:\n{e}",
+                "error",
+            )
+
+
+    def _start_snowflake_phase2(self, force_refresh: bool = False, silent: bool = False) -> None:
+        """
+        Launch Snowflake Phase 2 (all geological tables) with a progress dialog.
+        Called from the "Pre-Load Snowflake Data" button or automatically after Phase 1.
+
+        Args:
+            force_refresh: If True, skip cache and re-fetch from Snowflake.
+            silent: If True, don't show cache prompt or completion message (for auto-load).
+        """
+        try:
+            from processing.DataManager.snowflake_session import (
+                get_session_manager, SessionState,
+            )
+            sm = get_session_manager()
+
+            if sm.state == SessionState.PHASE2_LOADING:
+                if not silent:
+                    DialogHelper.show_message(self.root, "Snowflake",
+                                              "Phase 2 is already loading.", "info")
+                return
+
+            if sm.state == SessionState.READY:
+                if not silent:
+                    DialogHelper.show_message(self.root, "Snowflake",
+                                              "Snowflake data is already loaded.", "info")
+                return
+
+            # Don't attempt Phase 2 if we never connected
+            if sm.state in (SessionState.FAILED, SessionState.OFFLINE, SessionState.IDLE):
+                if not silent:
+                    DialogHelper.show_message(self.root, "Snowflake",
+                                              "Snowflake is not connected. Phase 2 requires a successful Phase 1.",
+                                              "warning")
+                return
+
+            # Give ConfigManager to session manager for custom tables
+            config_manager = getattr(self.app, "config_manager", None)
+            if config_manager:
+                sm.set_config_manager(config_manager)
+
+            # Ask about cache (only if interactive, not silent auto-load)
+            if not silent and not force_refresh and sm.has_valid_cache():
+                use_cache_msg = (
+                    f"A recent cache exists ({sm.cache_age_description()}).\n\n"
+                    "Load from cache (fast) or re-fetch from Snowflake?"
+                )
+                force_refresh = not DialogHelper.confirm_dialog(
+                    self.root,
+                    "Load Snowflake Data",
+                    use_cache_msg,
+                    yes_text="Use Cache",
+                    no_text="Re-fetch",
+                )
+
+            # Silent auto-load: use status box instead of modal progress dialog
+            if silent:
+                self.root.after(0, lambda: self.update_status(
+                    "Snowflake Phase 2: loading geological tables in background...", "info"
+                ))
+
+                def _progress(name, done, total_n):
+                    pct = int(done / max(total_n, 1) * 100)
+                    self.root.after(0, lambda n=name, p=pct: self.update_status(
+                        f"Snowflake: {n} ({p}%)", "info"
+                    ))
+
+                def _on_complete(success, summary):
+                    def _finish():
+                        status = "success" if success else "warning"
+                        self.update_status(f"Snowflake: {summary}", status)
+                        self._notify_snowflake_loaded(success, summary)
+                    self.root.after(0, _finish)
+
+            else:
+                # Interactive: show modal progress dialog
+                progress_dlg = ProgressDialog(
+                    self.root,
+                    title="Loading Snowflake Data",
+                    message="Preparing...",
+                )
+
+                def _progress(name, done, total_n):
+                    pct = int(done / max(total_n, 1) * 100)
+                    self.root.after(0, lambda: progress_dlg.update_progress(
+                        f"Loading: {name}", pct
+                    ))
+
+                def _on_complete(success, summary):
+                    def _finish():
+                        progress_dlg.close()
+                        self._notify_snowflake_loaded(success, summary)
+                        DialogHelper.show_message(
+                            self.root,
+                            "Snowflake Data Loaded" if success else "Snowflake Load Failed",
+                            summary,
+                            "info" if success else "warning",
+                        )
+                    self.root.after(0, _finish)
+
+            data_coordinator = getattr(self.app, "data_coordinator", None)
+            sm.start_phase2(
+                data_coordinator=data_coordinator,
+                progress_callback=_progress,
+                on_complete=_on_complete,
+                force_refresh=force_refresh,
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error starting Snowflake Phase 2: {e}")
+            if not silent:
+                DialogHelper.show_message(self.root, "Error",
+                                          f"Could not start Snowflake load:\n{e}", "error")
+
+    def _notify_snowflake_loaded(self, success: bool, summary: str) -> None:
+        """
+        Notify any open dialogs that Snowflake data has been loaded.
+        Called after Phase 2 completes on the main thread.
+        """
+        if not success:
             return
 
-        if not os.path.exists(csv_path):
-            self.depth_csv_status_label.config(text="✗", foreground="red")
-            return
+        self.logger.info(f"Snowflake Phase 2 loaded: {summary}")
 
-        # Check if validator is loaded
-        if self.depth_validator and self.depth_validator.is_loaded:
-            self.depth_csv_status_label.config(text="✓", foreground="green")
-        else:
-            self.depth_csv_status_label.config(text="⚠", foreground="orange")
+        # Auto-save Snowflake schemas to config so they don't need re-inference next time
+        try:
+            config_manager = getattr(self.app, "config_manager", None)
+            data_coordinator = getattr(self.app, "data_coordinator", None)
+            if config_manager and data_coordinator and data_coordinator._geological_store:
+                geo_store = data_coordinator._geological_store
+                schemas_dict = {}
+                for source_name, indexed_source in geo_store.get_data_sources().items():
+                    schema = indexed_source.schema
+                    schemas_dict[source_name] = schema.to_dict()
+                config_manager.set("column_schemas", schemas_dict)
+                self.logger.info(f"Auto-saved column schemas for {len(schemas_dict)} sources (incl. Snowflake)")
+        except Exception as e:
+            self.logger.warning(f"Could not auto-save Snowflake schemas: {e}")
+
+        # Find any open LoggingReviewDialog and refresh its columns
+        for widget in self.root.winfo_children():
+            try:
+                if hasattr(widget, 'winfo_children'):
+                    for child in widget.winfo_children():
+                        # LoggingReviewDialog stores itself on the toplevel
+                        dialog = getattr(child, '_logging_review_dialog', None)
+                        if dialog and hasattr(dialog, 'on_snowflake_data_loaded'):
+                            self.logger.info("Notifying LoggingReviewDialog of Snowflake data load")
+                            dialog.on_snowflake_data_loaded()
+            except Exception:
+                pass
+
+        # Also check if the app has a direct reference
+        if hasattr(self, '_active_logging_review_dialog'):
+            dialog = self._active_logging_review_dialog
+            if dialog and hasattr(dialog, 'on_snowflake_data_loaded'):
+                try:
+                    self.logger.info("Notifying LoggingReviewDialog of Snowflake data load (direct ref)")
+                    dialog.on_snowflake_data_loaded()
+                except Exception as e:
+                    self.logger.warning(f"Error notifying LoggingReviewDialog: {e}")
+
+    def _has_geological_data(self) -> bool:
+        """
+        Return True if there is sufficient data loaded (from CSV or Snowflake)
+        to open the logging review dialog.
+        """
+        # Check image index — images are always required
+        dc = getattr(self.app, "data_coordinator", None)
+        if dc is None or not getattr(dc, "is_initialized", False):
+            return False
+
+        stats = dc.get_stats()
+        images_indexed = stats.get("image_index", {}).get("images_indexed", 0)
+        if images_indexed == 0:
+            return False
+
+        # Geological data: either CSV rows or Snowflake Phase 2
+        csv_rows = stats.get("geological_store", {}).get("total_rows", 0)
+        if csv_rows > 0:
+            return True
+
+        try:
+            from processing.DataManager.snowflake_session import (
+                get_session_manager, SessionState,
+            )
+            sm = get_session_manager()
+            if sm.state == SessionState.READY:
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    def _update_depth_csv_status(self, folder_path=None):
+        """Update the status indicator for datasets folder.
+
+        DEPRECATED: This method is kept for backwards compatibility but
+        now operates on the datasets folder instead of a single CSV file.
+        The folder status is handled by the path field's visual indicator.
+        """
+        # This method is now a no-op since we use folder-based status display
+        # via the _create_shared_path_field mechanism
+        pass
 
     def on_generate_trace(self):
         """Handle the 'Generate Drillhole Trace' button click."""

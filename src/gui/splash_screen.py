@@ -112,29 +112,63 @@ class SplashScreen:
             bg="#1e1e1e",
             fg="#a0a0a0",
         )
-        self.status_label.pack(pady=(20, 10))
+        self.status_label.pack(pady=(20, 4))
 
-        # Version label - read from pyproject.toml if possible
-        version = "v1.0.0"  # Default
+        # Detail / sub-status message
+        self.detail_label = tk.Label(
+            container,
+            text="",
+            font=("Arial", 8),
+            bg="#1e1e1e",
+            fg="#606060",
+            wraplength=260,
+        )
+        self.detail_label.pack(pady=(0, 10))
+
+        # Indeterminate progress bar
         try:
-            # Try to read version from pyproject.toml
+            from tkinter import ttk as _ttk
+            style = _ttk.Style(self.splash)
+            style.theme_use("default")
+            style.configure(
+                "Splash.Horizontal.TProgressbar",
+                troughcolor="#2a2a2a",
+                background="#3a7ca5",
+                thickness=4,
+            )
+            self.progress_bar = _ttk.Progressbar(
+                container,
+                style="Splash.Horizontal.TProgressbar",
+                mode="indeterminate",
+                length=220,
+            )
+            self.progress_bar.pack(pady=(0, 6))
+            self.progress_bar.start(12)   # ms per step
+        except Exception:
+            self.progress_bar = None
+
+        # Version label - read from config.json
+        version = "v2.1.0"  # Default
+        try:
+            import json
+
             if getattr(sys, "frozen", False):
-                # For frozen app, version should be hardcoded
-                pass
+                # In frozen app, config.json is in sys._MEIPASS
+                config_path = os.path.join(sys._MEIPASS, "config.json")
             else:
-                # In development, try to read from pyproject.toml
-                project_root = os.path.dirname(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                )
-                pyproject_path = os.path.join(project_root, "pyproject.toml")
-                if os.path.exists(pyproject_path):
-                    with open(pyproject_path, "r") as f:
-                        for line in f:
-                            if line.startswith("version = "):
-                                version = f"v{line.split('=')[1].strip().strip('\"')}"
-                                break
-        except:
-            pass
+                # In development
+                current_dir = os.path.dirname(os.path.abspath(__file__))  # gui folder
+                src_dir = os.path.dirname(current_dir)  # src folder
+                config_path = os.path.join(src_dir, "config.json")
+
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+                    if "version" in config:
+                        version = f"v{config['version']}"
+                        print(f"[SplashScreen] Got version from config.json: {version}")
+        except Exception as e:
+            print(f"[SplashScreen] Could not read version: {e}")
 
         version_label = tk.Label(
             container,
@@ -145,11 +179,26 @@ class SplashScreen:
         )
         version_label.pack(side=tk.BOTTOM)
 
-    def update_status(self, message):
-        """Update status message."""
-        if hasattr(self, "status_label") and self.splash.winfo_exists():
-            self.status_label.config(text=message)
-            self.splash.update()
+    def pulse(self) -> None:
+        """
+        Pump the tkinter event loop once so the progress bar animates
+        while the main thread is doing blocking work.
+        Call this in a tight loop from the main thread during long operations.
+        """
+        try:
+            if self.splash.winfo_exists():
+                self.splash.update()
+        except Exception:
+            pass
+
+    def update_status(self, message: str, detail: str = "") -> None:
+        """Update status and optional detail line."""
+        if not (hasattr(self, "status_label") and self.splash.winfo_exists()):
+            return
+        self.status_label.config(text=message)
+        if hasattr(self, "detail_label"):
+            self.detail_label.config(text=detail)
+        self.splash.update()
 
     def show(self):
         """Show the splash screen."""
@@ -161,10 +210,12 @@ class SplashScreen:
     def close(self):
         """Close the splash screen without touching the shared root."""
         try:
-            # drop the photo ref first (optional)
+            if self.progress_bar is not None:
+                self.progress_bar.stop()
+        except Exception:
+            pass
+        try:
             self.logo_photo = None
-            # this will raise TclError if it's already gone
             self.splash.destroy()
         except (AttributeError, tk.TclError):
-            # either self.splash wasn't set, or the Tcl window is already dead
             pass

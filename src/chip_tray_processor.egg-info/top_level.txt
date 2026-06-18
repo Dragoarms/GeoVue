@@ -1,7 +1,0 @@
-Archive
-core
-gui
-processing
-resources
-tests
-utils

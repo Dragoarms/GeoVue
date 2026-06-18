@@ -1,0 +1,55 @@
+{
+  "name": "Prediction",
+  "description": "Geochemical Cutoff predictions for BIFf",
+  "type": "categorical",
+  "categories": {
+    "BIFhm": {
+      "color": "#e54444",
+      "bgr": [
+        68,
+        68,
+        229
+      ]
+    },
+    "High Confidence": {
+      "color": "#00ff00",
+      "bgr": [
+        0,
+        255,
+        0
+      ]
+    },
+    "Low Confidence": {
+      "color": "#ffff00",
+      "bgr": [
+        0,
+        255,
+        255
+      ]
+    },
+    "Mineralised": {
+      "color": "#ed2ed6",
+      "bgr": [
+        214,
+        46,
+        237
+      ]
+    },
+    "Other": {
+      "color": "#808080",
+      "bgr": [
+        128,
+        128,
+        128
+      ]
+    },
+    "Potential BID/Fs": {
+      "color": "#ff8040",
+      "bgr": [
+        64,
+        128,
+        255
+      ]
+    }
+  }
+}
