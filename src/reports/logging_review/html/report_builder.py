@@ -1,6 +1,8 @@
 """Build logging review report data and delegate to HTML renderer."""
 import logging
 import os
+import posixpath
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +19,11 @@ from .utils import _safe_float, _safe_str
 from reports.logging_review.data.outliers import OUTLIER_DISPLAY_THRESHOLD
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_report_asset_slug(value: Any) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("._-")
+    return slug[:80] or "logger"
 
 
 def _metric_total_depth(
@@ -87,6 +94,7 @@ def build_html_report(
     output_dir: Optional[str] = None,
     full_team_df: Optional[pd.DataFrame] = None,
     output_path: Optional[str] = None,
+    image_mode: str = "thumbnail",
 ) -> str:
     """
     Build report data and render HTML.
@@ -127,6 +135,7 @@ def build_html_report(
         _grouping_avg_max_interval_and_groups,
         _group_mineralisation_by_quarter,
         _lookup_interval_image,
+        _normalize_image_mode,
         _resolve_project_code_column,
         _resolve_zonation_columns,
         _significance_for_logging_detail_issue,
@@ -156,12 +165,40 @@ def build_html_report(
                 parts.append(f"{s} {pct_str}")
         return ", ".join(parts)
 
+    effective_output_dir = output_dir or (os.path.dirname(output_path) if output_path else None)
+
     # Set up charts output folder for this logger
     charts_dir = None
-    if output_dir:
-        charts_dir = os.path.join(output_dir, f"charts_{logger_value}")
+    if effective_output_dir:
+        charts_dir = os.path.join(effective_output_dir, f"charts_{logger_value}")
         os.makedirs(charts_dir, exist_ok=True)
         logger.info(f"Charts will be saved to: {charts_dir}")
+
+    resolved_image_mode = _normalize_image_mode(include_images, image_mode)
+    image_output_dir = None
+    image_relative_dir = None
+    if resolved_image_mode == "thumbnail" and effective_output_dir:
+        logger_slug = _safe_report_asset_slug(logger_value)
+        image_relative_dir = posixpath.join("assets", logger_slug, "images")
+        image_output_dir = os.path.join(effective_output_dir, "assets", logger_slug, "images")
+        logger.info("Interval thumbnails will be saved to: %s", image_output_dir)
+
+    image_cache = {} if (data_coordinator and resolved_image_mode != "none") else None
+    image_asset_cache = {} if (data_coordinator and resolved_image_mode == "thumbnail") else None
+    image_lookup_kwargs = {
+        "cache": image_cache,
+        "image_mode": resolved_image_mode,
+        "image_output_dir": image_output_dir,
+        "image_relative_dir": image_relative_dir,
+        "image_asset_cache": image_asset_cache,
+    }
+    image_builder_kwargs = {
+        "image_cache": image_cache,
+        "image_mode": resolved_image_mode,
+        "image_output_dir": image_output_dir,
+        "image_relative_dir": image_relative_dir,
+        "image_asset_cache": image_asset_cache,
+    }
 
     logger_holes = set(
         assay_logger_df[hole_col].astype(str).str.upper().str.strip().tolist()
@@ -287,14 +324,13 @@ def build_html_report(
                     "geochem": {"Fe": fe_val, "SiO2": sio2_val, "Al2O3": al2o3_val},
                 })
 
-    image_cache = {} if (data_coordinator and include_images) else None
-    if data_coordinator and include_images:
+    if data_coordinator and resolved_image_mode != "none":
         for item in mineral_mismatch_intervals:
             item["image"] = _lookup_interval_image(
                 data_coordinator,
                 item.get("hole_id"),
                 item.get("depth_to"),
-                cache=image_cache,
+                **image_lookup_kwargs,
             )
 
     project_with_accuracy = _add_mineralisation_accuracy_column(project_filtered_df, ColumnResolver(project_filtered_df))
@@ -311,13 +347,13 @@ def build_html_report(
     zonation_mismatch_rows = _collect_zonation_mismatch_rows(
         assay_df_for_zonation, zonation_cols, hole_col, depth_from_col, depth_to_col
     )
-    if data_coordinator and include_images:
+    if data_coordinator and resolved_image_mode != "none":
         for item in zonation_mismatch_rows:
             item["image"] = _lookup_interval_image(
                 data_coordinator,
                 item.get("hole_id"),
                 item.get("depth_to"),
-                cache=image_cache,
+                **image_lookup_kwargs,
             )
     zonation_cols_team = _resolve_zonation_columns(project_filtered_df)
     team_df_for_zonation, zonation_cols_team = _derive_dominant_zonation_column(project_filtered_df, zonation_cols_team)
@@ -807,32 +843,32 @@ def build_html_report(
     }
 
     fines_with_images = _build_intervals_with_images(
-        data_coordinator, fines_intervals, include_images, image_cache=image_cache
+        data_coordinator, fines_intervals, include_images, **image_builder_kwargs
     )
     for i, item in enumerate(fines_with_images):
         if i < len(fines_intervals) and "geochem" in fines_intervals[i]:
             item["geochem"] = fines_intervals[i]["geochem"]
 
     magnetite_with_images = _build_intervals_with_images(
-        data_coordinator, magnetite_intervals, include_images, image_cache=image_cache
+        data_coordinator, magnetite_intervals, include_images, **image_builder_kwargs
     )
     goethite_with_images = _build_intervals_with_images(
-        data_coordinator, goethite_intervals, include_images, image_cache=image_cache
+        data_coordinator, goethite_intervals, include_images, **image_builder_kwargs
     )
     carbonate_with_images = _build_intervals_with_images(
-        data_coordinator, carbonate_intervals, include_images, image_cache=image_cache
+        data_coordinator, carbonate_intervals, include_images, **image_builder_kwargs
     )
     sulphide_with_images = _build_intervals_with_images(
-        data_coordinator, sulphide_intervals, include_images, image_cache=image_cache
+        data_coordinator, sulphide_intervals, include_images, **image_builder_kwargs
     )
     manganese_with_images = _build_intervals_with_images(
-        data_coordinator, manganese_intervals, include_images, image_cache=image_cache
+        data_coordinator, manganese_intervals, include_images, **image_builder_kwargs
     )
     mafics_with_images = _build_intervals_with_images(
-        data_coordinator, mafics_intervals, include_images, image_cache=image_cache
+        data_coordinator, mafics_intervals, include_images, **image_builder_kwargs
     )
     magnesium_with_images = _build_intervals_with_images(
-        data_coordinator, magnesium_intervals, include_images, image_cache=image_cache
+        data_coordinator, magnesium_intervals, include_images, **image_builder_kwargs
     )
     for i, item in enumerate(magnetite_with_images):
         if i < len(magnetite_intervals):
@@ -866,14 +902,14 @@ def build_html_report(
             item["assay"] = magnesium_intervals[i]["assay"]
 
     clay_with_images = _build_intervals_with_images(
-        data_coordinator, clay_intervals, include_images, image_cache=image_cache
+        data_coordinator, clay_intervals, include_images, **image_builder_kwargs
     )
     for i, item in enumerate(clay_with_images):
         if i < len(clay_intervals) and "assay" in clay_intervals[i]:
             item["assay"] = clay_intervals[i]["assay"]
 
     grouping_with_groups = _build_grouping_groups_with_images(
-        data_coordinator, grouping_groups_for_review, include_images, image_cache=image_cache
+        data_coordinator, grouping_groups_for_review, include_images, **image_builder_kwargs
     )
 
     intervals_for_review: IntervalsForReview = {
@@ -890,11 +926,11 @@ def build_html_report(
             "magnesium_gangue": magnesium_with_images,
         },
         "grouping_flat": _build_intervals_with_images(
-            data_coordinator, grouping_intervals, include_images, image_cache=image_cache
+            data_coordinator, grouping_intervals, include_images, **image_builder_kwargs
         ),
         "grouping": grouping_with_groups,
         "outliers": _build_outlier_intervals_with_images(
-            data_coordinator, outlier_rows, include_images, image_cache=image_cache
+            data_coordinator, outlier_rows, include_images, **image_builder_kwargs
         ),
     }
 

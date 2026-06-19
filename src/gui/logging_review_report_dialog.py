@@ -5,8 +5,6 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
-
 from gui.dialog_helper import DialogHelper
 from gui.widgets.themed_date_entry import create_themed_date_entry
 from processing.logging_review_report import (
@@ -51,6 +49,7 @@ class LoggingReviewReportDialog:
 
         self.output_path_var = tk.StringVar()
         self.top_n_var = tk.IntVar(value=50)
+        self.image_mode_var = tk.StringVar(value="thumbnail")
 
         self.date_from_var = tk.StringVar()
         self.date_to_var = tk.StringVar()
@@ -171,6 +170,21 @@ class LoggingReviewReportDialog:
         ttk.Spinbox(topn_frame, from_=10, to=100, textvariable=self.top_n_var, width=8).pack(
             side=tk.LEFT, padx=5, pady=5
         )
+
+        # Image mode
+        image_frame = ttk.LabelFrame(container, text=self.t("Images"))
+        image_frame.pack(fill=tk.X, pady=(0, 8))
+        for label, value in (
+            ("Thumbnails", "thumbnail"),
+            ("No images", "none"),
+            ("Embedded originals", "embedded"),
+        ):
+            ttk.Radiobutton(
+                image_frame,
+                text=self.t(label),
+                value=value,
+                variable=self.image_mode_var,
+            ).pack(side=tk.LEFT, padx=8, pady=5)
 
         # Page selection
         page_frame = ttk.LabelFrame(container, text=self.t("Report Pages"))
@@ -381,6 +395,7 @@ class LoggingReviewReportDialog:
     ) -> None:
         """Run report generation with current prepped_data and show result."""
         try:
+            image_mode = self.image_mode_var.get()
             output_files, skipped_loggers = generate_logger_reports(
                 data_coordinator=self.data_coordinator,
                 output_dir=self.output_path_var.get().strip(),
@@ -389,7 +404,8 @@ class LoggingReviewReportDialog:
                 logger_values=logger_values,
                 top_n=int(self.top_n_var.get()),
                 page_options=page_options,
-                include_images=True,
+                include_images=image_mode != "none",
+                image_mode=image_mode,
                 output_format="HTML",
                 prepped_data=self._prep_cache,
             )
@@ -433,4 +449,3 @@ class LoggingReviewReportDialog:
 
     def _on_close(self) -> None:
         self.dialog.destroy()
-

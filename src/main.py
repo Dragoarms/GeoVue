@@ -183,6 +183,11 @@ from gui.widgets import *
 from processing import BlurDetector, DrillholeTraceGenerator, ArucoManager
 
 from utils import JSONRegisterManager, DepthValidator
+from utils.reprocess_depths import (
+    coerce_optional_int,
+    infer_register_compartment_interval,
+    resolve_register_compartment_depths,
+)
 
 # ===========================================
 # Main Application Class
@@ -1402,13 +1407,38 @@ class GeoVue:
                 existing_compartments = (
                     self.register_manager.get_compartments_by_source_uid(image_uid)
                 )
-                existing_by_depth = {
-                    comp.get("From"): comp for comp in existing_compartments
-                }
+                existing_by_interval = {}
+                existing_by_from = {}
+                existing_by_to = {}
+                for comp in existing_compartments:
+                    comp_from = coerce_optional_int(comp.get("From"))
+                    comp_to = coerce_optional_int(comp.get("To"))
+                    if comp_from is not None and comp_to is not None:
+                        existing_by_interval[(comp_from, comp_to)] = comp
+                    if comp_from is not None:
+                        existing_by_from[comp_from] = comp
+                    if comp_to is not None:
+                        existing_by_to[comp_to] = comp
+
+                fallback_interval = self.config.get("compartment_interval", 1)
+                register_interval = infer_register_compartment_interval(
+                    register_original_record,
+                    register_corners,
+                    fallback_interval=fallback_interval,
+                )
+                self.logger.info(
+                    "Register-based extraction interval: %sm per compartment",
+                    register_interval,
+                )
 
                 for corner_record in register_corners:
                     comp_num = corner_record.get("Compartment_Number", 0)
-                    depth = corner_record.get("Depth_From", 0)
+                    comp_depth_from, comp_depth_to = resolve_register_compartment_depths(
+                        register_original_record,
+                        corner_record,
+                        register_corners,
+                        fallback_interval=register_interval,
+                    )
 
                     # Get corner coordinates
                     tl = (corner_record.get("Top_Left_X", 0), corner_record.get("Top_Left_Y", 0))
@@ -1427,10 +1457,16 @@ class GeoVue:
                     # Extract compartment from (possibly rotated) extraction image
                     if x2 > x1 and y2 > y1:
                         compartment_img = extraction_image[y1:y2, x1:x2].copy()
-                        extracted_compartments.append((comp_num, depth, compartment_img))
+                        extracted_compartments.append(
+                            (comp_num, comp_depth_from, comp_depth_to, compartment_img)
+                        )
 
                         # Check existing wet/dry status
-                        existing = existing_by_depth.get(depth)
+                        existing = (
+                            existing_by_interval.get((comp_depth_from, comp_depth_to))
+                            or existing_by_from.get(comp_depth_from)
+                            or existing_by_to.get(comp_depth_to)
+                        )
                         wet_dry_status = None
                         photo_status = "For Review"
 
@@ -1457,13 +1493,15 @@ class GeoVue:
 
                         compartment_statuses.append({
                             "comp_num": comp_num,
-                            "depth": depth,
+                            "depth_from": comp_depth_from,
+                            "depth_to": comp_depth_to,
                             "photo_status": photo_status,
                             "wet_dry": wet_dry_status,
                         })
 
                         self.logger.debug(
-                            f"Extracted compartment {comp_num} at depth {depth}: "
+                            f"Extracted compartment {comp_num} at depth "
+                            f"{comp_depth_from}-{comp_depth_to}: "
                             f"status={photo_status}, wet_dry={wet_dry_status}"
                         )
 
@@ -1472,11 +1510,13 @@ class GeoVue:
                 hole_id = register_original_record.get("HoleID", "UNKNOWN")
                 skipped_count = 0
 
-                for (comp_num, depth, comp_img), status in zip(
+                for (comp_num, comp_depth_from, comp_depth_to, comp_img), status in zip(
                     extracted_compartments, compartment_statuses
                 ):
                     # Skip compartments beyond hole depth if depth data is available
-                    if not self._is_compartment_within_hole_depth(hole_id, depth):
+                    if not self._is_compartment_within_hole_depth(
+                        hole_id, comp_depth_to
+                    ):
                         skipped_count += 1
                         continue
 
@@ -1490,13 +1530,14 @@ class GeoVue:
                         saved_path = self.file_manager.save_approved_compartment_direct(
                             comp_img,
                             hole_id,
-                            depth,
+                            comp_depth_to,
                             wet_dry,
                             source_uid=image_uid,
                             upload_to_shared=True,
+                            overwrite_existing=True,
                         )
                         add_progress_message(
-                            f"Re-extracted {hole_id} CC_{depth:03d}_{wet_dry} (approved)",
+                            f"Re-extracted {hole_id} CC_{comp_depth_to:03d}_{wet_dry} (approved)",
                             None,
                             message_type="info",
                         )
@@ -1506,12 +1547,12 @@ class GeoVue:
                         saved_path = self.file_manager.save_temp_compartment(
                             comp_img,
                             hole_id,
-                            depth,
+                            comp_depth_to,
                             suffix=suffix,
                             source_uid=image_uid,
                         )
                         add_progress_message(
-                            f"Re-extracted {hole_id} CC_{depth:03d} (for review)",
+                            f"Re-extracted {hole_id} CC_{comp_depth_to:03d} (for review)",
                             None,
                             message_type="info",
                         )

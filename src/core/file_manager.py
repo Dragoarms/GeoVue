@@ -1047,6 +1047,7 @@ class FileManager:
         moisture_status: str,
         source_uid: str = None,
         upload_to_shared: bool = True,
+        overwrite_existing: bool = False,
     ) -> Optional[str]:
         """
         Save a compartment directly to approved folder with known wet/dry status.
@@ -1061,6 +1062,7 @@ class FileManager:
             moisture_status: "Wet" or "Dry"
             source_uid: Source image UID to embed in PNG
             upload_to_shared: Whether to also upload to shared folder
+            overwrite_existing: Whether to overwrite an existing file with the same UID
 
         Returns:
             Path to saved file or None if failed
@@ -1081,7 +1083,7 @@ class FileManager:
             file_path = os.path.join(save_dir, filename)
 
             # Check if file already exists with same UID - preserve it
-            if os.path.exists(file_path) and source_uid:
+            if os.path.exists(file_path) and source_uid and not overwrite_existing:
                 existing_uid = self.extract_uid_from_any_image(file_path)
                 if existing_uid == source_uid:
                     self.logger.info(

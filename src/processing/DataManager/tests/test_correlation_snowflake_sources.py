@@ -223,6 +223,85 @@ def test_geophysics_point_values_are_returned_without_aggregation():
     assert values == [(10.1, 5.0), (10.4, 120.0), (10.9, 6.0)]
 
 
+def test_point_values_reuse_geological_store_hole_slice(monkeypatch):
+    coord = DataCoordinator()
+    coord.add_source_from_dataframe(
+        pd.DataFrame(
+            {
+                "HOLEID": ["NB0001", "NB0001", "NB0001"],
+                "DEPTH": [10.1, 10.4, 11.1],
+                "GAMMA_CPS": [5.0, 120.0, 6.0],
+            }
+        ),
+        name="geophysicsdetails",
+    )
+    source = coord.geological_store.get_source("geophysicsdetails")
+    calls = {"count": 0}
+    original_get_rows_for_hole = source.get_rows_for_hole
+
+    def counted_get_rows_for_hole(hole_id):
+        calls["count"] += 1
+        return original_get_rows_for_hole(hole_id)
+
+    monkeypatch.setattr(source, "get_rows_for_hole", counted_get_rows_for_hole)
+
+    assert coord.get_point_values_for_interval(
+        "NB0001",
+        10.0,
+        11.0,
+        "gamma_cps",
+        "geophysicsdetails",
+    ) == [(10.1, 5.0), (10.4, 120.0)]
+    assert coord.get_point_values_for_interval(
+        "NB0001",
+        10.0,
+        11.0,
+        "gamma_cps",
+        "geophysicsdetails",
+    ) == [(10.1, 5.0), (10.4, 120.0)]
+    assert calls["count"] == 1
+
+
+def test_interval_source_values_reuse_geological_store_hole_slice(monkeypatch):
+    coord = DataCoordinator()
+    coord.add_source_from_dataframe(
+        pd.DataFrame(
+            {
+                "HOLEID": ["NB0001", "NB0001", "NB9999"],
+                "SAMPFROM": [0.0, 1.0, 0.0],
+                "SAMPTO": [1.0, 2.0, 1.0],
+                "FE_PCT_BEST": [58.0, 61.0, 10.0],
+            }
+        ),
+        name="summary_logging_assays",
+    )
+    source = coord.geological_store.get_source("summary_logging_assays")
+    calls = {"count": 0}
+    original_get_rows_for_hole = source.get_rows_for_hole
+
+    def counted_get_rows_for_hole(hole_id):
+        calls["count"] += 1
+        return original_get_rows_for_hole(hole_id)
+
+    monkeypatch.setattr(source, "get_rows_for_hole", counted_get_rows_for_hole)
+
+    assert coord.get_interval_source_value(
+        "NB0001",
+        0.0,
+        1.0,
+        "fe_pct_best",
+        "summary_logging_assays",
+    ) == 58.0
+    assert coord.get_interval_source_value(
+        "NB0001",
+        1.0,
+        2.0,
+        "fe_pct_best",
+        "summary_logging_assays",
+    ) == 61.0
+    assert calls["count"] == 1
+
+
 def test_holes_with_assays_uses_populated_assay_sources():
     coord = DataCoordinator()
     coord.add_source_from_dataframe(

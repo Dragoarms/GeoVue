@@ -35,6 +35,21 @@ ml_detection/visual_label_classifier_images/
 ml_detection/grain_segmentation_labels/
 ml_detection/lithology_classifier_images/
 ml_detection/dataset_audit/
+ml_detection/Wet_Dry_Empty_classifier_images/
+tfd_extract_preview/
+*.parquet
+*.pq
+*.feather
+*.arrow
+
+# Local/generated test exports
+roster_*_baseline.json
+test-accommodation-range.json
+test-booking-request.csv
+test-flight-list.csv
+test-monthly-accommodation.csv
+test-monthly-accommodation.xlsm
+test-roster-summary.html
 
 # Logs and local runtime files
 *.log

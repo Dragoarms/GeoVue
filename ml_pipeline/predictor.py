@@ -80,6 +80,12 @@ class WetDryPredictor:
         if model_path is None:
             # Try common locations
             search_paths = [
+                Path("ml_output/wetdryempty_gate/checkpoints/best_model.pt"),
+                Path(__file__).parent.parent
+                / "ml_output"
+                / "wetdryempty_gate"
+                / "checkpoints"
+                / "best_model.pt",
                 Path("ml_output/checkpoints/best_model.pt"),
                 Path(__file__).parent.parent / "ml_output" / "checkpoints" / "best_model.pt",
             ]

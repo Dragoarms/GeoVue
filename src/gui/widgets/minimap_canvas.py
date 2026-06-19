@@ -764,6 +764,7 @@ class MinimapCanvas(tk.Canvas):
         if self.temp_box_id:
             self.delete(self.temp_box_id)
             self.temp_box_id = None
+        self.delete("grid")
         
         # Draw background image first (bottom layer) - only if it needs updating
         if self.background_image is not None and self.background_bounds is not None:
@@ -789,6 +790,9 @@ class MinimapCanvas(tk.Canvas):
                            text="No collar data loaded", 
                            fill='gray', font=('Arial', 12))
             return
+
+        if self.background_image is None:
+            self._draw_coordinate_grid()
         
         # Draw selection box (if exists)
         if self.section_line is not None:
@@ -825,6 +829,52 @@ class MinimapCanvas(tk.Canvas):
         
         # Draw status info overlay
         self._draw_status_info()
+
+    def _draw_coordinate_grid(self) -> None:
+        """Draw a quiet local-coordinate grid when no raster background is loaded."""
+        canvas_w = self.winfo_width() or 500
+        canvas_h = self.winfo_height() or 400
+        if canvas_w <= 0 or canvas_h <= 0 or self.zoom_level <= 0:
+            return
+
+        top_left_x, top_left_y = self.canvas_to_map(0, 0)
+        bottom_right_x, bottom_right_y = self.canvas_to_map(canvas_w, canvas_h)
+        min_x, max_x = sorted((top_left_x, bottom_right_x))
+        min_y, max_y = sorted((top_left_y, bottom_right_y))
+
+        def nice_step(value_range: float) -> float:
+            if value_range <= 0:
+                return 100.0
+            raw = value_range / 5.0
+            exponent = np.floor(np.log10(raw))
+            base = 10 ** exponent
+            for multiplier in (1, 2, 5, 10):
+                step = multiplier * base
+                if raw <= step:
+                    return float(step)
+            return float(base * 10)
+
+        step = nice_step(max(max_x - min_x, max_y - min_y))
+        grid_color = self.gui_manager.theme_colors.get('border', '#3f3f3f')
+        text_color = self.gui_manager.theme_colors.get('subtext', '#9a9a9a')
+
+        first_x = np.floor(min_x / step) * step
+        x = first_x
+        while x <= max_x + step:
+            canvas_x, _ = self.map_to_canvas(x, min_y)
+            if -20 <= canvas_x <= canvas_w + 20:
+                self.create_line(canvas_x, 0, canvas_x, canvas_h, fill=grid_color, width=1, dash=(2, 6), tags="grid")
+                self.create_text(canvas_x + 4, canvas_h - 8, text=f"{x:.0f}", fill=text_color, font=('Arial', 8), anchor='sw', tags="grid")
+            x += step
+
+        first_y = np.floor(min_y / step) * step
+        y = first_y
+        while y <= max_y + step:
+            _, canvas_y = self.map_to_canvas(min_x, y)
+            if -20 <= canvas_y <= canvas_h + 20:
+                self.create_line(0, canvas_y, canvas_w, canvas_y, fill=grid_color, width=1, dash=(2, 6), tags="grid")
+                self.create_text(4, canvas_y - 4, text=f"{y:.0f}", fill=text_color, font=('Arial', 8), anchor='sw', tags="grid")
+            y += step
     
     def _draw_collar(
         self,

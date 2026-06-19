@@ -5375,6 +5375,13 @@ class LoggingReviewDialog:
             color=self.gui_manager.theme_colors["accent_blue"],
             theme_colors=self.gui_manager.theme_colors,
         ).pack(side=tk.LEFT, padx=2)
+        ModernButton(
+            action_frame,
+            text="ML Classifier",
+            command=self._open_lithology_ml_training,
+            color=self.gui_manager.theme_colors["accent_blue"],
+            theme_colors=self.gui_manager.theme_colors,
+        ).pack(side=tk.LEFT, padx=2)
 
         ModernButton(
             action_frame,
@@ -8225,6 +8232,46 @@ class LoggingReviewDialog:
             )
 
 
+
+    def _open_lithology_ml_training(self):
+        """Open the lithology ML manifest/training dialog."""
+        if not self.all_images:
+            DialogHelper.show_message(
+                self.dialog,
+                "No Images",
+                "No compartment images are loaded yet.",
+                message_type="warning",
+            )
+            return
+
+        # Ensure consensus helpers can see peer reviews across the full image set.
+        if hasattr(self, "other_user_reviews"):
+            for img in self.all_images:
+                key = (img.hole_id, img.depth_from, img.depth_to)
+                img.other_reviews = self.other_user_reviews.get(key)
+
+        try:
+            from gui.lithology_ml_training_dialog import LithologyMLTrainingDialog
+
+            dialog = LithologyMLTrainingDialog(
+                parent=self.dialog,
+                gui_manager=self.gui_manager,
+                images=self.all_images,
+                item_manager=self.item_manager,
+                consensus_fn=self._get_consensus_classification,
+                metadata_fn=self._compute_review_metadata,
+                logger=self.logger,
+            )
+            dialog.show()
+            self._update_status("Opened lithology ML classifier trainer")
+        except Exception as e:
+            self.logger.error(f"Error opening lithology ML trainer: {e}", exc_info=True)
+            DialogHelper.show_message(
+                self.dialog,
+                "ML Trainer Error",
+                f"Failed to open lithology ML trainer:\n{str(e)}",
+                message_type="error",
+            )
 
     def _show_pdf_export(self):
         """Show PDF export dialog"""

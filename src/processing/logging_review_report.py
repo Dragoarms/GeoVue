@@ -1,7 +1,6 @@
 import io
 import logging
 import os
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -16,27 +15,28 @@ from reportlab.pdfgen import canvas
 from processing.DataManager.column_aliases import ColumnResolver
 from processing.DataManager.keys import ImageKey
 from reports.logging_review.data.columns import (
-    LOGGER_COLUMN_PRIORITY,
     resolve_chemistry_columns,
     resolve_drilldate_column,
     resolve_logger_column,
 )
 from reports.logging_review.data.outliers import (
-    _clr_transform,
+    _clr_transform,  # noqa: F401 - re-exported for existing tests/callers
     compute_hybrid_outlier_scores,
-    predict_most_likely_strat,
+    predict_most_likely_strat,  # noqa: F401 - re-exported for logging_review_html_report
 )
 from reports.logging_review.data.prep import (
+    _find_logger_source,
     _build_logging_interval_dataframe,
     _log_dataframe_overview,
     _merge_logger_by_overlap,
     _merge_rc_metrics_by_overlap,
     _resolve_logging_interval_columns,
     build_merged_qaqc_dataframe,
+    fill_empty_logger_values,
     filter_dataframe_by_logger_and_date,
     get_collar_dataframe,
-    get_logger_list_and_date_options,
-    prepare_logging_review_data,
+    get_logger_list_and_date_options,  # noqa: F401 - public facade for the GUI
+    prepare_logging_review_data,  # noqa: F401 - public facade for the GUI
 )
 
 logger = logging.getLogger(__name__)
@@ -124,6 +124,7 @@ def generate_logger_reports(
     top_n: int,
     page_options: Dict[str, bool],
     include_images: bool = True,
+    image_mode: str = "thumbnail",
     logo_path: Optional[str] = None,
     output_format: str = "PDF",
     prepped_data: Optional[Dict[str, Any]] = None,
@@ -398,6 +399,7 @@ def generate_logger_reports(
             top_n=top_n,
             page_options=page_options,
             include_images=include_images,
+            image_mode=image_mode,
             logo_path=logo_path,
             full_team_df=full_team_df,
         )
@@ -608,4 +610,3 @@ def _summarize_grouping_accuracy(df: pd.DataFrame, strat_col: str, chem_cols: Li
                 cv_exceeds += 1
         lines.append(f"- {element}: {cv_exceeds} / {total_groups} strat groups")
     return lines
-

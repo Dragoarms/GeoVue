@@ -277,141 +277,112 @@ class MainGUI:
         )
         self.processing_collapsible = processing_collapsible
 
-        # Input folder field
-        input_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
-        input_frame.pack(fill=tk.X, pady=(0, 5))
-
+        # Workflow actions run left-to-right in the order the operator uses them.
         self.folder_var = tk.StringVar()
-        folder_frame, self.folder_entry = self.gui_manager.create_field_with_label(
-            input_frame,
-            self.t("Input Folder:"),
-            self.folder_var,
-            field_type="entry",
-            validate_func=self._update_input_folder_color,
-            width=None,
+        processing_buttons_frame = ttk.Frame(
+            processing_collapsible.content_frame, style="Content.TFrame"
         )
+        processing_buttons_frame.pack(fill=tk.X, pady=(0, 8))
 
-        # Browse button in folder_frame
         browse_button = self.gui_manager.create_modern_button(
-            folder_frame,
+            processing_buttons_frame,
             text=self.t("Browse"),
             color="#5aa06c",
             command=self.browse_input_folder,
         )
-        browse_button.pack(side=tk.RIGHT, padx=(5, 0))
+        browse_button.pack(side=tk.LEFT, padx=(0, 5))
 
-        # Output settings
-        output_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
-        output_frame.pack(fill=tk.X, pady=2)
+        bulk_renamer_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Bulk Renamer"),
+            color=self.gui_manager.theme_colors["accent_green"],
+            command=self._open_bulk_renamer,
+            icon=None,
+        )
+        bulk_renamer_button.pack(side=tk.LEFT, padx=5)
 
-        # Local output
+        self.process_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Process Photos"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self.start_processing,
+            icon=None,
+        )
+        self.process_button.pack(side=tk.LEFT, padx=5)
+        primary_process_button = self.process_button
+
+        review_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Review Extracted Images"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._start_image_review,
+            icon=None,
+        )
+        review_button.pack(side=tk.LEFT, padx=5)
+
+        validate_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Calculate Image Properties"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._generate_image_properties,
+            icon=None,
+        )
+        validate_button.pack(side=tk.LEFT, padx=5)
+
+        sync_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Sync to Cloud"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._sync_to_cloud,
+            icon=None,
+        )
+        sync_button.pack(side=tk.LEFT, padx=5)
+
+        # Compact selected-folder display; Browse is the active control.
+        input_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
+        input_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(
+            input_frame,
+            text=self.t("Input Folder:"),
+            width=14,
+            anchor="w",
+            style="Content.TLabel",
+        ).pack(side=tk.LEFT)
+        self.folder_entry = self.gui_manager.create_entry_with_validation(
+            input_frame,
+            self.folder_var,
+            validate_func=self._update_input_folder_color,
+            width=72,
+        )
+        self.folder_entry.pack(side=tk.LEFT, padx=(0, 10))
+
+        # Keep the output path available for processing code without surfacing a
+        # redundant field in the operator workflow.
         self.output_folder_var = tk.StringVar(
             value=self.file_manager.dir_structure["local_output_folder"]
         )
-        output_folder_frame, output_entry = self.gui_manager.create_field_with_label(
-            output_frame,
-            self.t("Local Output:"),
-            self.output_folder_var,
-            readonly=True,
-            width=None,
-        )
 
-        # Info button
-        info_button = self.gui_manager.create_modern_button(
-            output_folder_frame,
-            text="[?]",
-            color=self.gui_manager.theme_colors["accent_blue"],
-            command=self._show_file_structure_info,
-        )
-        info_button.pack(side=tk.RIGHT, padx=(5, 0))
+        # Keep legacy processing settings available without surfacing obsolete
+        # output/debug controls in the main workflow.
+        self.format_var = tk.StringVar(value=self.config.get("output_format", "png"))
+        self.debug_var = tk.BooleanVar(value=self.config.get("save_debug_images", False))
 
-        # Output format
-        format_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
-        format_frame.pack(fill=tk.X, pady=2)
+        # Automatic batch mode is now the default. The checkbox is the explicit
+        # escape hatch for the old one-photo-at-a-time workflow.
+        manual_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
+        manual_frame.pack(fill=tk.X, pady=(4, 2))
 
-        format_label = ttk.Label(
-            format_frame,
-            text=self.t("Output Format:"),
-            anchor="w",
-            style="Content.TLabel",
-        )
-        format_label.pack(side=tk.LEFT)
-
-        format_combo_frame = tk.Frame(
-            format_frame,
-            bg=self.gui_manager.theme_colors["field_bg"],
-            highlightbackground=self.gui_manager.theme_colors["field_border"],
-            highlightthickness=1,
-            bd=0,
-        )
-        format_combo_frame.pack(side=tk.LEFT, padx=(5, 0))
-
-        self.format_var = tk.StringVar(value=self.config["output_format"])
-        format_options = ["tiff", "png"]
-
-        format_dropdown = tk.OptionMenu(
-            format_combo_frame, self.format_var, *format_options
-        )
-        self.gui_manager.style_dropdown(format_dropdown, width=6)
-        format_dropdown.pack()
-
-        # Debug images checkbox
-        debug_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
-        debug_frame.pack(fill=tk.X, pady=2)
-
-        self.debug_var = tk.BooleanVar(value=self.config["save_debug_images"])
-
-        debug_check = self.gui_manager.create_custom_checkbox(
-            debug_frame, text=self.t("Save Debug Images"), variable=self.debug_var
-        )
-        debug_check.pack(anchor="w")
-
-        # Auto-loop batch processing checkbox
-        auto_loop_frame = ttk.Frame(processing_collapsible.content_frame, style="Content.TFrame")
-        auto_loop_frame.pack(fill=tk.X, pady=2)
-
-        self.auto_loop_var = tk.BooleanVar(value=False)
-
-        auto_loop_check = self.gui_manager.create_custom_checkbox(
-            auto_loop_frame,
-            text=self.t("Auto-Loop Mode (Skip manual steps)"),
-            variable=self.auto_loop_var,
-            command=self._toggle_auto_loop_mode,
-        )
-        auto_loop_check.pack(anchor="w")
-
-        # Add info label for auto-loop mode
-        auto_info_label = ttk.Label(
-            auto_loop_frame,
-            text=self.t(
-                "   Automatically processes images with valid filename metadata"
-            ),
-            font=("Segoe UI", 8),
-            foreground=self.gui_manager.theme_colors["field_border"],
-            style="Content.TLabel",
-        )
-        auto_info_label.pack(anchor="w", padx=(20, 0))
-
-        # Auto-loop duplicate handling option
+        self.process_manually_var = tk.BooleanVar(value=False)
+        self.auto_loop_var = tk.BooleanVar(value=True)
         self.auto_skip_duplicates_var = tk.BooleanVar(value=False)
 
-        auto_skip_dup_check = self.gui_manager.create_custom_checkbox(
-            auto_loop_frame,
-            text=self.t("   Skip existing/duplicate intervals"),
-            variable=self.auto_skip_duplicates_var,
+        manual_check = self.gui_manager.create_custom_checkbox(
+            manual_frame,
+            text=self.t("Process Manually"),
+            variable=self.process_manually_var,
+            command=self._toggle_manual_processing_mode,
         )
-        auto_skip_dup_check.pack(anchor="w", padx=(20, 0))
-
-        skip_dup_info_label = ttk.Label(
-            auto_loop_frame,
-            text=self.t(
-                "      Uncheck to extract duplicates (e.g., wet/dry pairs) for manual selection"
-            ),
-            font=("Segoe UI", 8),
-            foreground=self.gui_manager.theme_colors["field_border"],
-            style="Content.TLabel",
-        )
-        skip_dup_info_label.pack(anchor="w", padx=(40, 0))
+        manual_check.pack(anchor="w")
 
         # Processing buttons row
         processing_buttons_frame = ttk.Frame(
@@ -419,11 +390,11 @@ class MainGUI:
         )
         processing_buttons_frame.pack(fill=tk.X, pady=(10, 5))
 
-        # Process Photos button (primary action)
+        # Process Photos button (used after the bulk rename/safety pass)
         self.process_button = self.gui_manager.create_modern_button(
             processing_buttons_frame,
             text=self.t("Process Photos"),
-            color=self.gui_manager.theme_colors["accent_green"],
+            color=self.gui_manager.theme_colors["accent_blue"],
             command=self.start_processing,
             icon="▶",
         )
@@ -433,7 +404,7 @@ class MainGUI:
         bulk_renamer_button = self.gui_manager.create_modern_button(
             processing_buttons_frame,
             text=self.t("Bulk Renamer"),
-            color=self.gui_manager.theme_colors["accent_blue"],
+            color=self.gui_manager.theme_colors["accent_green"],
             command=self._open_bulk_renamer,
             icon="✏",
         )
@@ -469,15 +440,12 @@ class MainGUI:
         )
         sync_button.pack(side=tk.LEFT, padx=5)
 
-        # Snowflake Pre-Load button
-        self._sf_preload_button = self.gui_manager.create_modern_button(
-            processing_buttons_frame,
-            text=self.t("Pre-Load Snowflake Data"),
-            color=self.gui_manager.theme_colors["accent_blue"],
-            command=self._start_snowflake_phase2,
-            icon="❄",
-        )
-        self._sf_preload_button.pack(side=tk.LEFT, padx=5)
+        # Hide the obsolete duplicate action row below; the workflow row above is
+        # now the only visible deck for image processing.
+        processing_buttons_frame.destroy()
+        self.process_button = primary_process_button
+
+        self._sf_preload_button = None
 
         # Create collapsible sections with the GUIManager
         # Shared Folder Path Settings
@@ -510,20 +478,10 @@ class MainGUI:
             cross_sections_dir and cross_sections_dir.exists()
         )
 
-        # Expand if any paths are missing
-        should_expand = not (
-            approved_path_exists
-            and processed_originals_exists
-            and drill_traces_exists
-            and register_path_exists
-            and datasets_folder_exists
-            and cross_sections_folder_exists
-        )
-
         shared_collapsible = self.gui_manager.create_collapsible_frame(
             self.content_frame,
             title=self.t("Shared Folder Settings"),
-            expanded=should_expand,
+            expanded=False,
         )
         self.shared_collapsible = shared_collapsible
         # Create variables for shared paths
@@ -743,6 +701,7 @@ class MainGUI:
         self.progress_var = status_components["progress_var"]
         self.progress_bar = status_components["progress_bar"]
         self.status_text = status_components["status_text"]
+        self.latest_status_var = status_components.get("latest_status_var")
 
         # Create footer buttons
         button_configs = [
@@ -963,7 +922,20 @@ class MainGUI:
         shared_open = hasattr(self, 'shared_collapsible') and self.shared_collapsible.expanded
         analysis_open = hasattr(self, 'analysis_collapsible') and self.analysis_collapsible.expanded
 
-        if processing_open:
+        if processing_open or shared_open or analysis_open:
+            # Once a workflow is open, the footer stops acting like a second
+            # action toolbar. Section-specific actions live inside the open
+            # panel; the footer remains a simple escape hatch.
+            button_configs = [
+                {
+                    "name": "quit_button",
+                    "text": self.t("Quit"),
+                    "color": accent_red,
+                    "command": self.quit_app,
+                    "icon": "âœ–",
+                },
+            ]
+        elif processing_open:
             # Show processing buttons
             button_configs = [
                 {
@@ -1070,6 +1042,10 @@ class MainGUI:
                     "icon": "✖",
                 },
             ]
+
+        for config in button_configs:
+            if config.get("name") == "quit_button":
+                config["icon"] = None
 
         # Create new button row
         self.button_row_frame, self.buttons = self.gui_manager.create_button_row(
@@ -1284,8 +1260,14 @@ class MainGUI:
                 pass
 
             # Instantiate the renamer inside the dialog (consistent theming/focus)
-            # Pass gui_manager for consistent theming
-            renamer = PhotoRenamerGUI(dialog, gui_manager=self.gui_manager)
+            # and hand through the already selected input folder when present.
+            initial_photo_folder = self.folder_var.get().strip() if hasattr(self, "folder_var") else ""
+            renamer = PhotoRenamerGUI(
+                dialog,
+                gui_manager=self.gui_manager,
+                initial_photo_folder=initial_photo_folder or None,
+                config=self.config,
+            )
 
             # Try to preload CSV via existing paths (silent fallback)
             # Look for drillhole_data.csv in the datasets folder
@@ -2082,6 +2064,9 @@ class MainGUI:
             status_type: Optional status type for formatting (error, warning, success, info)
         """
         try:
+            if hasattr(self, "latest_status_var") and self.latest_status_var is not None:
+                self.latest_status_var.set(str(message))
+
             # Check if status_text exists
             if not hasattr(self, "status_text") or self.status_text is None:
                 # Just log the message
@@ -2954,6 +2939,13 @@ class MainGUI:
                 message_type="error",
             )
 
+    def _toggle_manual_processing_mode(self):
+        """Keep the legacy auto-loop flag in sync with the manual checkbox."""
+        manual = bool(self.process_manually_var.get())
+        self.auto_loop_var.set(not manual)
+        mode = "manual" if manual else "automatic"
+        self.logger.info("Processing mode set to %s", mode)
+
     def _toggle_auto_loop_mode(self):
         """Handle auto-loop mode toggle"""
         if self.auto_loop_var.get():
@@ -2983,9 +2975,11 @@ class MainGUI:
         """Start processing in a scheduled manner on the main thread."""
         self.logger.debug("Entered start_processing()")
 
-        # Check if auto-loop mode is enabled
-        auto_loop_mode = (
-            self.auto_loop_var.get() if hasattr(self, "auto_loop_var") else False
+        # Automatic batch mode is the default; manual mode is an explicit opt-in.
+        auto_loop_mode = not (
+            self.process_manually_var.get()
+            if hasattr(self, "process_manually_var")
+            else False
         )
 
         folder_path = self.folder_var.get()
@@ -3291,7 +3285,7 @@ class MainGUI:
                         "is loaded yet.\n\n"
                         "Either:\n"
                         "• Configure CSV files in the Drillhole Datasets folder, or\n"
-                        "• Click 'Pre-Load Snowflake Data' to load from Snowflake."
+                        "• Wait for Snowflake data to finish loading in the background."
                     )
             DialogHelper.show_message(
                 self.root,
@@ -3503,7 +3497,7 @@ class MainGUI:
                     self.root,
                     self.t("No Collar Data"),
                     self.t("No collar data available.\n\n"
-                           "Click 'Pre-Load Snowflake Data' to load live collar data, "
+                           "Wait for live Snowflake collar data to finish loading, "
                            "or ensure 'excollar.csv' (or a collar dataset with HOLEID, X, Y columns) "
                            "is in the 'Drillhole Datasets' folder."),
                     message_type="error",
@@ -3587,12 +3581,9 @@ class MainGUI:
             # Import batch processor
             from processing.batch_processor import BatchProcessor
 
-            # Get duplicate handling preference
-            skip_duplicates = (
-                self.auto_skip_duplicates_var.get()
-                if hasattr(self, "auto_skip_duplicates_var")
-                else False
-            )
+            # Keep duplicates available for wet/dry conflict screening instead
+            # of silently skipping intervals.
+            skip_duplicates = False
 
             # Create batch processor instance
             batch_processor = BatchProcessor(
@@ -3739,6 +3730,8 @@ class MainGUI:
 
                 if review_skipped and batch_processor and batch_processor.skipped_files:
                     # Switch to manual mode for skipped files
+                    if hasattr(self, "process_manually_var"):
+                        self.process_manually_var.set(True)
                     self.auto_loop_var.set(False)
                     self.files_to_process = batch_processor.skipped_files
                     self.current_file_index = 0
@@ -4540,8 +4533,8 @@ class MainGUI:
             text, color = state_map.get(state, ("⚪ Snowflake", tc["subtext"]))
             self._sf_badge.config(text=text, fg=color)
 
-            # Enable/disable pre-load button based on state
-            if hasattr(self, "_sf_preload_button"):
+            # Legacy button may be absent; Snowflake now loads in the background.
+            if getattr(self, "_sf_preload_button", None) is not None:
                 loading_states = {SessionState.CONNECTING, SessionState.PHASE1_LOADING, SessionState.PHASE2_LOADING}
                 btn_state = "disabled" if state in loading_states else "normal"
                 try:
@@ -4658,7 +4651,7 @@ class MainGUI:
     def _start_snowflake_phase2(self, force_refresh: bool = False, silent: bool = False) -> None:
         """
         Launch Snowflake Phase 2 (all geological tables) with a progress dialog.
-        Called from the "Pre-Load Snowflake Data" button or automatically after Phase 1.
+        Called automatically after Snowflake Phase 1.
 
         Args:
             force_refresh: If True, skip cache and re-fetch from Snowflake.

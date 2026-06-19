@@ -19,6 +19,7 @@ from gui.DrillholeCorrelation.correlation_models import (
     CorrelationSession,
     TieLine,
     DepthTransform,
+    StretchRegion,
     TieLineType
 )
 
@@ -185,6 +186,8 @@ class CorrelationDialog(tk.Toplevel):
         # Moisture preference for image display (Wet/Dry toggle)
         self.moisture_preference = "Dry"  # Default to Dry images
         self.graphs_collapsed = False
+        self._viz_refresh_after_id: Optional[str] = None
+        self._viz_refresh_generation = 0
 
         # Build UI
         self._create_ui()
@@ -451,6 +454,9 @@ class CorrelationDialog(tk.Toplevel):
         self.canvas.bind("<Control-Button-4>", self._on_zoom)  # Linux zoom in
         self.canvas.bind("<Control-Button-5>", self._on_zoom)  # Linux zoom out
         self.canvas.bind("<Motion>", self._on_mouse_motion)  # Track cursor for zoom window
+        self.canvas.bind("<ButtonPress-2>", self._on_pan_start)
+        self.canvas.bind("<B2-Motion>", self._on_pan_drag)
+        self.canvas.bind("<ButtonRelease-2>", self._on_pan_end)
         
         # Create tie line overlay canvas
         self._create_tie_line_overlay()
@@ -652,6 +658,48 @@ class CorrelationDialog(tk.Toplevel):
             self._update_zoom_window_position()
 
         self._load_visible_thumbnails_for_all()
+
+    def _event_main_canvas_xy(self, event: tk.Event) -> Tuple[int, int]:
+        """Translate any child-widget event to main canvas coordinates."""
+        return (
+            int(event.x_root - self.canvas.winfo_rootx()),
+            int(event.y_root - self.canvas.winfo_rooty()),
+        )
+
+    def _on_pan_start(self, event: tk.Event) -> str:
+        """Start middle-button panning on the correlation canvas."""
+        x, y = self._event_main_canvas_xy(event)
+        self.canvas.scan_mark(x, y)
+        self.canvas.config(cursor="fleur")
+        return "break"
+
+    def _on_pan_drag(self, event: tk.Event) -> str:
+        """Pan the correlation canvas using middle-button drag."""
+        x, y = self._event_main_canvas_xy(event)
+        self.canvas.scan_dragto(x, y, gain=1)
+        if self.zoom_window_visible:
+            self._update_zoom_window_position()
+        self._load_visible_thumbnails_for_all()
+        return "break"
+
+    def _on_pan_end(self, event: tk.Event) -> str:
+        """End middle-button panning."""
+        self.canvas.config(cursor="")
+        self._load_visible_thumbnails_for_all()
+        return "break"
+
+    def _forward_column_mousewheel(self, event: tk.Event) -> str:
+        """Route wheel events from child drillhole widgets to the main canvas."""
+        if getattr(event, "state", 0) & 0x0004:
+            self._on_zoom(event)
+        else:
+            self._on_mousewheel(event)
+        return "break"
+
+    def _forward_column_zoom(self, event: tk.Event) -> str:
+        """Route ctrl-wheel events from child drillhole widgets to main zoom."""
+        self._on_zoom(event)
+        return "break"
 
     def _on_vertical_scrollbar(self, *args) -> None:
         """Handle vertical scrollbar movement and refresh lazy thumbnails."""
@@ -867,6 +915,7 @@ class CorrelationDialog(tk.Toplevel):
             
             # Enable column dragging for vertical positioning
             self._bind_column_drag(hole_id, column_widget)
+            self._bind_column_view_navigation(column_widget)
             
             # Force geometry update so canvas window knows widget size
             column_widget.update_idletasks()
@@ -956,7 +1005,7 @@ class CorrelationDialog(tk.Toplevel):
                 self.drag_mode = None
                 header_frame.config(cursor="")
                 
-                # Auto-snap to grid positions for cleaner layout
+                # Resolve overlap after a drag without pulling deliberate gaps left.
                 self._snap_columns_to_grid()
                 
                 logger.info(f"Final X position for {hole_id}: {self.column_positions[hole_id][0]}")
@@ -1015,16 +1064,44 @@ class CorrelationDialog(tk.Toplevel):
                 widget.config(cursor="")
                 logger.info(f"Final stratigraphic Y position for {hole_id}: {self.column_positions[hole_id][1]}")
         
-        # Bind header for horizontal reordering
-        header_frame.bind("<ButtonPress-1>", on_header_press)
-        header_frame.bind("<B1-Motion>", on_header_drag)
-        header_frame.bind("<ButtonRelease-1>", on_header_release)
+        # Bind header and its text child so dragging works when starting on the
+        # visible hole label. Keep the lock button reserved for lock toggling.
+        drag_handles = [header_frame]
+        drag_handles.extend(header_frame.winfo_children())
+        lock_btn = getattr(widget, "lock_btn", None)
+        for handle in drag_handles:
+            if handle is lock_btn:
+                continue
+            handle.bind("<ButtonPress-1>", on_header_press)
+            handle.bind("<B1-Motion>", on_header_drag)
+            handle.bind("<ButtonRelease-1>", on_header_release)
         
         # Bind canvas area for vertical stratigraphic positioning
         if hasattr(widget, 'canvas'):
             widget.canvas.bind("<ButtonPress-1>", on_body_press, add="+")
             widget.canvas.bind("<B1-Motion>", on_body_drag, add="+")
             widget.canvas.bind("<ButtonRelease-1>", on_body_release, add="+")
+
+    def _bind_column_view_navigation(self, widget: tk.Widget) -> None:
+        """Forward wheel, ctrl-wheel, and middle-drag from a column to the main view."""
+        def iter_widgets(root: tk.Widget):
+            yield root
+            for child in root.winfo_children():
+                yield from iter_widgets(child)
+
+        for child in iter_widgets(widget):
+            try:
+                child.bind("<MouseWheel>", self._forward_column_mousewheel, add="+")
+                child.bind("<Button-4>", self._forward_column_mousewheel, add="+")
+                child.bind("<Button-5>", self._forward_column_mousewheel, add="+")
+                child.bind("<Control-MouseWheel>", self._forward_column_zoom, add="+")
+                child.bind("<Control-Button-4>", self._forward_column_zoom, add="+")
+                child.bind("<Control-Button-5>", self._forward_column_zoom, add="+")
+                child.bind("<ButtonPress-2>", self._on_pan_start, add="+")
+                child.bind("<B2-Motion>", self._on_pan_drag, add="+")
+                child.bind("<ButtonRelease-2>", self._on_pan_end, add="+")
+            except tk.TclError:
+                logger.debug("Could not bind navigation events on a column child", exc_info=True)
 
     def _prepare_viz_columns_for_display(
         self,
@@ -1066,6 +1143,91 @@ class CorrelationDialog(tk.Toplevel):
                 )
                 self._refresh_column_window_size(hole_id)
 
+    def _cancel_pending_viz_refresh(self) -> None:
+        """Cancel a queued async viz refresh, if one is waiting."""
+        after_id = getattr(self, "_viz_refresh_after_id", None)
+        if after_id:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+            self._viz_refresh_after_id = None
+
+    def _refresh_viz_columns_for_all_widgets_async(
+        self,
+        on_complete: Optional[Any] = None,
+    ) -> None:
+        """Reapply viz settings one widget at a time to keep Tk responsive."""
+        self._cancel_pending_viz_refresh()
+        self._viz_refresh_generation += 1
+        generation = self._viz_refresh_generation
+        hole_ids = list(self.column_widgets.keys())
+        total = len(hole_ids)
+
+        if not hole_ids:
+            if on_complete:
+                on_complete()
+            return
+
+        if hasattr(self, "status_label"):
+            self.status_label.config(text=self.translator.translate("Updating graphs..."))
+
+        def finish() -> None:
+            self._viz_refresh_after_id = None
+            if generation != self._viz_refresh_generation:
+                return
+            if on_complete:
+                on_complete()
+            if hasattr(self, "status_label"):
+                self.status_label.config(text=self.translator.translate("Graphs updated"))
+
+        def refresh_next(index: int, display_viz_columns: List[Dict[str, Any]]) -> None:
+            self._viz_refresh_after_id = None
+            if generation != self._viz_refresh_generation:
+                return
+            if index >= total:
+                finish()
+                return
+
+            hole_id = hole_ids[index]
+            widget = self.column_widgets.get(hole_id)
+            if widget and hasattr(widget, "update_viz_columns"):
+                try:
+                    widget.update_viz_columns(
+                        display_viz_columns,
+                        show_data_viz=not self.graphs_collapsed,
+                    )
+                    self._refresh_column_window_size(hole_id)
+                except Exception as e:
+                    logger.error(f"Error refreshing graph columns for {hole_id}: {e}", exc_info=True)
+
+            if hasattr(self, "status_label"):
+                self.status_label.config(
+                    text=self.translator.translate(
+                        f"Updating graphs {min(index + 1, total)}/{total}..."
+                    )
+                )
+
+            try:
+                self._viz_refresh_after_id = self.after(
+                    1,
+                    lambda: refresh_next(index + 1, display_viz_columns),
+                )
+            except Exception:
+                refresh_next(index + 1, display_viz_columns)
+
+        def start_refresh() -> None:
+            self._viz_refresh_after_id = None
+            if generation != self._viz_refresh_generation:
+                return
+            display_viz_columns = self._prepare_viz_columns_for_display(self.session.viz_columns)
+            refresh_next(0, display_viz_columns)
+
+        try:
+            self._viz_refresh_after_id = self.after_idle(start_refresh)
+        except Exception:
+            start_refresh()
+
     def _refresh_column_window_size(self, hole_id: str) -> None:
         """Sync a canvas window to its drillhole widget's current dimensions."""
         widget = self.column_widgets.get(hole_id)
@@ -1076,6 +1238,24 @@ class CorrelationDialog(tk.Toplevel):
         width = widget.get_total_width() if hasattr(widget, "get_total_width") else self.column_width
         height = widget.get_total_height() if hasattr(widget, "get_total_height") else 1000
         self.canvas.itemconfigure(window_id, width=width, height=height)
+
+    def _get_column_layout_width(self, hole_id: str) -> int:
+        """Return the current canvas-space width used for horizontal layout."""
+        widget = self.column_widgets.get(hole_id)
+        if widget and hasattr(widget, "get_total_width"):
+            try:
+                return max(1, int(widget.get_total_width()))
+            except Exception:
+                logger.debug(f"Could not read width for {hole_id}", exc_info=True)
+        return max(1, int(self.column_width))
+
+    def _sync_column_window_position(self, hole_id: str) -> None:
+        """Move the canvas window to the stored position."""
+        window_id = self.column_windows.get(hole_id)
+        if not window_id:
+            return
+        x, y = self.column_positions.get(hole_id, (0, 0))
+        self.canvas.coords(window_id, x, y)
 
     def _refresh_all_column_window_sizes(self) -> None:
         """Sync all drillhole canvas windows after display setting changes."""
@@ -1092,41 +1272,31 @@ class CorrelationDialog(tk.Toplevel):
         self._load_visible_thumbnails_for_all()
     
     def _snap_columns_to_grid(self) -> None:
-        """Auto-snap columns to grid positions with zoom-adjusted spacing."""
+        """Prevent horizontal overlap while preserving user-chosen X positions."""
         if not self.column_positions:
             return
         
-        # Sort columns by current X position
+        # Sort by current X so dragging a column past another changes the order.
         sorted_columns = sorted(
             self.column_positions.items(),
-            key=lambda item: item[1][0]  # Sort by X position
+            key=lambda item: item[1][0]
         )
         
-        # Calculate zoom-adjusted spacing accounting for actual widget widths
-        zoomed_spacing = int(self.column_spacing * self.zoom_level)
-        
-        # Reassign X positions with consistent spacing
-        x_position = int(50 * self.zoom_level)  # Starting X scaled by zoom
+        spacing = max(0, int(self.column_spacing))
+        min_x = 0
+        right_edge = min_x
         
         for hole_id, (old_x, y) in sorted_columns:
-            self.column_positions[hole_id] = (x_position, y)
-            
-            # Update canvas window
-            if hole_id in self.column_windows:
-                self.canvas.coords(self.column_windows[hole_id], x_position, y)
-                self._refresh_column_window_size(hole_id)
-            
-            # Get actual widget width (including data columns)
-            if hole_id in self.column_widgets:
-                widget = self.column_widgets[hole_id]
-                actual_width = widget.get_total_width() if hasattr(widget, 'get_total_width') else self.column_width
-                zoomed_widget_width = int(actual_width * self.zoom_level)
-            else:
-                zoomed_widget_width = int(self.column_width * self.zoom_level)
-            
-            x_position += zoomed_widget_width + zoomed_spacing
-            logger.debug(f"Snapped {hole_id} to X={x_position - zoomed_widget_width - zoomed_spacing}, width={zoomed_widget_width}")
-        
+            width = self._get_column_layout_width(hole_id)
+            new_x = max(min_x, int(old_x), right_edge)
+            self.column_positions[hole_id] = (new_x, y)
+            self._refresh_column_window_size(hole_id)
+            self._sync_column_window_position(hole_id)
+            right_edge = new_x + width + spacing
+            logger.debug(f"Positioned {hole_id} at X={new_x}, width={width}")
+
+        self.next_x_position = right_edge
+
         # Update scroll region
         self._update_scroll_region()
     
@@ -1197,9 +1367,8 @@ class CorrelationDialog(tk.Toplevel):
                 # Get actual column height
                 column_height = widget.get_total_height() if hasattr(widget, 'get_total_height') else 1000
                 column_width = widget.get_total_width() if hasattr(widget, 'get_total_width') else self.column_width
-                zoomed_width = int(column_width * self.zoom_level)
                 
-                max_x = max(max_x, x + zoomed_width + 100)  # Add padding
+                max_x = max(max_x, x + column_width + 100)  # Add padding
                 max_y = max(max_y, y + column_height + 100)  # Add padding
         
         # Set scroll region with some extra space
@@ -1513,16 +1682,19 @@ class CorrelationDialog(tk.Toplevel):
             """Callback when settings are saved."""
             logger.info(f"Updating viz columns for all drillholes: {len(viz_columns)} columns")
             self.session.viz_columns = [dict(config) for config in viz_columns]
-            
-            # Update all column widgets.
-            self._refresh_viz_columns_for_all_widgets()
-            
-            # Re-snap columns to account for width changes
-            if self.zoom_window_visible and self.zoom_window and hasattr(self.zoom_window, "refresh_layout"):
-                self.zoom_window.refresh_layout()
 
-            self._snap_columns_to_grid()
-            self._update_scroll_region()
+            def finish_refresh() -> None:
+                # Re-snap columns to account for width changes
+                if self.zoom_window_visible and self.zoom_window and hasattr(self.zoom_window, "refresh_layout"):
+                    self.zoom_window.refresh_layout()
+
+                self._snap_columns_to_grid()
+                self._update_scroll_region()
+                self._load_visible_thumbnails_for_all()
+
+            # Update all column widgets after the settings dialog has closed,
+            # one at a time, so Tk can process paint/input events between holes.
+            self._refresh_viz_columns_for_all_widgets_async(finish_refresh)
         
         # Get columns grouped by source from data manager
         columns_by_source = {}
@@ -1576,13 +1748,15 @@ class CorrelationDialog(tk.Toplevel):
         )
     
     def _show_stretch_dialog(self) -> None:
-        """Show stretch/compress dialog."""
+        """Show an interactive stretch/compress profile editor."""
         logger.info("Opening stretch/compress dialog")
 
-        from gui.DrillholeCorrelation.thickness import (
-            ThicknessBand,
-            summarise_thickness_bands,
-        )
+        if not self.column_widgets:
+            self.dialog_helper.show_info(
+                self.translator.translate("Stretch/Compress"),
+                self.translator.translate("Add at least one drillhole column first.")
+            )
+            return
 
         selected_hole = ""
         default_from = 0.0
@@ -1602,13 +1776,20 @@ class CorrelationDialog(tk.Toplevel):
         dialog.title(self.translator.translate("Stretch/Compress"))
         dialog.configure(bg=self.theme_colors["background"])
         dialog.transient(self)
+        dialog.geometry("860x640")
 
-        body = tk.Frame(dialog, bg=self.theme_colors["background"], padx=12, pady=12)
+        body = tk.Frame(dialog, bg=self.theme_colors["background"], padx=14, pady=14)
         body.pack(fill="both", expand=True)
 
         hole_ids = list(self.column_widgets.keys())
         hole_var = tk.StringVar(value=selected_hole or (hole_ids[0] if hole_ids else "manual"))
+        scale_var = tk.DoubleVar(value=1.0)
+        selected_band = tk.IntVar(value=0)
         status_var = tk.StringVar(value="")
+        row_entries: List[Dict[str, Any]] = []
+        anchor_depths: List[float] = []
+        band_scales: List[float] = []
+        drag_anchor_index: Optional[int] = None
 
         top_row = tk.Frame(body, bg=self.theme_colors["background"])
         top_row.pack(fill="x", pady=(0, 8))
@@ -1631,37 +1812,73 @@ class CorrelationDialog(tk.Toplevel):
                 padx=8,
             ).pack(side="left")
 
-        table_frame = tk.Frame(body, bg=self.theme_colors["background"])
-        table_frame.pack(fill="both", expand=True)
+        editor_row = tk.Frame(body, bg=self.theme_colors["background"])
+        editor_row.pack(fill="both", expand=True)
 
-        totals_frame = tk.Frame(body, bg=self.theme_colors["background"])
-        totals_frame.pack(fill="x", pady=(8, 4))
-        total_apparent_var = tk.StringVar(value="")
-        total_true_var = tk.StringVar(value="")
-        total_scale_var = tk.StringVar(value="")
+        editor_panel = tk.Frame(
+            editor_row,
+            bg=self.theme_colors["field_bg"],
+            highlightbackground=self.theme_colors["border"],
+            highlightthickness=1,
+        )
+        editor_panel.pack(side="left", fill="both", expand=True, padx=(0, 10))
 
-        for label, var in [
-            ("Total apparent", total_apparent_var),
-            ("Total true", total_true_var),
-            ("Profile scale", total_scale_var),
-        ]:
-            tk.Label(
-                totals_frame,
-                text=self.translator.translate(label),
-                bg=self.theme_colors["background"],
-                fg=self.theme_colors["subtext"],
-                font=self.fonts["small"],
-            ).pack(side="left", padx=(0, 4))
-            tk.Label(
-                totals_frame,
-                textvariable=var,
-                bg=self.theme_colors["field_bg"],
-                fg=self.theme_colors["text"],
-                font=self.fonts["small"],
-                padx=6,
-                width=10,
-                anchor="w",
-            ).pack(side="left", padx=(0, 10))
+        editor_canvas = tk.Canvas(
+            editor_panel,
+            bg=self.theme_colors["field_bg"],
+            highlightthickness=0,
+            width=360,
+            height=520,
+        )
+        editor_canvas.pack(fill="both", expand=True, padx=10, pady=10)
+
+        control_panel = tk.Frame(
+            editor_row,
+            bg=self.theme_colors["background"],
+            width=390,
+        )
+        control_panel.pack(side="right", fill="both")
+        control_panel.pack_propagate(False)
+
+        selected_label = tk.StringVar(value="")
+        tk.Label(
+            control_panel,
+            textvariable=selected_label,
+            bg=self.theme_colors["background"],
+            fg=self.theme_colors["text"],
+            font=self.fonts["label"],
+            anchor="w",
+        ).pack(fill="x", pady=(0, 6))
+
+        scale_frame = tk.Frame(control_panel, bg=self.theme_colors["background"])
+        scale_frame.pack(fill="x", pady=(0, 8))
+        tk.Label(
+            scale_frame,
+            text=self.translator.translate("Band Scale"),
+            bg=self.theme_colors["background"],
+            fg=self.theme_colors["subtext"],
+            font=self.fonts["small"],
+        ).pack(anchor="w")
+        ttk.Scale(
+            scale_frame,
+            from_=0.25,
+            to=2.5,
+            variable=scale_var,
+            command=lambda _value: on_scale_changed(),
+        ).pack(fill="x")
+
+        scale_hint = tk.Label(
+            scale_frame,
+            text=self.translator.translate("0.25 compresses, 1.00 unchanged, 2.50 stretches"),
+            bg=self.theme_colors["background"],
+            fg=self.theme_colors["subtext"],
+            font=self.fonts["small"],
+            anchor="w",
+        )
+        scale_hint.pack(fill="x", pady=(2, 0))
+
+        table_frame = tk.Frame(control_panel, bg=self.theme_colors["background"])
+        table_frame.pack(fill="both", expand=True, pady=(4, 8))
 
         status_label = tk.Label(
             body,
@@ -1674,33 +1891,75 @@ class CorrelationDialog(tk.Toplevel):
         )
         status_label.pack(fill="x", pady=(2, 8))
 
-        row_vars: List[Dict[str, Any]] = []
+        def get_hole_depth_range(hole_id: str) -> Tuple[float, float]:
+            widget = self.column_widgets.get(hole_id)
+            if widget and widget.intervals:
+                return (
+                    float(min(interval.depth_from for interval in widget.intervals)),
+                    float(max(interval.depth_to for interval in widget.intervals)),
+                )
+            return default_from, default_to
 
-        def parse_bands(update_rows: bool = False) -> List[ThicknessBand]:
-            bands: List[ThicknessBand] = []
-            for row in row_vars:
-                if update_rows:
-                    row["true"].set("")
-                    row["factor"].set("")
-                    row["scale"].set("")
-                depth_from = row["from"].get().strip()
-                depth_to = row["to"].get().strip()
-                dip = row["dip"].get().strip()
-                if not depth_from and not depth_to and not dip:
+        def load_profile_for_hole() -> None:
+            nonlocal anchor_depths, band_scales
+            hole_id = hole_var.get().strip()
+            depth_min, depth_max = get_hole_depth_range(hole_id)
+            profile = self.thickness_profiles.get(hole_id, [])
+            anchors: List[float] = []
+            scales: List[float] = []
+
+            for band in profile:
+                start = band.get("depth_from", band.get("from"))
+                end = band.get("depth_to", band.get("to"))
+                scale = band.get("scale_factor", band.get("stretch_scale", 1.0))
+                if start is None or end is None:
                     continue
-                band = ThicknessBand(depth_from, depth_to, dip)
-                if update_rows:
-                    row["true"].set(f"{band.true_thickness:.3f}")
-                    row["factor"].set(f"{band.apparent_factor:.3f}x")
-                    row["scale"].set(f"{band.stretch_scale:.3f}")
-                bands.append(band)
-            return bands
+                if not anchors:
+                    anchors.append(float(start))
+                anchors.append(float(end))
+                scales.append(float(scale))
+
+            if len(anchors) < 2:
+                if self.selected_region and self.selected_region[0] == hole_id:
+                    anchors = [float(self.selected_region[1]), float(self.selected_region[2])]
+                else:
+                    anchors = [depth_min, depth_max]
+                scales = [1.0]
+
+            anchor_depths = anchors
+            band_scales = scales
+            normalise_profile(depth_min, depth_max)
+            selected_band.set(0)
+            sync_scale_from_selection()
+            render_all()
+
+        def normalise_profile(depth_min: Optional[float] = None, depth_max: Optional[float] = None) -> None:
+            if depth_min is None or depth_max is None:
+                depth_min, depth_max = get_hole_depth_range(hole_var.get().strip())
+            pairs = sorted((float(depth), idx) for idx, depth in enumerate(anchor_depths))
+            sorted_anchors: List[float] = []
+            for depth, _idx in pairs:
+                depth = max(depth_min, min(depth_max, depth))
+                if not sorted_anchors or abs(depth - sorted_anchors[-1]) >= 0.01:
+                    sorted_anchors.append(depth)
+            if len(sorted_anchors) < 2:
+                sorted_anchors = [depth_min, depth_max]
+
+            old_scales = list(band_scales) or [1.0]
+            anchor_depths[:] = sorted_anchors
+            band_scales[:] = [
+                max(0.05, min(10.0, float(old_scales[min(i, len(old_scales) - 1)])))
+                for i in range(len(anchor_depths) - 1)
+            ]
+            if selected_band.get() >= len(band_scales):
+                selected_band.set(max(0, len(band_scales) - 1))
 
         def render_rows() -> None:
+            row_entries.clear()
             for child in table_frame.winfo_children():
                 child.destroy()
 
-            headers = ["From", "To", "Dip", "True", "Factor", "Scale"]
+            headers = ["From", "To", "Scale"]
             for col, header in enumerate(headers):
                 tk.Label(
                     table_frame,
@@ -1710,95 +1969,317 @@ class CorrelationDialog(tk.Toplevel):
                     font=self.fonts["small"],
                 ).grid(row=0, column=col, sticky="ew", padx=2, pady=(0, 4))
 
-            for idx, row in enumerate(row_vars, start=1):
-                ttk.Entry(table_frame, textvariable=row["from"], width=9).grid(row=idx, column=0, padx=2, pady=2)
-                ttk.Entry(table_frame, textvariable=row["to"], width=9).grid(row=idx, column=1, padx=2, pady=2)
-                ttk.Entry(table_frame, textvariable=row["dip"], width=9).grid(row=idx, column=2, padx=2, pady=2)
-                for col, key in enumerate(["true", "factor", "scale"], start=3):
-                    tk.Label(
-                        table_frame,
-                        textvariable=row[key],
-                        bg=self.theme_colors["field_bg"],
-                        fg=self.theme_colors["text"],
-                        font=self.fonts["small"],
-                        width=9,
-                        anchor="w",
-                        padx=4,
-                    ).grid(row=idx, column=col, sticky="ew", padx=2, pady=2)
+            for idx, scale in enumerate(band_scales):
+                row = {
+                    "from": tk.StringVar(value=f"{anchor_depths[idx]:.2f}"),
+                    "to": tk.StringVar(value=f"{anchor_depths[idx + 1]:.2f}"),
+                    "scale": tk.StringVar(value=f"{scale:.2f}"),
+                }
+                row_entries.append(row)
+                ttk.Entry(table_frame, textvariable=row["from"], width=9).grid(row=idx + 1, column=0, padx=2, pady=2)
+                ttk.Entry(table_frame, textvariable=row["to"], width=9).grid(row=idx + 1, column=1, padx=2, pady=2)
+                ttk.Entry(table_frame, textvariable=row["scale"], width=9).grid(row=idx + 1, column=2, padx=2, pady=2)
 
             for col in range(len(headers)):
-                table_frame.columnconfigure(col, weight=1 if col in (0, 1, 2) else 0)
+                table_frame.columnconfigure(col, weight=1)
 
-        def recalculate(*_args: Any) -> None:
+        def update_from_table() -> bool:
             try:
-                bands = parse_bands(update_rows=True)
-                summary = summarise_thickness_bands(bands)
+                new_anchors: List[float] = []
+                new_scales: List[float] = []
+                for idx, row in enumerate(row_entries):
+                    start = float(row["from"].get())
+                    end = float(row["to"].get())
+                    scale = float(row["scale"].get())
+                    if end <= start:
+                        raise ValueError("Each band must end deeper than it starts.")
+                    if idx == 0:
+                        new_anchors.append(start)
+                    elif abs(new_anchors[-1] - start) > 0.01:
+                        new_anchors.append(start)
+                    new_anchors.append(end)
+                    new_scales.append(scale)
             except Exception as exc:
-                total_apparent_var.set("")
-                total_true_var.set("")
-                total_scale_var.set("")
                 status_var.set(str(exc))
-                return
+                return False
 
-            total_apparent_var.set(f"{summary['total_apparent']:.3f} m")
-            total_true_var.set(f"{summary['total_true']:.3f} m")
-            total_scale_var.set(f"{summary['stretch_scale']:.3f}")
+            anchor_depths[:] = new_anchors
+            band_scales[:] = new_scales
+            normalise_profile()
             status_var.set("")
+            sync_scale_from_selection()
+            render_all()
+            return True
 
-        def add_band(depth_from: float, depth_to: float, dip: float = 60.0) -> None:
-            row = {
-                "from": tk.StringVar(value=f"{depth_from:.2f}"),
-                "to": tk.StringVar(value=f"{depth_to:.2f}"),
-                "dip": tk.StringVar(value=f"{dip:.1f}"),
-                "true": tk.StringVar(value=""),
-                "factor": tk.StringVar(value=""),
-                "scale": tk.StringVar(value=""),
-            }
-            for key in ("from", "to", "dip"):
-                row[key].trace_add("write", recalculate)
-            row_vars.append(row)
-            render_rows()
-            recalculate()
+        def y_for_depth(depth: float) -> float:
+            depth_min, depth_max = get_hole_depth_range(hole_var.get().strip())
+            canvas_h = max(260, editor_canvas.winfo_height())
+            top = 34
+            bottom = canvas_h - 34
+            if depth_max <= depth_min:
+                return top
+            fraction = (float(depth) - depth_min) / (depth_max - depth_min)
+            return top + fraction * (bottom - top)
 
-        def add_next_band() -> None:
-            if row_vars:
-                start = float(row_vars[-1]["to"].get())
-                width = max(1.0, abs(float(row_vars[-1]["to"].get()) - float(row_vars[-1]["from"].get())))
-                dip = float(row_vars[-1]["dip"].get())
+        def depth_for_y(y: float) -> float:
+            depth_min, depth_max = get_hole_depth_range(hole_var.get().strip())
+            canvas_h = max(260, editor_canvas.winfo_height())
+            top = 34
+            bottom = canvas_h - 34
+            fraction = (max(top, min(bottom, float(y))) - top) / max(1, bottom - top)
+            return depth_min + fraction * (depth_max - depth_min)
+
+        def render_editor() -> None:
+            editor_canvas.delete("all")
+            canvas_w = max(240, editor_canvas.winfo_width())
+            track_x = canvas_w * 0.42
+            preview_x = canvas_w * 0.68
+            track_w = 42
+            depth_min, depth_max = get_hole_depth_range(hole_var.get().strip())
+            top_y = y_for_depth(depth_min)
+            bottom_y = y_for_depth(depth_max)
+
+            editor_canvas.create_line(
+                track_x, top_y, track_x, bottom_y,
+                fill=self.theme_colors["border"],
+                width=3,
+            )
+            editor_canvas.create_line(
+                preview_x, top_y, preview_x, bottom_y,
+                fill=self.theme_colors["border"],
+                width=1,
+                dash=(3, 3),
+            )
+
+            for idx, scale in enumerate(band_scales):
+                y1 = y_for_depth(anchor_depths[idx])
+                y2 = y_for_depth(anchor_depths[idx + 1])
+                color = self.theme_colors["accent_green"] if scale >= 1.0 else self.theme_colors["accent_red"]
+                if idx == selected_band.get():
+                    outline = self.theme_colors["accent_blue"]
+                    width = 3
+                else:
+                    outline = self.theme_colors["border"]
+                    width = 1
+                editor_canvas.create_rectangle(
+                    track_x - track_w / 2,
+                    y1,
+                    track_x + track_w / 2,
+                    y2,
+                    fill=color,
+                    stipple="gray50",
+                    outline=outline,
+                    width=width,
+                    tags=(f"band_{idx}", "band"),
+                )
+                preview_height = max(2.0, (y2 - y1) * scale)
+                editor_canvas.create_rectangle(
+                    preview_x - 16,
+                    y1,
+                    preview_x + 16,
+                    y1 + preview_height,
+                    fill=color,
+                    stipple="gray50",
+                    outline="",
+                )
+                editor_canvas.create_text(
+                    track_x - 34,
+                    (y1 + y2) / 2,
+                    text=f"{scale:.2f}x",
+                    fill=self.theme_colors["text"],
+                    font=self.fonts["small"],
+                    anchor="e",
+                )
+
+            for idx, depth in enumerate(anchor_depths):
+                y = y_for_depth(depth)
+                fill = self.theme_colors["accent_blue"] if 0 < idx < len(anchor_depths) - 1 else self.theme_colors["subtext"]
+                editor_canvas.create_oval(
+                    track_x - 8,
+                    y - 8,
+                    track_x + 8,
+                    y + 8,
+                    fill=fill,
+                    outline=self.theme_colors["text"],
+                    width=1,
+                    tags=(f"anchor_{idx}", "anchor"),
+                )
+                editor_canvas.create_text(
+                    track_x + 32,
+                    y,
+                    text=f"{depth:.1f} m",
+                    fill=self.theme_colors["text"],
+                    font=self.fonts["small"],
+                    anchor="w",
+                )
+
+            editor_canvas.create_text(
+                track_x,
+                14,
+                text=self.translator.translate("Measured depth"),
+                fill=self.theme_colors["subtext"],
+                font=self.fonts["small"],
+            )
+            editor_canvas.create_text(
+                preview_x,
+                14,
+                text=self.translator.translate("Preview"),
+                fill=self.theme_colors["subtext"],
+                font=self.fonts["small"],
+            )
+
+        def render_all() -> None:
+            if band_scales:
+                selected_band.set(max(0, min(selected_band.get(), len(band_scales) - 1)))
+                selected_label.set(
+                    f"Band {selected_band.get() + 1}: "
+                    f"{anchor_depths[selected_band.get()]:.2f}-"
+                    f"{anchor_depths[selected_band.get() + 1]:.2f} m"
+                )
             else:
-                start = default_from
-                width = max(1.0, abs(default_to - default_from))
-                dip = 60.0
-            add_band(start, start + width, dip)
+                selected_label.set("")
+            render_editor()
+            render_rows()
 
-        def remove_last_band() -> None:
-            if row_vars:
-                row_vars.pop()
-                render_rows()
-                recalculate()
+        def sync_scale_from_selection() -> None:
+            if band_scales:
+                scale_var.set(band_scales[selected_band.get()])
+
+        def on_scale_changed() -> None:
+            if not band_scales:
+                return
+            band_scales[selected_band.get()] = float(scale_var.get())
+            render_all()
+
+        def add_point() -> None:
+            if not band_scales:
+                return
+            idx = selected_band.get()
+            midpoint = (anchor_depths[idx] + anchor_depths[idx + 1]) / 2.0
+            anchor_depths.insert(idx + 1, midpoint)
+            band_scales.insert(idx + 1, band_scales[idx])
+            selected_band.set(idx + 1)
+            sync_scale_from_selection()
+            render_all()
+
+        def remove_point() -> None:
+            if len(anchor_depths) <= 2:
+                status_var.set("At least two anchor points are required.")
+                return
+            idx = min(selected_band.get() + 1, len(anchor_depths) - 2)
+            if idx <= 0 or idx >= len(anchor_depths) - 1:
+                status_var.set("Select a band beside an internal anchor.")
+                return
+            anchor_depths.pop(idx)
+            band_scales.pop(max(0, idx - 1))
+            selected_band.set(max(0, min(selected_band.get(), len(band_scales) - 1)))
+            sync_scale_from_selection()
+            status_var.set("")
+            render_all()
+
+        def reset_profile() -> None:
+            depth_min, depth_max = get_hole_depth_range(hole_var.get().strip())
+            anchor_depths[:] = [depth_min, depth_max]
+            band_scales[:] = [1.0]
+            selected_band.set(0)
+            sync_scale_from_selection()
+            status_var.set("")
+            render_all()
 
         def apply_profile() -> None:
             try:
-                bands = parse_bands()
+                if not update_from_table():
+                    return
+                normalise_profile()
             except Exception as exc:
                 status_var.set(str(exc))
                 return
-            if not bands:
-                status_var.set("Add at least one thickness band.")
+
+            if not band_scales:
+                status_var.set("Add at least one stretch band.")
                 return
+
             hole_key = hole_var.get().strip() or "manual"
-            self.thickness_profiles[hole_key] = [band.to_dict() for band in bands]
-            status_var.set(f"Saved {len(bands)} manual band(s) for {hole_key}.")
+            profile = [
+                {
+                    "depth_from": anchor_depths[idx],
+                    "depth_to": anchor_depths[idx + 1],
+                    "scale_factor": band_scales[idx],
+                }
+                for idx in range(len(band_scales))
+            ]
+            self.thickness_profiles[hole_key] = profile
+
+            transform = DepthTransform(
+                segment_id=f"manual:{hole_key}",
+                stretch_regions=[
+                    StretchRegion(
+                        band["depth_from"],
+                        band["depth_to"],
+                        band["scale_factor"],
+                    )
+                    for band in profile
+                ],
+            )
+            widget = self.column_widgets.get(hole_key)
+            if widget and hasattr(widget, "apply_depth_transform"):
+                widget.apply_depth_transform(transform)
+                self._refresh_column_window_size(hole_key)
+                self._snap_columns_to_grid()
+                self._update_scroll_region()
+                self._load_visible_thumbnails_for_all()
+            status_var.set(f"Applied {len(profile)} band(s) to {hole_key}.")
+
+        def on_canvas_press(event: tk.Event) -> None:
+            nonlocal drag_anchor_index
+            y = event.y
+            for idx, depth in enumerate(anchor_depths):
+                if abs(y - y_for_depth(depth)) <= 10:
+                    drag_anchor_index = idx if 0 < idx < len(anchor_depths) - 1 else None
+                    if idx > 0:
+                        selected_band.set(min(idx - 1, len(band_scales) - 1))
+                    else:
+                        selected_band.set(0)
+                    sync_scale_from_selection()
+                    render_all()
+                    return
+            for idx in range(len(band_scales)):
+                if y_for_depth(anchor_depths[idx]) <= y <= y_for_depth(anchor_depths[idx + 1]):
+                    selected_band.set(idx)
+                    sync_scale_from_selection()
+                    render_all()
+                    return
+
+        def on_canvas_drag(event: tk.Event) -> None:
+            if drag_anchor_index is None:
+                return
+            idx = drag_anchor_index
+            depth = depth_for_y(event.y)
+            min_depth = anchor_depths[idx - 1] + 0.05
+            max_depth = anchor_depths[idx + 1] - 0.05
+            anchor_depths[idx] = max(min_depth, min(max_depth, depth))
+            render_all()
+
+        def on_canvas_release(_event: tk.Event) -> None:
+            nonlocal drag_anchor_index
+            drag_anchor_index = None
+            render_all()
 
         button_row = tk.Frame(body, bg=self.theme_colors["background"])
         button_row.pack(fill="x")
-        ttk.Button(button_row, text=self.translator.translate("Add Band"), command=add_next_band).pack(side="left", padx=4)
-        ttk.Button(button_row, text=self.translator.translate("Remove Last"), command=remove_last_band).pack(side="left", padx=4)
-        ttk.Button(button_row, text=self.translator.translate("Recalculate"), command=recalculate).pack(side="left", padx=4)
-        ttk.Button(button_row, text=self.translator.translate("Save Profile"), command=apply_profile).pack(side="right", padx=4)
+        ttk.Button(button_row, text=self.translator.translate("Add Point"), command=add_point).pack(side="left", padx=4)
+        ttk.Button(button_row, text=self.translator.translate("Remove Point"), command=remove_point).pack(side="left", padx=4)
+        ttk.Button(button_row, text=self.translator.translate("Update Table"), command=update_from_table).pack(side="left", padx=4)
+        ttk.Button(button_row, text=self.translator.translate("Reset"), command=reset_profile).pack(side="left", padx=4)
+        ttk.Button(button_row, text=self.translator.translate("Apply Deform"), command=apply_profile).pack(side="right", padx=4)
         ttk.Button(button_row, text=self.translator.translate("Close"), command=dialog.destroy).pack(side="right", padx=4)
 
-        add_band(default_from, default_to, 60.0)
+        editor_canvas.bind("<ButtonPress-1>", on_canvas_press)
+        editor_canvas.bind("<B1-Motion>", on_canvas_drag)
+        editor_canvas.bind("<ButtonRelease-1>", on_canvas_release)
+        editor_canvas.bind("<Configure>", lambda _event: render_editor())
+        hole_var.trace_add("write", lambda *_args: load_profile_for_hole())
+        load_profile_for_hole()
     
     def _save_session(self) -> None:
         """Save current session."""
@@ -1864,6 +2345,8 @@ class CorrelationDialog(tk.Toplevel):
             if not result:
                 return
         
+        self._cancel_pending_viz_refresh()
+
         # Clean up
         for widget in self.column_widgets.values():
             widget.destroy()

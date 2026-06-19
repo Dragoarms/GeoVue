@@ -135,6 +135,15 @@ class DrillholeSelectionDialog(tk.Toplevel):
             fg=self.gui_manager.theme_colors['text']
         )
         title_label.pack(pady=(0, 10))
+
+        workflow_label = tk.Label(
+            main_frame,
+            text=self.translator.translate("Filter the collars, drag a section corridor, then confirm the selected order."),
+            font=self.gui_manager.fonts['small'],
+            bg=self.gui_manager.theme_colors['background'],
+            fg=self.gui_manager.theme_colors['subtext']
+        )
+        workflow_label.pack(pady=(0, 8))
         
         # Filter frame
         self._create_filter_frame(main_frame)
@@ -207,6 +216,10 @@ class DrillholeSelectionDialog(tk.Toplevel):
         # Set default to filter by holeid with "not null" operator (shows all by default)
         self.filter_row.column_var.set('holeid')
         self.filter_row.operator_var.set('not null')
+        if hasattr(self.filter_row, 'remove_btn'):
+            self.filter_row.remove_btn.pack_forget()
+        if hasattr(self.filter_row, 'type_dropdown'):
+            self.filter_row.type_dropdown.master.pack_forget()
         
         # Apply and Clear buttons
         self.apply_filter_btn = ModernButton(
@@ -249,7 +262,7 @@ class DrillholeSelectionDialog(tk.Toplevel):
         
         header_label = tk.Label(
             header,
-            text=self.translator.translate("Collar Map"),
+            text=self.translator.translate("Local Collar Plot"),
             font=self.gui_manager.fonts['label'],
             bg=self.gui_manager.theme_colors['accent_blue'],
             fg=self.gui_manager.theme_colors['text'],
@@ -258,6 +271,17 @@ class DrillholeSelectionDialog(tk.Toplevel):
             pady=8
         )
         header_label.pack(fill='x')
+        subheader = tk.Label(
+            parent,
+            text=self.translator.translate("Coordinate-space view; no live basemap tiles are loaded."),
+            font=self.gui_manager.fonts['small'],
+            bg=self.gui_manager.theme_colors['field_bg'],
+            fg=self.gui_manager.theme_colors['subtext'],
+            anchor='w',
+            padx=10,
+            pady=4
+        )
+        subheader.pack(fill='x')
         
         # Minimap canvas
         canvas_frame = tk.Frame(parent, bg=self.gui_manager.theme_colors['field_bg'])
@@ -334,7 +358,7 @@ class DrillholeSelectionDialog(tk.Toplevel):
         # Section line controls - just Clear button (drawing is always active)
         self.clear_line_btn = ModernButton(
             control_frame,
-            text=self.translator.translate("Clear Line"),
+            text=self.translator.translate("Clear Selection"),
             command=self._clear_section_line,
             color=self.gui_manager.theme_colors['accent_red'],
             theme_colors=self.gui_manager.theme_colors
@@ -349,7 +373,7 @@ class DrillholeSelectionDialog(tk.Toplevel):
             parent: Parent widget
         """
         # Order list
-        self.order_list = DrillholeOrderList(parent, self.gui_manager, self.translator)
+        self.order_list = DrillholeOrderList(parent, self.gui_manager, self.translator, show_actions=False)
         self.order_list.pack(fill='both', expand=True)
         self.order_list.on_order_changed = self._on_order_changed
         self.order_list.on_remove_hole = self._on_remove_hole
@@ -388,7 +412,7 @@ class DrillholeSelectionDialog(tk.Toplevel):
         
         ModernButton(
             width_frame,
-            text=self.translator.translate("Apply"),
+            text=self.translator.translate("Update Width"),
             command=self._apply_section_width,
             color=self.gui_manager.theme_colors['accent_blue'],
             theme_colors=self.gui_manager.theme_colors
@@ -421,14 +445,6 @@ class DrillholeSelectionDialog(tk.Toplevel):
             theme_colors=self.gui_manager.theme_colors
         ).pack(side='right', padx=5)
         
-        # Apply button
-        ModernButton(
-            button_frame,
-            text=self.translator.translate("Apply"),
-            command=self._on_apply,
-            color=self.gui_manager.theme_colors['accent_blue'],
-            theme_colors=self.gui_manager.theme_colors
-        ).pack(side='right', padx=5)
     
     def _apply_filter(self):
         """Apply the filter from DynamicFilterRow."""

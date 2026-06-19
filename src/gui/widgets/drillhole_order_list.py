@@ -19,7 +19,7 @@ class DrillholeOrderList(tk.Frame):
     - Clear all
     """
     
-    def __init__(self, parent, gui_manager, translator, **kwargs):
+    def __init__(self, parent, gui_manager, translator, show_actions: bool = True, **kwargs):
         """Initialize drillhole order list.
         
         Args:
@@ -33,6 +33,7 @@ class DrillholeOrderList(tk.Frame):
         # Store managers
         self.gui_manager = gui_manager
         self.translator = translator
+        self.show_actions = show_actions
         
         # Data
         self.hole_data: List[Dict[str, any]] = []  # [{'hole_id': str, 'distance': float}, ...]
@@ -96,35 +97,36 @@ class DrillholeOrderList(tk.Frame):
         self.list_frame.bind('<Configure>', self._on_frame_configure)
         self.canvas.bind('<Configure>', self._on_canvas_configure)
         
-        # Button frame
-        button_frame = tk.Frame(self, bg=self.gui_manager.theme_colors['background'])
-        button_frame.pack(fill='x', padx=2, pady=2)
-        
-        self.sort_button = tk.Button(
-            button_frame,
-            text=self.translator.translate("Sort by Distance"),
-            command=self.sort_by_distance,
-            bg=self.gui_manager.theme_colors['accent_blue'],
-            fg=self.gui_manager.theme_colors['text'],
-            relief='flat',
-            padx=10,
-            pady=5,
-            font=self.gui_manager.fonts['normal']
-        )
-        self.sort_button.pack(side='left', padx=2)
-        
-        self.clear_button = tk.Button(
-            button_frame,
-            text=self.translator.translate("Clear All"),
-            command=self.clear_all,
-            bg=self.gui_manager.theme_colors['accent_red'],
-            fg=self.gui_manager.theme_colors['text'],
-            relief='flat',
-            padx=10,
-            pady=5,
-            font=self.gui_manager.fonts['normal']
-        )
-        self.clear_button.pack(side='left', padx=2)
+        if self.show_actions:
+            # Button frame
+            button_frame = tk.Frame(self, bg=self.gui_manager.theme_colors['background'])
+            button_frame.pack(fill='x', padx=2, pady=2)
+
+            self.sort_button = tk.Button(
+                button_frame,
+                text=self.translator.translate("Sort by Distance"),
+                command=self.sort_by_distance,
+                bg=self.gui_manager.theme_colors['accent_blue'],
+                fg=self.gui_manager.theme_colors['text'],
+                relief='flat',
+                padx=10,
+                pady=5,
+                font=self.gui_manager.fonts['normal']
+            )
+            self.sort_button.pack(side='left', padx=2)
+
+            self.clear_button = tk.Button(
+                button_frame,
+                text=self.translator.translate("Clear All"),
+                command=self.clear_all,
+                bg=self.gui_manager.theme_colors['accent_red'],
+                fg=self.gui_manager.theme_colors['text'],
+                relief='flat',
+                padx=10,
+                pady=5,
+                font=self.gui_manager.fonts['normal']
+            )
+            self.clear_button.pack(side='left', padx=2)
     
     def _on_frame_configure(self, event=None):
         """Update scrollregion when frame size changes."""

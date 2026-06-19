@@ -1578,7 +1578,7 @@ class GUIManager:
 
     def create_status_section(self, parent, height=15):
         """
-        Create a status text section.
+        Create a compact status section with an expandable detailed log.
 
         Args:
             parent: Parent widget
@@ -1587,22 +1587,58 @@ class GUIManager:
         Returns:
             Dictionary with status components
         """
-        # Status section (no progress bar - takes up more space)
-        status_frame = self.create_section_frame(parent, title="Detailed Status")
+        status_frame = self.create_section_frame(parent, title=None, padding=12)
 
-        # Status text with scrollbar
-        status_container = ttk.Frame(status_frame, style="Content.TFrame")
-        status_container.pack(fill=tk.BOTH, expand=True)
+        header = ttk.Frame(status_frame, style="Content.TFrame")
+        header.pack(fill=tk.X)
+
+        title_label = ttk.Label(
+            header,
+            text=self.t("Latest Status"),
+            style="SectionTitle.TLabel",
+        )
+        title_label.pack(side=tk.LEFT, padx=(0, 12))
+
+        latest_status_var = tk.StringVar(value=self.t("Ready."))
+        latest_status_label = ttk.Label(
+            header,
+            textvariable=latest_status_var,
+            style="Content.TLabel",
+            anchor="w",
+        )
+        latest_status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        details_visible = tk.BooleanVar(value=False)
+        toggle_button = ttk.Button(header, text=self.t("Show Details"))
+        toggle_button.pack(side=tk.RIGHT, padx=(10, 0))
+
+        details_frame = ttk.Frame(status_frame, style="Content.TFrame")
+
+        # Status text with scrollbar. It starts hidden but keeps receiving log
+        # lines so expanding details shows the full history.
+        status_container = ttk.Frame(details_frame, style="Content.TFrame")
+        status_container.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
         status_text = self.create_text_display(
             status_container, height=height, wrap=tk.WORD, readonly=True
         )
         status_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Scrollbar for results
         scrollbar = ttk.Scrollbar(status_container, command=status_text.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         status_text.config(yscrollcommand=scrollbar.set)
+
+        def toggle_details():
+            if details_visible.get():
+                details_frame.pack_forget()
+                toggle_button.configure(text=self.t("Show Details"))
+                details_visible.set(False)
+            else:
+                details_frame.pack(fill=tk.BOTH, expand=True)
+                toggle_button.configure(text=self.t("Hide Details"))
+                details_visible.set(True)
+
+        toggle_button.configure(command=toggle_details)
 
         # Configure tags for status text
         self.configure_standard_tags(status_text)
@@ -1615,6 +1651,10 @@ class GUIManager:
             "progress_var": progress_var,
             "progress_bar": None,
             "status_frame": status_frame,
+            "latest_status_var": latest_status_var,
+            "latest_status_label": latest_status_label,
+            "details_frame": details_frame,
+            "details_visible": details_visible,
             "status_text": status_text,
         }
 

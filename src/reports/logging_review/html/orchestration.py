@@ -75,6 +75,7 @@ def generate_logger_html_reports_from_prepped_data(
     top_n: int,
     page_options: Dict[str, bool],
     include_images: bool = True,
+    image_mode: str = "thumbnail",
     logo_path: Optional[str] = None,
     full_team_df: Optional[pd.DataFrame] = None,
     skip_csv_export: bool = False,
@@ -145,6 +146,7 @@ def generate_logger_html_reports_from_prepped_data(
             output_dir=output_dir,
             full_team_df=full_team_df,
             output_path=output_path,
+            image_mode=image_mode,
         )
 
         output_files.append(output_path)
@@ -162,6 +164,7 @@ def generate_logger_html_reports(
     top_n: int,
     page_options: Dict[str, bool],
     include_images: bool = True,
+    image_mode: str = "thumbnail",
     logo_path: Optional[str] = None,
 ) -> List[str]:
     """Generate per-logger HTML reports (full pipeline: build data then render)."""
@@ -382,7 +385,9 @@ def generate_logger_html_reports(
             include_images=include_images,
             logo_path=logo_path,
             stats=stats,
+            output_dir=output_dir,
             output_path=output_path,
+            image_mode=image_mode,
         )
 
         output_files.append(output_path)

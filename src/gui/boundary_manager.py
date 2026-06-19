@@ -484,14 +484,6 @@ class BoundaryManager:
         """
         top_y, bottom_y = vertical_constraints
 
-        cw_cm = config.get("compartment_width_cm", 2.0)
-        comp_w = int(cw_cm * scale_px_per_cm)
-
-        default_mm = config.get("compartment_spacing_mm", 3.0)
-        default_sp = int((default_mm / 10.0) * scale_px_per_cm)
-
-        overrides = config.get("compartment_spacing_overrides", {})
-
         total = config.get("compartment_count", 20)
         min_mid, max_mid = 4, 3 + total
 
@@ -505,6 +497,41 @@ class BoundaryManager:
         if not existing:
             self.logger.warning("No existing boundaries to interpolate from")
             return {"interpolated_boundaries": [], "interpolated_marker_ids": [], "gap_analysis": []}
+
+        existing_widths = [max(1, x2 - x1) for _, x1, x2 in existing if x2 > x1]
+        scale_available = scale_px_per_cm is not None and scale_px_per_cm > 0
+
+        if scale_available:
+            cw_cm = config.get("compartment_width_cm", 2.0)
+            comp_w = int(cw_cm * scale_px_per_cm)
+
+            default_mm = config.get("compartment_spacing_mm", 3.0)
+            default_sp = int((default_mm / 10.0) * scale_px_per_cm)
+        else:
+            comp_w = int(np.median(existing_widths)) if existing_widths else 1
+            adjacent_gaps = [
+                next_x1 - curr_x2
+                for (curr_mid, _, curr_x2), (next_mid, next_x1, _) in zip(
+                    existing, existing[1:]
+                )
+                if next_mid == curr_mid + 1 and next_x1 > curr_x2
+            ]
+            default_sp = (
+                int(np.median(adjacent_gaps))
+                if adjacent_gaps
+                else max(1, int(round(comp_w * 0.15)))
+            )
+            self.logger.info(
+                "No scale available for interpolation; using median width %spx and spacing %spx",
+                comp_w,
+                default_sp,
+            )
+
+        default_sp = max(1, int(default_sp))
+        comp_w = max(1, int(comp_w))
+
+        default_mm = config.get("compartment_spacing_mm", 3.0)
+        overrides = config.get("compartment_spacing_overrides", {})
 
         truly_missing = set(self.get_missing_markers())
         if not truly_missing:
@@ -530,7 +557,12 @@ class BoundaryManager:
 
             key = f"{mid1 - 3}-{mid2 - 3}"
             sp_mm = overrides.get(key, default_mm)
-            sp_px = int((sp_mm / 10.0) * scale_px_per_cm)
+            sp_px = (
+                int((sp_mm / 10.0) * scale_px_per_cm)
+                if scale_available
+                else default_sp
+            )
+            sp_px = max(1, int(sp_px))
 
             gaps.append({
                 "start_x": x1b, "end_x": x2a, "gap_size": gap_span,

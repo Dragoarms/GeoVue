@@ -516,20 +516,49 @@ class CorrelationVizSettingsDialog(tk.Toplevel):
             if config.get("column"):  # Only include if column name is set
                 updated_columns.append(config)
         
-        # Save viz columns to config
-        self.config_manager.set("correlation_viz_columns", updated_columns)
-        
-        # Save display settings
-        self.config_manager.set("correlation_thumbnail_width", self.thumbnail_width_var.get())
-        self.config_manager.set("correlation_data_viz_cell_height", self.cell_height_var.get())
-        self.config_manager.set("correlation_data_column_width", self.data_column_width_var.get())
-        
-        # Call callback if provided
-        if self.callback:
-            self.callback(updated_columns)
-        
+        self._save_config_updates(
+            {
+                "correlation_viz_columns": updated_columns,
+                "correlation_thumbnail_width": self.thumbnail_width_var.get(),
+                "correlation_data_viz_cell_height": self.cell_height_var.get(),
+                "correlation_data_column_width": self.data_column_width_var.get(),
+            }
+        )
+
         logger.info(f"Saved {len(updated_columns)} visualization columns")
+
+        callback = self.callback
+        parent = self.master
         self.destroy()
+
+        # Redrawing all correlation columns can take noticeable time. Let the
+        # settings dialog close first, then start the refresh from the parent
+        # event loop so the window does not look frozen on Done.
+        if callback:
+            try:
+                parent.after_idle(lambda: callback(updated_columns))
+            except Exception:
+                callback(updated_columns)
+
+    def _save_config_updates(self, updates: Dict[str, Any]) -> None:
+        """Persist several config values with one disk write when supported."""
+        editable_keys = set(getattr(self.config_manager, "USER_SETTINGS_KEYS", []))
+        can_batch = (
+            editable_keys
+            and all(key in editable_keys for key in updates)
+            and hasattr(self.config_manager, "user_settings")
+            and hasattr(self.config_manager, "config")
+            and hasattr(self.config_manager, "_save_user_settings")
+        )
+
+        if can_batch:
+            self.config_manager.user_settings.update(updates)
+            self.config_manager.config.update(updates)
+            self.config_manager._save_user_settings()
+            return
+
+        for key, value in updates.items():
+            self.config_manager.set(key, value)
 
 class CorrelationVizRow(tk.Frame):
     """Row for configuring a single visualization column with source selection."""

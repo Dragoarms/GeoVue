@@ -31,7 +31,12 @@ from reports.logging_review.html.tables import (
     _render_outlier_table,
     _render_grouping_groups,
 )
-from reports.logging_review.html.images import _encode_image_base64
+from reports.logging_review.html.images import (
+    ImageAssetCache,
+    _encode_image_base64,
+    _normalize_image_mode,
+    _write_thumbnail_asset,
+)
 from reports.logging_review.html.collar_map import _build_map_points, _render_map
 from reports.logging_review.html.tabs.comments import render_comments_section
 from reports.logging_review.html.tabs.grouping import render_grouping_section
@@ -59,8 +64,8 @@ from processing.logging_review_report import (
     resolve_logger_column,
 )
 
-# Type for image lookup cache: (hole_id_upper, depth_float) -> base64 data URL or None
-ImageLookupCache = Optional[Dict[Tuple[str, float], Optional[str]]]
+# Type for image lookup cache: (hole_id_upper, depth_float, image_mode) -> image URL or None
+ImageLookupCache = Optional[Dict[Tuple[str, float, str], Optional[str]]]
 PYPROJ_AVAILABLE = importlib.util.find_spec("pyproj") is not None
 
 __all__ = [
@@ -181,6 +186,7 @@ def generate_logger_html_reports_from_prepped_data(
     top_n: int,
     page_options: Dict[str, bool],
     include_images: bool = True,
+    image_mode: str = "thumbnail",
     logo_path: Optional[str] = None,
     full_team_df: Optional[pd.DataFrame] = None,
     skip_csv_export: bool = False,
@@ -208,6 +214,7 @@ def generate_logger_html_reports_from_prepped_data(
         top_n=top_n,
         page_options=page_options,
         include_images=include_images,
+        image_mode=image_mode,
         logo_path=logo_path,
         full_team_df=full_team_df,
         skip_csv_export=skip_csv_export,
@@ -223,6 +230,7 @@ def generate_logger_html_reports(
     top_n: int,
     page_options: Dict[str, bool],
     include_images: bool = True,
+    image_mode: str = "thumbnail",
     logo_path: Optional[str] = None,
 ) -> List[str]:
     """Thin wrapper: delegate to reports.logging_review.html.orchestration."""
@@ -236,6 +244,7 @@ def generate_logger_html_reports(
         top_n=top_n,
         page_options=page_options,
         include_images=include_images,
+        image_mode=image_mode,
         logo_path=logo_path,
     )
 
@@ -1357,10 +1366,11 @@ def _build_html_report(
     date_to: Optional[str],
     top_n: int,
     include_images: bool,
-    logo_path: Optional[str],
     stats: Dict[str, Any],
+    logo_path: Optional[str] = None,
     output_dir: Optional[str] = None,
     full_team_df: Optional[pd.DataFrame] = None,
+    image_mode: str = "thumbnail",
 ) -> str:
     """Thin wrapper: delegate to reports.logging_review.html.report_builder.build_html_report."""
     return build_html_report(
@@ -1382,6 +1392,7 @@ def _build_html_report(
         date_to=date_to,
         top_n=top_n,
         include_images=include_images,
+        image_mode=image_mode,
         logo_path=logo_path,
         stats=stats,
         output_dir=output_dir,
@@ -1394,16 +1405,25 @@ def _build_intervals_with_images(
     intervals: List[Dict[str, Any]],
     include_images: bool,
     image_cache: ImageLookupCache = None,
+    image_mode: str = "embedded",
+    image_output_dir: Optional[str] = None,
+    image_relative_dir: Optional[str] = None,
+    image_asset_cache: ImageAssetCache = None,
 ) -> List[Dict[str, Any]]:
+    resolved_image_mode = _normalize_image_mode(include_images, image_mode)
     result = []
     for item in intervals:
         image_data = None
-        if include_images:
+        if resolved_image_mode != "none":
             image_data = _lookup_interval_image(
                 data_coordinator,
                 item.get("hole_id"),
                 item.get("depth_to"),
                 cache=image_cache,
+                image_mode=resolved_image_mode,
+                image_output_dir=image_output_dir,
+                image_relative_dir=image_relative_dir,
+                image_asset_cache=image_asset_cache,
             )
         result.append({**item, "image": image_data})
     return result
@@ -1414,18 +1434,27 @@ def _build_grouping_groups_with_images(
     groups: List[Dict[str, Any]],
     include_images: bool,
     image_cache: ImageLookupCache = None,
+    image_mode: str = "embedded",
+    image_output_dir: Optional[str] = None,
+    image_relative_dir: Optional[str] = None,
+    image_asset_cache: ImageAssetCache = None,
 ) -> List[Dict[str, Any]]:
+    resolved_image_mode = _normalize_image_mode(include_images, image_mode)
     result = []
     for grp in groups:
         intervals_with_img = []
         for it in grp.get("intervals", []):
             image_data = None
-            if include_images:
+            if resolved_image_mode != "none":
                 image_data = _lookup_interval_image(
                     data_coordinator,
                     it.get("hole_id"),
                     it.get("depth_to"),
                     cache=image_cache,
+                    image_mode=resolved_image_mode,
+                    image_output_dir=image_output_dir,
+                    image_relative_dir=image_relative_dir,
+                    image_asset_cache=image_asset_cache,
                 )
             intervals_with_img.append({**it, "image": image_data})
         result.append({
@@ -1445,20 +1474,49 @@ def _build_outlier_intervals_with_images(
     intervals: List[Dict[str, Any]],
     include_images: bool,
     image_cache: ImageLookupCache = None,
+    image_mode: str = "embedded",
+    image_output_dir: Optional[str] = None,
+    image_relative_dir: Optional[str] = None,
+    image_asset_cache: ImageAssetCache = None,
 ) -> List[Dict[str, Any]]:
+    resolved_image_mode = _normalize_image_mode(include_images, image_mode)
     result = []
     for item in intervals:
         image_data = None
-        if include_images:
+        if resolved_image_mode != "none":
             image_data = _lookup_interval_image(
                 data_coordinator,
                 item.get("hole_id"),
                 item.get("depth_to"),
                 cache=image_cache,
+                image_mode=resolved_image_mode,
+                image_output_dir=image_output_dir,
+                image_relative_dir=image_relative_dir,
+                image_asset_cache=image_asset_cache,
             )
         issue = item.get("reason") or item.get("outlier_reason") or "Geochemistry outlier vs strat expectation"
         result.append({**item, "issue": issue, "image": image_data})
     return result
+
+
+def _image_reference_for_mode(
+    path: str,
+    image_mode: str,
+    image_output_dir: Optional[str],
+    image_relative_dir: Optional[str],
+    image_asset_cache: ImageAssetCache = None,
+) -> Optional[str]:
+    if image_mode == "thumbnail":
+        thumbnail = _write_thumbnail_asset(
+            path,
+            image_output_dir,
+            image_relative_dir,
+            asset_cache=image_asset_cache,
+        )
+        if thumbnail or (image_output_dir and image_relative_dir):
+            return thumbnail
+        logger.debug("Thumbnail output directory unavailable; falling back to embedded image.")
+    return _encode_image_base64(path)
 
 
 def _lookup_interval_image(
@@ -1466,9 +1524,13 @@ def _lookup_interval_image(
     hole_id: Optional[str],
     depth_to: Optional[float],
     cache: ImageLookupCache = None,
+    image_mode: str = "embedded",
+    image_output_dir: Optional[str] = None,
+    image_relative_dir: Optional[str] = None,
+    image_asset_cache: ImageAssetCache = None,
 ) -> Optional[str]:
     """
-    Look up and encode an interval image from the data coordinator.
+    Look up an interval image from the data coordinator.
 
     Tries multiple moisture statuses (Wet, Dry, None) to find a matching image,
     since the image index keys include moisture_status but the lookup may not know it.
@@ -1480,21 +1542,30 @@ def _lookup_interval_image(
     try:
         hole_str = str(hole_id).upper()
         depth_float = float(depth_to)
-        cache_key = (hole_str, depth_float)
+        resolved_image_mode = _normalize_image_mode(True, image_mode)
+        if resolved_image_mode == "none":
+            return None
+        cache_key = (hole_str, depth_float, resolved_image_mode)
         if cache is not None and cache_key in cache:
             return cache[cache_key]
 
-        encoded = None
+        image_ref = None
         # Try different moisture statuses - images are typically indexed with "Wet" or "Dry"
         for moisture in ("Wet", "Dry", None):
             key = ImageKey(hole_str, depth_float, moisture)
             img_path = data_coordinator.get_image_path(key)
             if img_path:
-                encoded = _encode_image_base64(img_path)
-                if encoded:
+                image_ref = _image_reference_for_mode(
+                    img_path,
+                    resolved_image_mode,
+                    image_output_dir,
+                    image_relative_dir,
+                    image_asset_cache=image_asset_cache,
+                )
+                if image_ref:
                     break
 
-        if not encoded:
+        if not image_ref:
             # If no direct match, try to find any image for this hole/depth via the hole index
             try:
                 hole_keys = data_coordinator.get_keys_for_hole(hole_str)
@@ -1503,20 +1574,26 @@ def _lookup_interval_image(
                     if key.depth_to_int == depth_int:
                         img_path = data_coordinator.get_image_path(key)
                         if img_path:
-                            encoded = _encode_image_base64(img_path)
-                            if encoded:
+                            image_ref = _image_reference_for_mode(
+                                img_path,
+                                resolved_image_mode,
+                                image_output_dir,
+                                image_relative_dir,
+                                image_asset_cache=image_asset_cache,
+                            )
+                            if image_ref:
                                 break
             except Exception:
                 pass
 
         if cache is not None:
-            cache[cache_key] = encoded
-        return encoded
+            cache[cache_key] = image_ref
+        return image_ref
 
     except Exception as e:
         logger.debug(f"Image lookup failed for {hole_id}@{depth_to}: {e}")
         if cache is not None:
-            cache[(str(hole_id).upper(), float(depth_to))] = None
+            cache[(str(hole_id).upper(), float(depth_to), image_mode)] = None
         return None
     return None
 

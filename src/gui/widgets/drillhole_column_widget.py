@@ -29,9 +29,6 @@ from gui.DrillholeCorrelation.trace_processing import (
     scale_trace_values,
 )
 
-# Import custom widgets
-from gui.widgets.modern_button import ModernButton
-
 logger = logging.getLogger(__name__)
 
 
@@ -594,6 +591,20 @@ class DrillholeColumnWidget(tk.Frame):
             return f"#{r:02x}{g:02x}{b:02x}"
         except Exception:
             return hex_color
+
+    def _blend_color(self, foreground: str, background: str, foreground_weight: float = 0.45) -> str:
+        """Blend two Tk colors to create a softer canvas fill."""
+        try:
+            foreground_weight = max(0.0, min(1.0, float(foreground_weight)))
+            bg_weight = 1.0 - foreground_weight
+            fr, fg, fb = (value // 256 for value in self.winfo_rgb(foreground))
+            br, bg, bb = (value // 256 for value in self.winfo_rgb(background))
+            r = int(fr * foreground_weight + br * bg_weight)
+            g = int(fg * foreground_weight + bg * bg_weight)
+            b = int(fb * foreground_weight + bb * bg_weight)
+            return f"#{r:02x}{g:02x}{b:02x}"
+        except Exception:
+            return foreground
     
     def _create_ui(self) -> None:
         """Create the widget UI components."""
@@ -609,7 +620,11 @@ class DrillholeColumnWidget(tk.Frame):
         self.main_frame = tk.Frame(
             self, 
             bg=self.theme_colors["secondary_bg"],
-            width=total_width
+            width=total_width,
+            highlightbackground=self.theme_colors["border"],
+            highlightcolor=self.theme_colors["border"],
+            highlightthickness=1,
+            bd=0,
         )
         self.main_frame.pack(fill="both", expand=True)
         self.main_frame.pack_propagate(False)  # Maintain width
@@ -658,16 +673,6 @@ class DrillholeColumnWidget(tk.Frame):
         self.lock_btn.pack(side="right", padx=2)
         self.lock_btn.bind("<Button-1>", lambda e: self._toggle_lock())
         
-        # Settings button
-        settings_btn = ModernButton(
-            header_frame,
-            text="⚙",
-            command=self._show_settings,
-            color=self.theme_colors["accent_blue"],
-            theme_colors=self.theme_colors
-        )
-        settings_btn.pack(side="right", padx=2, expand=False, fill=None)
-        
         logger.debug(f"Header created for {self.hole_id}")
     
     def _toggle_lock(self) -> None:
@@ -702,7 +707,12 @@ class DrillholeColumnWidget(tk.Frame):
         # Update border color
         if hasattr(self, 'main_frame'):
             border_color = self.theme_colors["accent_red"] if is_locked else self.theme_colors["border"]
-            self.main_frame.config(highlightbackground=border_color, highlightthickness=2)
+            border_width = 2 if is_locked else 1
+            self.main_frame.config(
+                highlightbackground=border_color,
+                highlightcolor=border_color,
+                highlightthickness=border_width,
+            )
     
     def _create_canvas_area(self) -> None:
         """Create fixed-size canvas for intervals and data columns (no internal scrolling)."""
@@ -1109,8 +1119,8 @@ class DrillholeColumnWidget(tk.Frame):
             logger.warning("No intervals to display")
             return
         
-        # Calculate total height (header + intervals)
-        total_height = self.header_height + len(self.intervals) * self.cell_height
+        # Calculate total height (header + transformed interval display)
+        total_height = self.get_total_height()
         logger.debug(f"Total canvas height: {total_height}px (header={self.header_height}, {len(self.intervals)} intervals)")
         
         # Draw depth ruler if enabled
@@ -1146,7 +1156,78 @@ class DrillholeColumnWidget(tk.Frame):
         """Get total height of the column in pixels."""
         if not self.intervals:
             return self.header_height
-        return self.header_height + len(self.intervals) * self.cell_height
+        return self.header_height + self._content_height_px()
+
+    def _active_depth_transform(self) -> Optional[DepthTransform]:
+        """Return the latest depth transform for this column, if any."""
+        if not self.depth_transforms:
+            return None
+        return self.depth_transforms[-1]
+
+    def _depth_min_max(self) -> Tuple[float, float]:
+        """Return the displayed depth range."""
+        if not self.intervals:
+            return 0.0, 0.0
+        return (
+            float(min(interval.depth_from for interval in self.intervals)),
+            float(max(interval.depth_to for interval in self.intervals)),
+        )
+
+    def _display_units_for_depth(self, depth: Union[float, int]) -> float:
+        """Map a measured depth to transformed display units from column top."""
+        depth = float(depth)
+        depth_min, _depth_max = self._depth_min_max()
+        transform = self._active_depth_transform()
+        if transform is None:
+            return max(0.0, depth - depth_min)
+
+        top = transform.apply_transform(depth_min)
+        return max(0.0, transform.apply_transform(depth) - top)
+
+    def _depth_for_display_units(self, display_units: float) -> Optional[float]:
+        """Invert transformed display units back to measured depth."""
+        if not self.intervals:
+            return None
+
+        display_units = max(0.0, float(display_units))
+        depth_min, depth_max = self._depth_min_max()
+        transform = self._active_depth_transform()
+        if transform is None:
+            return max(depth_min, min(depth_max, depth_min + display_units))
+
+        target = transform.apply_transform(depth_min) + display_units
+        low = depth_min
+        high = depth_max
+        for _ in range(40):
+            mid = (low + high) / 2.0
+            if transform.apply_transform(mid) < target:
+                low = mid
+            else:
+                high = mid
+        return max(depth_min, min(depth_max, (low + high) / 2.0))
+
+    def _content_height_px(self) -> int:
+        """Return transformed content height below the header."""
+        if not self.intervals:
+            return 0
+        _depth_min, depth_max = self._depth_min_max()
+        units = self._display_units_for_depth(depth_max)
+        return max(1, int(math.ceil(units * self.cell_height)))
+
+    def _interval_content_bounds(self, interval: DrillholeInterval) -> Tuple[float, float]:
+        """Return transformed Y bounds below the header for an interval."""
+        y_top = self._display_units_for_depth(interval.depth_from) * self.cell_height
+        y_bottom = self._display_units_for_depth(interval.depth_to) * self.cell_height
+        if y_bottom < y_top:
+            y_top, y_bottom = y_bottom, y_top
+        if y_bottom - y_top < 1:
+            y_bottom = y_top + 1
+        return y_top, y_bottom
+
+    def _interval_content_center(self, interval: DrillholeInterval) -> float:
+        """Return transformed interval center below the header."""
+        y_top, y_bottom = self._interval_content_bounds(interval)
+        return (y_top + y_bottom) / 2.0
     
     def set_moisture_preference(self, preference: str) -> None:
         """
@@ -1602,7 +1683,7 @@ class DrillholeColumnWidget(tk.Frame):
             viz_columns: List of visualization column configs.
             show_data_viz: Optional override for whether graph columns are visible.
         """
-        logger.info(f"Updating viz columns for {self.hole_id}")
+        logger.debug(f"Updating viz columns for {self.hole_id}")
         self.viz_columns = viz_columns
         if show_data_viz is None:
             self.show_data_viz = self.show_data_columns and bool(viz_columns)
@@ -1632,7 +1713,7 @@ class DrillholeColumnWidget(tk.Frame):
         self._apply_total_width(total_width)
         
         # Update canvas scroll region for new cell height
-        canvas_height = self.header_height + (len(self.intervals) * self.cell_height)
+        canvas_height = self.get_total_height()
         self.canvas.configure(scrollregion=(0, 0, total_width, canvas_height))
         
         # Redraw
@@ -1705,7 +1786,7 @@ class DrillholeColumnWidget(tk.Frame):
         )
         
         # Draw ruler background (below header)
-        total_height = len(self.intervals) * self.cell_height
+        total_height = self._content_height_px()
         self.canvas.create_rectangle(
             0, self.header_height, self.ruler_width, self.header_height + total_height,
             fill=self.theme_colors["secondary_bg"],
@@ -1714,28 +1795,29 @@ class DrillholeColumnWidget(tk.Frame):
             tags="ruler"
         )
         
-        # Draw depth markers every 5m
-        for i, interval in enumerate(self.intervals):
-            y_pos = self.header_height + (i + 1) * self.cell_height  # Bottom of interval
-            
-            if int(interval.depth_to) % 5 == 0:
-                # Draw tick mark
-                self.canvas.create_line(
-                    self.ruler_width - 10, y_pos, self.ruler_width, y_pos,
-                    fill=self.theme_colors["text"],
-                    width=2,
-                    tags="ruler"
-                )
-                
-                # Draw depth label (positioned with padding from tick)
-                self.canvas.create_text(
-                    self.ruler_width - 12, y_pos,
-                    text=f"{int(interval.depth_to)}",
-                    fill=self.theme_colors["text"],
-                    font=self.fonts["small"],
-                    anchor="e",
-                    tags="ruler"
-                )
+        # Draw depth markers every 5m using transformed positions.
+        depth_min, depth_max = self._depth_min_max()
+        first_tick = int(math.ceil(depth_min / 5.0) * 5)
+        last_tick = int(math.floor(depth_max / 5.0) * 5)
+        for depth in range(first_tick, last_tick + 1, 5):
+            y_base = self._depth_to_canvas_y(float(depth))
+            if y_base is None:
+                continue
+            y_pos = self.header_height + y_base
+            self.canvas.create_line(
+                self.ruler_width - 10, y_pos, self.ruler_width, y_pos,
+                fill=self.theme_colors["text"],
+                width=2,
+                tags="ruler"
+            )
+            self.canvas.create_text(
+                self.ruler_width - 12, y_pos,
+                text=f"{depth}",
+                fill=self.theme_colors["text"],
+                font=self.fonts["small"],
+                anchor="e",
+                tags="ruler"
+            )
     
     def _draw_data_columns(self) -> None:
         """Draw data visualization columns."""
@@ -1747,11 +1829,10 @@ class DrillholeColumnWidget(tk.Frame):
             logger.warning("[ERROR] No data_visualizer available for drawing data columns")
             return
         
-        logger.info(f"")
-        logger.info(f"DRAWING {len(self.viz_columns)} DATA COLUMNS")
-        logger.info(f"  Intervals available: {len(self.intervals)}")
+        logger.debug(f"Drawing {len(self.viz_columns)} data columns for {self.hole_id}")
+        logger.debug(f"  Intervals available: {len(self.intervals)}")
         for idx, col in enumerate(self.viz_columns):
-            logger.info(f"  Column {idx}: {col}")
+            logger.debug(f"  Column {idx}: {col}")
         
         # Starting X position after ruler and image column.
         x_start = self._get_data_columns_x_start()
@@ -1761,8 +1842,9 @@ class DrillholeColumnWidget(tk.Frame):
         
         # Draw alternating row backgrounds FIRST (behind data)
         for i, interval in enumerate(self.intervals):
-            y_top = self.header_height + (i * self.cell_height)
-            y_bottom = y_top + self.cell_height
+            y_base_top, y_base_bottom = self._interval_content_bounds(interval)
+            y_top = self.header_height + y_base_top
+            y_bottom = self.header_height + y_base_bottom
             
             # Alternate colors
             row_color = self.row_color_even if i % 2 == 0 else self.row_color_odd
@@ -1830,7 +1912,7 @@ class DrillholeColumnWidget(tk.Frame):
             if col_idx > 0:
                 self.canvas.create_line(
                     x_pos, self.header_height,
-                    x_pos, self.header_height + len(self.intervals) * self.cell_height,
+                    x_pos, self.header_height + self._content_height_px(),
                     fill=self.theme_colors["border"],
                     width=1,
                     tags="column_divider"
@@ -1966,10 +2048,9 @@ class DrillholeColumnWidget(tk.Frame):
             x_pos: X position to start drawing
             width: Width of the column
         """
-        logger.info(f"")
-        logger.info(f"DRAWING LINE GRAPH: {column_name}")
-        logger.info(f"  X position: {x_pos}, Width: {width}")
-        logger.info(f"  Color map: {color_map_name}")
+        logger.debug(f"Drawing line graph for {self.hole_id}: {column_name}")
+        logger.debug(f"  X position: {x_pos}, Width: {width}")
+        logger.debug(f"  Color map: {color_map_name}")
         
         if not self.intervals:
             logger.warning(f"  ❌ No intervals available")
@@ -2004,24 +2085,36 @@ class DrillholeColumnWidget(tk.Frame):
                 invalid_count += 1
                 continue
             
-            # Calculate Y position (center of cell, offset by header)
-            y_pos = self.header_height + (i * self.cell_height) + (self.cell_height / 2)
+            # Calculate Y position (center of interval, offset by header)
+            y_pos = self.header_height + self._interval_content_center(interval)
             data_points.append((value, y_pos))
         
-        logger.info(f"  Data point collection:")
-        logger.info(f"    Valid points: {len(data_points)}")
-        logger.info(f"    Missing column: {missing_count}")
-        logger.info(f"    Invalid/NaN values: {invalid_count}")
+        logger.debug(f"  Valid points: {len(data_points)}")
+        logger.debug(f"  Missing column: {missing_count}")
+        logger.debug(f"  Invalid/NaN values: {invalid_count}")
         
         if not data_points:
             logger.warning(f"  ❌ NO VALID DATA POINTS for column {column_name}")
             return
         
-        logger.info(f"  ✓ Drawing {len(data_points)} data points")
+        logger.debug(f"  Drawing {len(data_points)} data points")
         
         values = [v for v, _ in data_points]
         scaled = self._scale_viz_values(values, viz_config)
         
+        if not color_map_name or not self.color_map_manager:
+            coords = []
+            for (_raw_value, y_pos), plot_value in zip(data_points, scaled.values):
+                coords.extend([self._value_to_plot_x(plot_value, scaled, x_pos, width), y_pos])
+            if len(coords) >= 4:
+                self.canvas.create_line(
+                    *coords,
+                    fill=self.theme_colors["accent_blue"],
+                    width=2,
+                    tags=f"data_line_{column_name}",
+                )
+            return
+
         # Draw line segments
         for i in range(len(data_points) - 1):
             _raw_value1, y1 = data_points[i]
@@ -2071,6 +2164,19 @@ class DrillholeColumnWidget(tk.Frame):
             y = self.header_height + y_base
             line_points.append((x, y, value))
 
+        if not color_map_name or not self.color_map_manager:
+            coords = []
+            for x, y, _value in line_points:
+                coords.extend([x, y])
+            if len(coords) >= 4:
+                self.canvas.create_line(
+                    *coords,
+                    fill=self.theme_colors["accent_blue"],
+                    width=1,
+                    tags=f"data_point_line_{column_name}",
+                )
+            return
+
         for i in range(len(line_points) - 1):
             x1, y1, value1 = line_points[i]
             x2, y2, _value2 = line_points[i + 1]
@@ -2109,10 +2215,9 @@ class DrillholeColumnWidget(tk.Frame):
             width: Width of the column
             viz_config: Optional visualization configuration with auto_scale, min_value, max_value
         """
-        logger.info(f"")
-        logger.info(f"DRAWING BAR CHART: {column_name}")
-        logger.info(f"  X position: {x_pos}, Width: {width}")
-        logger.info(f"  Color map: {color_map_name}")
+        logger.debug(f"Drawing bar chart for {self.hole_id}: {column_name}")
+        logger.debug(f"  X position: {x_pos}, Width: {width}")
+        logger.debug(f"  Color map: {color_map_name}")
         
         if not self.intervals:
             logger.warning(f"  ❌ No intervals available")
@@ -2131,12 +2236,13 @@ class DrillholeColumnWidget(tk.Frame):
             )
             return
 
-        # Collect all values for scaling
+        # Collect all values once for both scaling and drawing.
+        interval_values = []
         values = []
         missing_count = 0
         invalid_count = 0
         
-        for interval in self.intervals:
+        for i, interval in enumerate(self.intervals):
             value = self._get_value_for_interval(interval, column_name, source_name)
             
             if value is None:
@@ -2147,37 +2253,29 @@ class DrillholeColumnWidget(tk.Frame):
                 invalid_count += 1
                 continue
             
+            interval_values.append((i, value))
             values.append(value)
         
-        logger.info(f"  Data collection:")
-        logger.info(f"    Valid values: {len(values)}")
-        logger.info(f"    Missing column: {missing_count}")
-        logger.info(f"    Invalid/NaN values: {invalid_count}")
+        logger.debug(f"  Valid values: {len(values)}")
+        logger.debug(f"  Missing column: {missing_count}")
+        logger.debug(f"  Invalid/NaN values: {invalid_count}")
         
         if not values:
             logger.warning(f"  ❌ NO VALID DATA for column {column_name}")
             return
         
-        logger.info(f"  ✓ Drawing {len(values)} bars")
-        logger.info(f"  Value range: {min(values):.2f} to {max(values):.2f}")
+        logger.debug(f"  Drawing {len(values)} bars")
+        logger.debug(f"  Value range: {min(values):.2f} to {max(values):.2f}")
         
         scaled = self._scale_viz_values(values, viz_config)
         
         # Draw bars for each interval
-        scaled_index = 0
-        for i, interval in enumerate(self.intervals):
-            value = self._get_value_for_interval(interval, column_name, source_name)
-            
-            if value is None or np.isnan(value):
-                continue
-            
+        for (i, _raw_value), plot_value in zip(interval_values, scaled.values):
             try:
-                plot_value = scaled.values[scaled_index]
-                scaled_index += 1
-                
                 # Calculate bar dimensions (account for header offset)
-                y_top = self.header_height + i * self.cell_height
-                y_bottom = y_top + self.cell_height
+                y_base_top, y_base_bottom = self._interval_content_bounds(self.intervals[i])
+                y_top = self.header_height + y_base_top
+                y_bottom = self.header_height + y_base_bottom
                 
                 bar_width = self._value_to_plot_x(plot_value, scaled, x_pos, width) - (x_pos + 5)
                 
@@ -2189,13 +2287,16 @@ class DrillholeColumnWidget(tk.Frame):
                     scaled.plot_min,
                     scaled.plot_max,
                 )
+                row_bg = self.row_color_even if i % 2 == 0 else self.row_color_odd
+                fill_color = self._blend_color(color, row_bg, 0.42)
                 
                 # Draw bar
                 self.canvas.create_rectangle(
                     x_pos + 5, y_top + 2,
                     x_pos + 5 + bar_width, y_bottom - 2,
-                    fill=color,
-                    outline=self.theme_colors["border"],
+                    fill=fill_color,
+                    outline=self._blend_color(color, row_bg, 0.55),
+                    stipple="gray75",
                     width=1,
                     tags=f"data_bar_{column_name}"
                 )
@@ -2221,7 +2322,7 @@ class DrillholeColumnWidget(tk.Frame):
         bar_height = max(1.0, min(3.0, self.cell_height / 3.0))
         half_height = bar_height / 2.0
 
-        logger.info(f"  Drawing {len(point_values)} point sub-bars for {column_name}")
+        logger.debug(f"  Drawing {len(point_values)} point sub-bars for {column_name}")
 
         for (depth, _raw_value), plot_value in zip(point_values, scaled.values):
             try:
@@ -2238,13 +2339,19 @@ class DrillholeColumnWidget(tk.Frame):
                     scaled.plot_min,
                     scaled.plot_max,
                 )
+                row_bg = self.row_color_even
+                for index, interval in enumerate(self.intervals):
+                    if interval.depth_from <= depth <= interval.depth_to:
+                        row_bg = self.row_color_even if index % 2 == 0 else self.row_color_odd
+                        break
+                fill_color = self._blend_color(color, row_bg, 0.45)
 
                 self.canvas.create_rectangle(
                     x_pos + 5,
                     y_center - half_height,
                     x_pos + 5 + bar_width,
                     y_center + half_height,
-                    fill=color,
+                    fill=fill_color,
                     outline="",
                     tags=f"data_point_bar_{column_name}",
                 )
@@ -2289,7 +2396,9 @@ class DrillholeColumnWidget(tk.Frame):
         )
         
         for i, interval in enumerate(self.intervals):
-            y_pos = self.header_height + (i * self.cell_height)
+            y_base_top, y_base_bottom = self._interval_content_bounds(interval)
+            y_pos = self.header_height + y_base_top
+            interval_height = max(1, y_base_bottom - y_base_top)
             
             # Get average color for this depth
             avg_color = self.average_colors.get(interval.depth_to, "#3a3a3a")
@@ -2300,7 +2409,7 @@ class DrillholeColumnWidget(tk.Frame):
             # Draw background first
             self.canvas.create_rectangle(
                 x_start, y_pos,
-                x_start + self.color_bar_width, y_pos + self.cell_height,
+                x_start + self.color_bar_width, y_pos + interval_height,
                 fill=row_color,
                 outline="",
                 tags=f"color_bar_bg_{interval.interval_id}"
@@ -2309,7 +2418,7 @@ class DrillholeColumnWidget(tk.Frame):
             # Draw color rectangle (slightly inset for visual clarity)
             self.canvas.create_rectangle(
                 x_start + 2, y_pos + 1,
-                x_start + self.color_bar_width - 2, y_pos + self.cell_height - 1,
+                x_start + self.color_bar_width - 2, y_pos + interval_height - 1,
                 fill=avg_color,
                 outline=self.theme_colors["border"],
                 width=1,
@@ -2343,7 +2452,9 @@ class DrillholeColumnWidget(tk.Frame):
         )
         
         for i, interval in enumerate(self.intervals):
-            y_pos = self.header_height + (i * self.cell_height)
+            y_base_top, y_base_bottom = self._interval_content_bounds(interval)
+            y_pos = self.header_height + y_base_top
+            interval_height = max(1, y_base_bottom - y_base_top)
             
             # Alternating row background
             row_color = self.row_color_even if i % 2 == 0 else self.row_color_odd
@@ -2351,7 +2462,7 @@ class DrillholeColumnWidget(tk.Frame):
             # Draw background first
             self.canvas.create_rectangle(
                 x_start, y_pos,
-                x_start + self.thumbnail_width, y_pos + self.cell_height,
+                x_start + self.thumbnail_width, y_pos + interval_height,
                 fill=row_color,
                 outline="",
                 tags=f"thumbnail_bg_{interval.interval_id}"
@@ -2360,7 +2471,7 @@ class DrillholeColumnWidget(tk.Frame):
             avg_color = self.average_colors.get(interval.depth_to, "#2a2a2a")
             placeholder_id = self.canvas.create_rectangle(
                 x_start + 2, y_pos + 1,
-                x_start + self.thumbnail_width - 2, y_pos + self.cell_height - 1,
+                x_start + self.thumbnail_width - 2, y_pos + interval_height - 1,
                 fill=avg_color,
                 outline=self.theme_colors["border"],
                 width=1,
@@ -2368,7 +2479,7 @@ class DrillholeColumnWidget(tk.Frame):
             )
             self.thumbnail_canvas_items[interval.interval_id] = placeholder_id
 
-        logger.info(
+        logger.debug(
             f"Thumbnail placeholders ready for {self.hole_id}; "
             f"lazy loading visible images in {self.thumbnail_lazy_batch_size}-image batches"
         )
@@ -2396,16 +2507,14 @@ class DrillholeColumnWidget(tk.Frame):
         if bottom < self.header_height:
             return []
 
-        start_index = max(0, int(math.floor((top - self.header_height) / self.cell_height)))
-        end_index = min(
-            len(self.intervals) - 1,
-            int(math.floor((bottom - self.header_height) / self.cell_height)),
-        )
-
-        if end_index < start_index:
-            return []
-
-        return list(range(start_index, end_index + 1))
+        visible_start = top - self.header_height
+        visible_end = bottom - self.header_height
+        indices = []
+        for index, interval in enumerate(self.intervals):
+            y_top, y_bottom = self._interval_content_bounds(interval)
+            if y_bottom >= visible_start and y_top <= visible_end:
+                indices.append(index)
+        return indices
 
     def load_visible_thumbnails(
         self,
@@ -2489,18 +2598,21 @@ class DrillholeColumnWidget(tk.Frame):
             img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
             h, w = img.shape[:2]
 
+            y_base_top, y_base_bottom = self._interval_content_bounds(interval)
+            interval_height = max(1, int(round(y_base_bottom - y_base_top)))
+
             new_w, new_h = self._cover_resize_dimensions(
                 w,
                 h,
                 self.thumbnail_width,
-                self.cell_height,
+                interval_height,
             )
             resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
             crop_x = max(0, (new_w - self.thumbnail_width) // 2)
-            crop_y = max(0, (new_h - self.cell_height) // 2)
+            crop_y = max(0, (new_h - interval_height) // 2)
             resized = resized[
-                crop_y:crop_y + self.cell_height,
+                crop_y:crop_y + interval_height,
                 crop_x:crop_x + self.thumbnail_width
             ]
 
@@ -2508,7 +2620,7 @@ class DrillholeColumnWidget(tk.Frame):
             pil_img = Image.fromarray(rgb)
             photo = ImageTk.PhotoImage(pil_img)
 
-            y_pos = self.header_height + (index * self.cell_height)
+            y_pos = self.header_height + y_base_top
             image_id = self.canvas.create_image(
                 self._thumbnail_x_start,
                 y_pos,
@@ -2625,7 +2737,9 @@ class DrillholeColumnWidget(tk.Frame):
             self.image_cache[cache_key] = photo
             
             # Update canvas
-            y_pos = index * self.cell_height
+            y_base_top, y_base_bottom = self._interval_content_bounds(interval)
+            y_pos = y_base_top
+            target_height = max(1, int(round(y_base_bottom - y_base_top)))
             
             # Delete placeholder text
             if interval.interval_id in self.canvas_items:
@@ -2683,12 +2797,14 @@ class DrillholeColumnWidget(tk.Frame):
                 del items["moisture"]
             
             # Restore depth text
-            y_pos = index * self.cell_height
+            y_base_top, y_base_bottom = self._interval_content_bounds(interval)
+            y_pos = y_base_top
+            interval_height = max(1, y_base_bottom - y_base_top)
             x_offset = 30 if self.show_depth_ruler else 0
             
             text_id = self.canvas.create_text(
                 x_offset + self.cell_width // 2,
-                y_pos + self.cell_height // 2,
+                y_pos + interval_height / 2,
                 text=f"{interval.depth_from:.0f}-{interval.depth_to:.0f}m",
                 fill="#666666",
                 font=self.fonts["small"],
@@ -2700,19 +2816,22 @@ class DrillholeColumnWidget(tk.Frame):
         """Handle canvas resize."""
         # Update canvas size to match content
         if self.intervals:
-            total_height = len(self.intervals) * self.cell_height
+            total_height = self.get_total_height()
             self.canvas.configure(height=total_height)
-    
-    def _show_settings(self) -> None:
-        """Show settings dialog for this column."""
-        logger.info(f"Opening settings for {self.hole_id}")
-        # TODO: Implement settings dialog
     
     def apply_depth_transform(self, transform: DepthTransform) -> None:
         """Apply a depth transformation to the display."""
-        logger.info(f"Applying depth transform to {self.hole_id}: {transform.from_depth}-{transform.to_depth}m, factor={transform.stretch_factor}")
+        logger.info(
+            f"Applying depth transform to {self.hole_id}: "
+            f"{len(transform.stretch_regions)} region(s)"
+        )
         
-        # Store transform
+        # Keep one active manual/display transform per segment id.
+        self.depth_transforms = [
+            existing
+            for existing in self.depth_transforms
+            if existing.segment_id != transform.segment_id
+        ]
         self.depth_transforms.append(transform)
         
         # Recalculate positions and redraw
@@ -2720,28 +2839,14 @@ class DrillholeColumnWidget(tk.Frame):
     
     def get_depth_at_y(self, y_pos: int) -> Optional[float]:
         """Get depth value at a Y pixel position."""
-        interval_idx = int(y_pos // self.cell_height)
-        if 0 <= interval_idx < len(self.intervals):
-            interval = self.intervals[interval_idx]
-            # Calculate sub-interval position (0.1m resolution)
-            offset_in_interval = (y_pos % self.cell_height) / self.cell_height
-            depth = interval.depth_from + offset_in_interval * (interval.depth_to - interval.depth_from)
-            return depth
-        return None
+        return self._canvas_y_to_depth(float(y_pos))
     
     def get_y_for_depth(self, depth: Union[float, int]) -> Optional[int]:
         """Get Y pixel position for a depth value."""
         depth = float(depth)
         
-        # Find containing interval
-        for i, interval in enumerate(self.intervals):
-            if interval.depth_from <= depth <= interval.depth_to:
-                # Calculate pixel position
-                interval_fraction = (depth - interval.depth_from) / (interval.depth_to - interval.depth_from)
-                y_pos = i * self.cell_height + interval_fraction * self.cell_height
-                return int(y_pos)
-        
-        return None
+        y_pos = self._depth_to_canvas_y(depth)
+        return int(y_pos) if y_pos is not None else None
 
     def _draw_segments_and_discontinuities(self):
         """Draw segment boundaries and discontinuity markers on canvas"""
@@ -2902,24 +3007,14 @@ class DrillholeColumnWidget(tk.Frame):
         """Convert depth in meters to canvas Y coordinate"""
         if not self.intervals:
             return None
-        
-        # Find which interval contains this depth
-        for i, interval in enumerate(self.intervals):
-            if interval.depth_from <= depth <= interval.depth_to:
-                # Calculate Y position within the interval
-                interval_fraction = (depth - interval.depth_from) / (interval.depth_to - interval.depth_from)
-                y_pos = i * self.cell_height + interval_fraction * self.cell_height
-                return y_pos
-        
-        # If depth is outside intervals, extrapolate
-        if depth < self.intervals[0].depth_from:
-            # Before first interval
+
+        depth_min, depth_max = self._depth_min_max()
+        depth = float(depth)
+        if depth < depth_min:
             return 0
-        elif depth > self.intervals[-1].depth_to:
-            # After last interval
-            return len(self.intervals) * self.cell_height
-        
-        return None
+        if depth > depth_max:
+            return self._content_height_px()
+        return self._display_units_for_depth(depth) * self.cell_height
     
     def update_segments_and_discontinuities(self, segments: List[DrillholeSegment], discontinuities: List[Discontinuity]):
         """Update segments and discontinuities from parent dialog"""
@@ -2955,26 +3050,14 @@ class DrillholeColumnWidget(tk.Frame):
     
     def _canvas_y_to_depth(self, canvas_y: float) -> Optional[float]:
         """Convert canvas Y coordinate to depth in meters"""
-        # Get canvas height
-        canvas_height = self.canvas.winfo_height()
-        if canvas_height <= 0:
+        if not self.intervals or self.cell_height <= 0:
             return None
-        
-        # If we have intervals, use their depth range
-        if self.intervals:
-            depth_min = min(interval.depth_from for interval in self.intervals)
-            depth_max = max(interval.depth_to for interval in self.intervals)
-        else:
-            # Default range
-            depth_min = 0.0
-            depth_max = 300.0
-        
-        # Calculate depth
-        depth_range = depth_max - depth_min
-        relative_y = canvas_y / canvas_height
-        depth = depth_min + (relative_y * depth_range)
-        
-        return depth
+
+        content_y = float(canvas_y)
+        if content_y >= self.header_height:
+            content_y -= self.header_height
+        content_y = max(0.0, min(content_y, float(self._content_height_px())))
+        return self._depth_for_display_units(content_y / self.cell_height)
     
     def _show_context_menu(self, x: int, y: int, depth: float):
         """Show context menu for adding discontinuities"""

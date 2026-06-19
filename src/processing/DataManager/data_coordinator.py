@@ -260,6 +260,11 @@ class DataCoordinator:
         self._tag_definitions: List[Any] = []
         self._hole_drilling_method_cache: Dict[str, Optional[str]] = {}
         self._correlation_source_names_cache: Dict[Tuple[str, ...], List[str]] = {}
+        self._source_rows_by_hole_cache: Dict[Tuple[str, str], "pd.DataFrame"] = {}
+        self._source_column_name_cache: Dict[Tuple[str, Tuple[str, ...]], Optional[str]] = {}
+        self._interval_source_value_cache: Dict[Tuple[str, str, str, float, float], Optional[Any]] = {}
+        self._interval_aggregate_value_cache: Dict[Tuple[str, str, str, float, float, str], Optional[Any]] = {}
+        self._point_values_cache: Dict[Tuple[str, str, str, float, float], List[Tuple[float, float]]] = {}
 
         logger.debug("DataCoordinator initialized")
     
@@ -323,6 +328,7 @@ class DataCoordinator:
             progress_callback("Loading CSV data...", 0)
         
         self._geological_store.load_all()
+        self._clear_geological_access_caches()
 
         # Note: Snowflake data is loaded separately via SnowflakeSessionManager.start_phase2()
         # which calls self.add_source_from_dataframe() after the user triggers it.
@@ -414,6 +420,7 @@ class DataCoordinator:
             if result:
                 self._hole_drilling_method_cache.clear()
                 self._correlation_source_names_cache.clear()
+                self._clear_geological_access_caches()
                 logger.info(f"DataCoordinator: added Snowflake source '{name}' ({len(df):,} rows)")
             return bool(result)
         except Exception as e:
@@ -548,6 +555,63 @@ class DataCoordinator:
             if actual:
                 return actual
         return None
+
+    def _clear_geological_access_caches(self) -> None:
+        """Clear cached coordinator views derived from GeologicalStore data."""
+        self._source_rows_by_hole_cache.clear()
+        self._source_column_name_cache.clear()
+        self._interval_source_value_cache.clear()
+        self._interval_aggregate_value_cache.clear()
+        self._point_values_cache.clear()
+
+    def _get_geological_source(self, source_name: str):
+        """Return an actual source name and IndexedDataSource for a name."""
+        if not self._geological_store or not source_name:
+            return None, None
+
+        source = self._geological_store.get_source(source_name)
+        if source:
+            return source_name, source
+
+        available_by_lower = {
+            name.lower(): name for name in self._geological_store.list_sources()
+        }
+        actual_name = available_by_lower.get(str(source_name).strip().lower())
+        if not actual_name:
+            return None, None
+        return actual_name, self._geological_store.get_source(actual_name)
+
+    def _get_source_rows_for_hole(self, source_name: str, hole_id: str) -> "pd.DataFrame":
+        """Return a cached source slice for one hole from the GeologicalStore index."""
+        import pandas as pd
+
+        actual_name, source = self._get_geological_source(source_name)
+        if not actual_name or not source or not source.is_loaded:
+            return pd.DataFrame()
+
+        hole_key = str(hole_id).strip().upper()
+        cache_key = (actual_name.lower(), hole_key)
+        if cache_key in self._source_rows_by_hole_cache:
+            return self._source_rows_by_hole_cache[cache_key]
+
+        rows = source.get_rows_for_hole(hole_key)
+        self._source_rows_by_hole_cache[cache_key] = rows
+        return rows
+
+    def _resolve_source_column_name(self, source_name: str, aliases: List[str]) -> Optional[str]:
+        """Resolve a column name once per source/alias list."""
+        actual_name, source = self._get_geological_source(source_name)
+        if not actual_name or not source or source.df is None:
+            return None
+
+        alias_key = tuple(str(alias).lower().strip() for alias in aliases)
+        cache_key = (actual_name.lower(), alias_key)
+        if cache_key in self._source_column_name_cache:
+            return self._source_column_name_cache[cache_key]
+
+        column_name = self._resolve_column_name(source.df, aliases)
+        self._source_column_name_cache[cache_key] = column_name
+        return column_name
 
     @staticmethod
     def _resolve_column_name(df: "pd.DataFrame", aliases: List[str]) -> Optional[str]:
@@ -1917,64 +1981,80 @@ class DataCoordinator:
         if not self._geological_store or not source_name or not column:
             return None
 
-        source = self._geological_store.get_source(source_name)
-        if not source or source.df is None or source.df.empty:
+        cache_key = (
+            str(hole_id).strip().upper(),
+            str(source_name).strip().lower(),
+            str(column).strip().lower(),
+            float(depth_from),
+            float(depth_to),
+            str(aggregate or "mean").strip().lower(),
+        )
+        if cache_key in self._interval_aggregate_value_cache:
+            return self._interval_aggregate_value_cache[cache_key]
+
+        hole_df = self._get_source_rows_for_hole(source_name, hole_id)
+        if hole_df.empty:
+            self._interval_aggregate_value_cache[cache_key] = None
             return None
 
-        df = source.df
-        hole_col = self._resolve_column_name(df, ["holeid", "hole_id", "bhid", "drillhole_id", "hole"])
-        value_col = self._resolve_column_name(df, [column])
-        if not hole_col or not value_col:
+        value_col = self._resolve_source_column_name(source_name, [column])
+        if not value_col:
+            self._interval_aggregate_value_cache[cache_key] = None
             return None
 
-        depth_col = self._resolve_column_name(
-            df,
+        depth_col = self._resolve_source_column_name(
+            source_name,
             ["depth", "measurement_depth", "point_depth", "md", "measured_depth"],
         )
-        from_col = self._resolve_column_name(
-            df,
+        from_col = self._resolve_source_column_name(
+            source_name,
             [
                 "geolfrom", "sampfrom", "depth_from", "depthfrom", "from",
                 "depthfrom", "depth_from", "interval_from", "top", "depthfrom",
             ],
         )
-        to_col = self._resolve_column_name(
-            df,
+        to_col = self._resolve_source_column_name(
+            source_name,
             [
                 "geolto", "sampto", "depth_to", "depthto", "to",
                 "interval_to", "bottom", "depthto",
             ],
         )
 
-        hole_mask = df[hole_col].astype(str).str.strip().str.upper() == str(hole_id).strip().upper()
         if depth_col and not (from_col and to_col):
-            depths = pd.to_numeric(df[depth_col], errors="coerce")
-            mask = hole_mask & (depths >= float(depth_from)) & (depths < float(depth_to))
+            depths = pd.to_numeric(hole_df[depth_col], errors="coerce")
+            mask = (depths >= float(depth_from)) & (depths < float(depth_to))
         elif from_col and to_col:
-            starts = pd.to_numeric(df[from_col], errors="coerce")
-            ends = pd.to_numeric(df[to_col], errors="coerce")
-            mask = hole_mask & (starts < float(depth_to)) & (ends > float(depth_from))
+            starts = pd.to_numeric(hole_df[from_col], errors="coerce")
+            ends = pd.to_numeric(hole_df[to_col], errors="coerce")
+            mask = (starts < float(depth_to)) & (ends > float(depth_from))
         else:
+            self._interval_aggregate_value_cache[cache_key] = None
             return None
 
-        matched = df.loc[mask, value_col]
+        matched = hole_df.loc[mask, value_col]
         if matched.empty:
+            self._interval_aggregate_value_cache[cache_key] = None
             return None
 
         numeric = pd.to_numeric(matched, errors="coerce").dropna()
         if numeric.empty:
+            self._interval_aggregate_value_cache[cache_key] = None
             return None
 
         agg = (aggregate or "mean").lower()
         if agg == "min":
-            return float(numeric.min())
-        if agg == "max":
-            return float(numeric.max())
-        if agg == "median":
-            return float(numeric.median())
-        if agg == "sum":
-            return float(numeric.sum())
-        return float(numeric.mean())
+            result = float(numeric.min())
+        elif agg == "max":
+            result = float(numeric.max())
+        elif agg == "median":
+            result = float(numeric.median())
+        elif agg == "sum":
+            result = float(numeric.sum())
+        else:
+            result = float(numeric.mean())
+        self._interval_aggregate_value_cache[cache_key] = result
+        return result
 
     def get_interval_source_value(
         self,
@@ -1990,37 +2070,47 @@ class DataCoordinator:
         if not self._geological_store or not source_name or not column:
             return None
 
-        source = self._geological_store.get_source(source_name)
-        if not source or source.df is None or source.df.empty:
+        cache_key = (
+            str(hole_id).strip().upper(),
+            str(source_name).strip().lower(),
+            str(column).strip().lower(),
+            float(depth_from),
+            float(depth_to),
+        )
+        if cache_key in self._interval_source_value_cache:
+            return self._interval_source_value_cache[cache_key]
+
+        hole_df = self._get_source_rows_for_hole(source_name, hole_id)
+        if hole_df.empty:
+            self._interval_source_value_cache[cache_key] = None
             return None
 
-        df = source.df
-        hole_col = self._resolve_column_name(df, ["holeid", "hole_id", "bhid", "drillhole_id", "hole"])
-        value_col = self._resolve_column_name(df, [column])
-        from_col = self._resolve_column_name(
-            df,
+        value_col = self._resolve_source_column_name(source_name, [column])
+        from_col = self._resolve_source_column_name(
+            source_name,
             ["geolfrom", "sampfrom", "depth_from", "depthfrom", "from", "interval_from", "top"],
         )
-        to_col = self._resolve_column_name(
-            df,
+        to_col = self._resolve_source_column_name(
+            source_name,
             ["geolto", "sampto", "depth_to", "depthto", "to", "interval_to", "bottom"],
         )
-        if not hole_col or not value_col or not from_col or not to_col:
+        if not value_col or not from_col or not to_col:
+            self._interval_source_value_cache[cache_key] = None
             return None
 
-        starts = pd.to_numeric(df[from_col], errors="coerce")
-        ends = pd.to_numeric(df[to_col], errors="coerce")
+        starts = pd.to_numeric(hole_df[from_col], errors="coerce")
+        ends = pd.to_numeric(hole_df[to_col], errors="coerce")
         mask = (
-            (df[hole_col].astype(str).str.strip().str.upper() == str(hole_id).strip().upper())
-            & starts.notna()
+            starts.notna()
             & ends.notna()
             & (starts < float(depth_to))
             & (ends > float(depth_from))
         )
         if not mask.any():
+            self._interval_source_value_cache[cache_key] = None
             return None
 
-        matches = df.loc[mask, [value_col]].copy()
+        matches = hole_df.loc[mask, [value_col]].copy()
         matches["_overlap"] = (
             pd.concat(
                 [
@@ -2040,7 +2130,9 @@ class DataCoordinator:
         matches = matches.sort_values("_overlap", ascending=False)
         for value in matches[value_col]:
             if pd.notna(value):
+                self._interval_source_value_cache[cache_key] = value
                 return value
+        self._interval_source_value_cache[cache_key] = None
         return None
 
     def get_point_values_for_interval(
@@ -2063,35 +2155,47 @@ class DataCoordinator:
         if not self._geological_store or not source_name or not column:
             return []
 
-        source = self._geological_store.get_source(source_name)
-        if not source or source.df is None or source.df.empty:
+        cache_key = (
+            str(hole_id).strip().upper(),
+            str(source_name).strip().lower(),
+            str(column).strip().lower(),
+            float(depth_from),
+            float(depth_to),
+        )
+        if cache_key in self._point_values_cache:
+            return list(self._point_values_cache[cache_key])
+
+        hole_df = self._get_source_rows_for_hole(source_name, hole_id)
+        if hole_df.empty:
+            self._point_values_cache[cache_key] = []
             return []
 
-        df = source.df
-        hole_col = self._resolve_column_name(df, ["holeid", "hole_id", "bhid", "drillhole_id", "hole"])
-        depth_col = self._resolve_column_name(
-            df,
+        depth_col = self._resolve_source_column_name(
+            source_name,
             ["depth", "measurement_depth", "point_depth", "md", "measured_depth"],
         )
-        value_col = self._resolve_column_name(df, [column])
-        if not hole_col or not depth_col or not value_col:
+        value_col = self._resolve_source_column_name(source_name, [column])
+        if not depth_col or not value_col:
+            self._point_values_cache[cache_key] = []
             return []
 
-        depths = pd.to_numeric(df[depth_col], errors="coerce")
-        values = pd.to_numeric(df[value_col], errors="coerce")
+        depths = pd.to_numeric(hole_df[depth_col], errors="coerce")
+        values = pd.to_numeric(hole_df[value_col], errors="coerce")
         mask = (
-            (df[hole_col].astype(str).str.strip().str.upper() == str(hole_id).strip().upper())
-            & (depths >= float(depth_from))
+            (depths >= float(depth_from))
             & (depths < float(depth_to))
             & depths.notna()
             & values.notna()
         )
         if not mask.any():
+            self._point_values_cache[cache_key] = []
             return []
 
         points = pd.DataFrame({"depth": depths[mask], "value": values[mask]})
         points = points.sort_values("depth")
-        return [(float(row.depth), float(row.value)) for row in points.itertuples(index=False)]
+        result = [(float(row.depth), float(row.value)) for row in points.itertuples(index=False)]
+        self._point_values_cache[cache_key] = result
+        return list(result)
     
     def get_stats(self) -> Dict[str, Any]:
         """Get comprehensive statistics about the data coordinator."""
