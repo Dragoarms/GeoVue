@@ -158,6 +158,7 @@ class DrillholeColumnWidget(tk.Frame):
         self.on_discontinuity_add_requested = None  # Callback(hole_id, depth, type)
         self.on_discontinuity_remove_requested = None  # Callback(hole_id, depth)
         self.on_warp_bar_requested = None  # Callback(segment)
+        self.on_televiewer_open_requested = None  # Callback(hole_id, depth)
         self.on_layout_changed = None  # Callback after width/height changes
         
         # Scrolling and viewport
@@ -3068,6 +3069,12 @@ class DrillholeColumnWidget(tk.Frame):
         
         self.context_menu = tk.Menu(self, tearoff=0)
         self.context_click_depth = depth
+
+        self.context_menu.add_command(
+            label="Open Televiewer Here...",
+            command=lambda d=depth: self._request_open_televiewer(d),
+        )
+        self.context_menu.add_separator()
         
         # Add Discontinuity submenu
         disc_menu = tk.Menu(self.context_menu, tearoff=0)
@@ -3127,6 +3134,14 @@ class DrillholeColumnWidget(tk.Frame):
         
         if self.on_discontinuity_remove_requested:
             self.on_discontinuity_remove_requested(self.hole_id, depth)
+
+    def _request_open_televiewer(self, depth: float):
+        """Request parent dialog to open the televiewer viewer at this depth."""
+        logger.info(f"Requesting televiewer open at {depth:.1f}m in {self.hole_id}")
+        if self.on_televiewer_open_requested:
+            self.on_televiewer_open_requested(self.hole_id, depth)
+        else:
+            logger.warning("No handler for on_televiewer_open_requested")
     
     def _request_warp_bar(self, segment):
         """Request parent dialog to show warp bar"""

@@ -155,6 +155,42 @@ Pixels,Pixels,Pixels
 Please select a folder,Please select a folder,Veuillez sélectionner un dossier
 Please select both sharp and blurry images,Please select both sharp and blurry images,Veuillez sélectionner à la fois des images nettes et floues
 Process Photos,Process Photos,Traiter les photos
+Process Televiewer,Process Televiewer,Traiter Televiewer
+Process Televiewer Data (.tfd),Process Televiewer Data (.tfd),Traiter les donnees Televiewer (.tfd)
+Select televiewer TFD files,Select televiewer TFD files,Selectionner les fichiers TFD Televiewer
+Televiewer TFD files,Televiewer TFD files,Fichiers TFD Televiewer
+Televiewer Viewer,Televiewer Viewer,Visionneuse Televiewer
+Televiewer Viewer Error,Televiewer Viewer Error,Erreur de la visionneuse Televiewer
+Televiewer Datasets,Televiewer Datasets,Jeux de donnees Televiewer
+Start m,Start m,Debut m
+Range m,Range m,Intervalle m
+Geometry,Geometry,Geometrie
+Chip tray,Chip tray,Plateau d'echantillons
+Open Selected,Open Selected,Ouvrir la selection
+Open BA0007 Prototype,Open BA0007 Prototype,Ouvrir le prototype BA0007
+Select a processed televiewer manifest first.,Select a processed televiewer manifest first.,Selectionnez d'abord un manifeste Televiewer traite.
+BA0007 prototype data was not found in the ignored scratch folder.,BA0007 prototype data was not found in the ignored scratch folder.,Les donnees du prototype BA0007 sont introuvables dans le dossier de travail ignore.
+Add TFD Files,Add TFD Files,Ajouter des fichiers TFD
+Choose TFD Folder,Choose TFD Folder,Choisir un dossier TFD
+Choose TFD Files,Choose TFD Files,Choisir des fichiers TFD
+Select folder containing TFD files,Select folder containing TFD files,Selectionner le dossier contenant les fichiers TFD
+Prepare Dataset Folders,Prepare Dataset Folders,Preparer les dossiers du jeu de donnees
+Open Televiewer Viewer,Open Televiewer Viewer,Ouvrir la visionneuse Televiewer
+Open Televiewer,Open Televiewer,Ouvrir Televiewer
+Open Televiewer Here...,Open Televiewer Here...,Ouvrir Televiewer ici...
+No holes are loaded.,No holes are loaded.,Aucun trou charge.
+Copy raw TFD into shared dataset store,Copy raw TFD into shared dataset store,Copier le TFD brut dans le stockage partage
+Select one or more .tfd files first.,Select one or more .tfd files first.,Selectionnez d'abord un ou plusieurs fichiers .tfd.
+Televiewer dataset folders and placeholder manifests are ready.,Televiewer dataset folders and placeholder manifests are ready.,Les dossiers Televiewer et les manifestes provisoires sont prets.
+Decode image slices now,Decode image slices now,Decoder les images maintenant
+Pixels per meter,Pixels per meter,Pixels par metre
+Process Televiewer Dataset,Process Televiewer Dataset,Traiter le jeu de donnees Televiewer
+Televiewer dataset folders and manifests are ready.,Televiewer dataset folders and manifests are ready.,Les dossiers et manifestes Televiewer sont prets.
+Televiewer Processing Error,Televiewer Processing Error,Erreur de traitement Televiewer
+Processing options,Processing options,Options de traitement
+Enrich with GeoVue collar/survey/geophysics/assay data,Enrich with GeoVue collar/survey/geophysics/assay data,Enrichir avec les donnees GeoVue collar/survey/geophysique/analyse
+Televiewer dataset folders are ready.,Televiewer dataset folders are ready.,Les dossiers Televiewer sont prets.
+Televiewer slices and viewer data are ready.,Televiewer slices and viewer data are ready.,Les tranches Televiewer et les donnees de visualisation sont pretes.
 Processed Originals Folder:,Processed Originals Folder:,Dossier des originaux traités:
 Progress,Progress,Progression
 Quality Alert Threshold,Quality Alert Threshold,Seuil d'alerte qualité

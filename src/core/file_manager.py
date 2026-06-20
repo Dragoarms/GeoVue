@@ -114,6 +114,7 @@ class FileManager:
         "compartments": "Extracted Compartment Images",
         "traces": "Drillhole Traces",
         "datasets": "Drillhole Datasets",
+        "televiewer_datasets": "Televiewer Datasets",
         "cross_sections": "Cross Sections",
         "debugging": "Debugging",
     }
@@ -184,6 +185,8 @@ class FileManager:
             / self.SUBFOLDER_NAMES["review_compartments"],
             "drill_traces": self.base_dir / self.FOLDER_NAMES["traces"],
             "datasets": self.base_dir / self.FOLDER_NAMES["datasets"],
+            "televiewer_datasets": self.base_dir
+            / self.FOLDER_NAMES["televiewer_datasets"],
             "debugging": self.base_dir / self.FOLDER_NAMES["debugging"],
             "blur_analysis": self.base_dir
             / self.FOLDER_NAMES["debugging"]
@@ -246,6 +249,8 @@ class FileManager:
                 / self.SUBFOLDER_NAMES["review_compartments"],
                 "drill_traces": self.shared_base_dir / self.FOLDER_NAMES["traces"],
                 "datasets": self.shared_base_dir / self.FOLDER_NAMES["datasets"],
+                "televiewer_datasets": self.shared_base_dir
+                / self.FOLDER_NAMES["televiewer_datasets"],
                 "cross_sections": (
                     Path(self.config_manager.get("shared_folder_cross_sections"))
                     if (
@@ -299,6 +304,10 @@ class FileManager:
                 )
                 self.config_manager.set(
                     "shared_folder_drill_traces", str(self.shared_paths["drill_traces"])
+                )
+                self.config_manager.set(
+                    "shared_folder_televiewer_datasets",
+                    str(self.shared_paths["televiewer_datasets"]),
                 )
                 # Only write default cross_sections path when user has not set one
                 if not self.config_manager.get("shared_folder_cross_sections"):
@@ -400,6 +409,7 @@ class FileManager:
                         "review_compartments": "shared_folder_review_compartments_folder",
                         "drill_traces": "shared_folder_drill_traces",
                         "datasets": "shared_folder_datasets",
+                        "televiewer_datasets": "shared_folder_televiewer_datasets",
                         "cross_sections": "shared_folder_cross_sections",
                     }
 

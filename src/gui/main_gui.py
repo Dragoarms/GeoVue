@@ -311,6 +311,15 @@ class MainGUI:
         self.process_button.pack(side=tk.LEFT, padx=5)
         primary_process_button = self.process_button
 
+        televiewer_button = self.gui_manager.create_modern_button(
+            processing_buttons_frame,
+            text=self.t("Process Televiewer Data (.tfd)"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._process_televiewer_data,
+            icon=None,
+        )
+        televiewer_button.pack(side=tk.LEFT, padx=5)
+
         review_button = self.gui_manager.create_modern_button(
             processing_buttons_frame,
             text=self.t("Review Extracted Images"),
@@ -665,6 +674,15 @@ class MainGUI:
         )
         correlation_button.pack(side=tk.LEFT, padx=5)
 
+        televiewer_viewer_button = self.gui_manager.create_modern_button(
+            analysis_buttons_frame,
+            text=self.t("Televiewer Viewer"),
+            color=self.gui_manager.theme_colors["accent_blue"],
+            command=self._open_televiewer_viewer,
+            icon=None,
+        )
+        televiewer_viewer_button.pack(side=tk.LEFT, padx=5)
+
         report_button = self.gui_manager.create_modern_button(
             analysis_buttons_frame,
             text=self.t("Logging Review Report"),
@@ -953,6 +971,13 @@ class MainGUI:
                     "icon": "✏",
                 },
                 {
+                    "name": "televiewer_process_button",
+                    "text": self.t("Process Televiewer"),
+                    "color": accent_blue,
+                    "command": self._process_televiewer_data,
+                    "icon": "OTV",
+                },
+                {
                     "name": "review_extracted_button",
                     "text": self.t("Review Extracted"),
                     "color": accent_blue,
@@ -990,6 +1015,13 @@ class MainGUI:
                     "color": accent_blue,
                     "command": self._open_drillhole_correlation,
                     "icon": "📊",
+                },
+                {
+                    "name": "televiewer_viewer_button",
+                    "text": self.t("Televiewer Viewer"),
+                    "color": accent_blue,
+                    "command": self._open_televiewer_viewer,
+                    "icon": "OTV",
                 },
                 {
                     "name": "quit_button",
@@ -1098,10 +1130,10 @@ class MainGUI:
         """Open the Data Settings dialog for column configuration."""
         try:
             from gui.column_settings_dialog import ColumnSettingsDialog
-            
+
             # Get data coordinator from app
             data_coordinator = getattr(self.app, 'data_coordinator', None)
-            
+
             if not data_coordinator or not data_coordinator.is_initialized:
                 from gui.dialog_helper import DialogHelper
                 DialogHelper.show_message(
@@ -1111,7 +1143,7 @@ class MainGUI:
                     message_type="warning"
                 )
                 return
-            
+
             dialog = ColumnSettingsDialog(
                 parent=self.root,
                 gui_manager=self.gui_manager,
@@ -1119,9 +1151,9 @@ class MainGUI:
                 config_manager=self.app.config_manager,
                 on_save_callback=self._on_data_settings_saved,
             )
-            
+
             dialog.show()
-            
+
         except ImportError as e:
             self.logger.error(f"Could not import ColumnSettingsDialog: {e}")
             from gui.dialog_helper import DialogHelper
@@ -1135,37 +1167,37 @@ class MainGUI:
             self.logger.error(f"Error opening Data Settings: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
-    
+
     def _on_data_settings_saved(self):
         """Callback when data settings are saved."""
         self.logger.info("Data settings saved - refreshing data coordinator")
         # Optionally refresh UI or data coordinator here
         self.update_status(self.t("Data settings updated."), "info")
-    
+
     def _open_color_map_settings(self):
         """Open the Color Map Editor dialog."""
         try:
             from gui.color_map_editor_dialog import ColorMapEditorDialog
-            
+
             # Get data coordinator for color maps and data
             data_coordinator = getattr(self.app, 'data_coordinator', None)
-            
+
             dialog = ColorMapEditorDialog(
                 parent=self.root,
                 gui_manager=self.gui_manager,
                 data_coordinator=data_coordinator,
                 on_save_callback=lambda: self.update_status(self.t("Color map saved."), "info"),
             )
-            
+
             dialog.show()
-            
+
         except ImportError as e:
             self.logger.error(f"Could not import ColorMapEditorDialog: {e}")
         except Exception as e:
             self.logger.error(f"Error opening Color Map settings: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
-    
+
     def _open_classification_manager(self):
         """Open the Classification Manager dialog."""
         # If you have an existing classification manager dialog, call it here
@@ -1177,7 +1209,7 @@ class MainGUI:
             self.t("Classification Manager dialog - coming soon."),
             message_type="info"
         )
-    
+
     def _open_tag_manager(self):
         """Open the Tag Manager dialog."""
         # If you have an existing tag manager dialog, call it here
@@ -1194,7 +1226,7 @@ class MainGUI:
         """Open the Original Image Viewer dialog."""
         try:
             from gui.original_image_viewer_dialog import open_original_image_viewer
-            
+
             # Create a new instance of the viewer (allows multiple windows)
             viewer = open_original_image_viewer(
                 parent=self.root,
@@ -1202,9 +1234,9 @@ class MainGUI:
                 gui_manager=self.gui_manager,
                 json_register_manager=self.app.register_manager
             )
-            
+
             logger.info("Opened Original Image Viewer dialog")
-            
+
         except Exception as e:
             logger.error(f"Error opening Original Image Viewer: {e}")
             import traceback
@@ -1215,7 +1247,7 @@ class MainGUI:
                 self.t(f"Failed to open Original Image Viewer:\n\n{str(e)}"),
                 message_type="error"
             )
-    
+
     def _open_bulk_renamer(self):
         """
         Open the Bulk Photo Renamer using DialogHelper (PEP-8: docstring).
@@ -1415,7 +1447,7 @@ class MainGUI:
                 # Build an interval-based dictionary to consolidate wet/dry
                 # Key: (hole_id, depth_from, depth_to), Value: {wet_hex, dry_hex, etc}
                 interval_props = {}
-                
+
                 # Build lookup dictionary from existing properties for fast skip logic
                 # Key: (hole_id, depth_from, depth_to), Value: {Wet_Hex, Dry_Hex, etc}
                 existing_intervals = {}
@@ -1426,7 +1458,7 @@ class MainGUI:
                         prop.get("Depth_To"),
                     )
                     existing_intervals[key] = prop
-                
+
                 self.logger.info(f"Found {len(existing_intervals)} existing intervals in register")
 
                 # Process each image file
@@ -1556,7 +1588,7 @@ class MainGUI:
                             interval_props[interval_key]["Dry_Hex"] = color_result[
                                 "hex_color"
                             ]
-                        
+
                         # Update Combined_Hex (prefer Dry, fallback to Wet)
                         dry_hex = interval_props[interval_key].get("Dry_Hex", "")
                         wet_hex = interval_props[interval_key].get("Wet_Hex", "")
@@ -3077,6 +3109,59 @@ class MainGUI:
             # Start the processing cycle with a single timer
             self.root.after(100, self._process_cycle)
 
+    def _get_televiewer_data_manager(self):
+        """Return the initialized GeoVue DataCoordinator for Televiewer enrichment."""
+        data_manager = getattr(self.app, "data_coordinator", None)
+        if data_manager is not None and getattr(data_manager, "is_initialized", False):
+            return data_manager
+        if data_manager is not None and self.logger:
+            self.logger.warning("Televiewer enrichment opened before DataCoordinator finished initializing")
+        return None
+
+    def _process_televiewer_data(self):
+        """Open the televiewer TFD processing workflow."""
+        try:
+            from gui.Televiewer.televiewer_process_dialog import TeleviewerProcessDialog
+
+            TeleviewerProcessDialog(
+                self.root,
+                self.gui_manager,
+                self.file_manager,
+                config_manager=self.config_manager,
+                logger=self.logger,
+                data_manager=self._get_televiewer_data_manager(),
+                register_manager=getattr(self.app, "register_manager", None),
+            )
+        except Exception as e:
+            self.logger.error(f"Error opening televiewer processor: {e}")
+            DialogHelper.show_message(
+                self.root,
+                self.t("Televiewer Processing Error"),
+                str(e),
+                message_type="error",
+            )
+
+    def _open_televiewer_viewer(self):
+        """Open the televiewer WebGL viewer launcher."""
+        try:
+            from gui.Televiewer.televiewer_viewer_dialog import TeleviewerViewerDialog
+
+            TeleviewerViewerDialog(
+                self.root,
+                self.gui_manager,
+                self.file_manager,
+                config_manager=self.config_manager,
+                register_manager=getattr(self.app, "register_manager", None),
+            )
+        except Exception as e:
+            self.logger.error(f"Error opening televiewer viewer: {e}")
+            DialogHelper.show_message(
+                self.root,
+                self.t("Televiewer Viewer Error"),
+                str(e),
+                message_type="error",
+            )
+
     def _process_cycle(self):
         """Process cycle that handles one image at a time and only continues after completion."""
         current_thread = threading.current_thread()
@@ -3465,19 +3550,19 @@ class MainGUI:
                 self.t("Failed to open embedding tool") + f"\n{str(e)}",
                 message_type="error",
             )
-    
+
     def _open_drillhole_correlation(self):
         """Open the drillhole correlation dialog."""
         try:
             import pandas as pd
-            
+
             # Get collar data from DataCoordinator (CSV or Snowflake Phase 2)
             self.logger.info("Loading collar data...")
-            
+
             collar_data = pd.DataFrame()
             data_coordinator = getattr(self.app, 'data_coordinator', None)
             self.logger.debug(f"[COLLAR] data_coordinator from app: {data_coordinator is not None}")
-            
+
             if data_coordinator and data_coordinator.is_initialized:
                 collar_data = data_coordinator.get_collar_data()
                 if collar_data.empty:
@@ -3488,7 +3573,7 @@ class MainGUI:
                     self.logger.warning(f"[COLLAR] No usable collar source found in: {available_sources}")
             else:
                 self.logger.warning(f"[COLLAR] DataCoordinator not available or not initialized")
-            
+
             if collar_data.empty:
                 # No collar data available - show error
                 from gui.dialog_helper import DialogHelper
@@ -3503,25 +3588,25 @@ class MainGUI:
                     message_type="error",
                 )
                 return
-            
+
             self.logger.info(f"Loaded {len(collar_data)} collars for correlation")
-            
+
             # Create dialog helper instance
             from gui.dialog_helper import DialogHelper
             dialog_helper = DialogHelper(self.root, self.translator)
-            
+
             # Get previous selection if it exists (for remembering state)
             initial_selection = getattr(self, '_last_drillhole_selection', None)
             if initial_selection:
                 # Extract internal data from previous result
                 initial_selection = initial_selection.get('_internal')
-            
+
             # Get initial holes from last selection if available
             initial_holes = None
             if hasattr(self, '_last_drillhole_selection') and self._last_drillhole_selection:
                 initial_holes = self._last_drillhole_selection.get('hole_ids', [])
                 self.logger.info(f"Using {len(initial_holes)} holes from last selection")
-            
+
             # Initialize color map manager if not already available
             color_map_manager = None
             if hasattr(self, 'color_map_manager'):
@@ -3533,7 +3618,7 @@ class MainGUI:
                     self.logger.info("Created ColorMapManager for correlation")
                 except ImportError:
                     self.logger.warning("ColorMapManager not available - data visualization will be limited")
-            
+
             # Data is already loaded in data_coordinator at startup
             # Just verify it's available
             if data_coordinator:
@@ -3541,11 +3626,11 @@ class MainGUI:
                 self.logger.info(f"[COLLAR] DataCoordinator has {stats.get('geological_store', {}).get('total_rows', 0)} rows loaded")
             else:
                 self.logger.warning("[COLLAR] DataCoordinator not available - some features may be limited")
-            
+
             # Open correlation dialog with all required managers
             self.logger.info("Creating CorrelationDialog...")
             self.logger.debug(f"[COLLAR] Passing data_coordinator as data_manager: {data_coordinator is not None}")
-            
+
             dialog = CorrelationDialog(
                 parent=self.root,
                 gui_manager=self.gui_manager,
@@ -3555,16 +3640,17 @@ class MainGUI:
                 color_map_manager=color_map_manager,
                 translator=self.translator,
                 dialog_helper=dialog_helper,
+                register_manager=getattr(self.app, "register_manager", None),
                 initial_holes=initial_holes
             )
-            
+
             self.logger.info("CorrelationDialog opened successfully")
-                
+
         except Exception as e:
             self.logger.error(f"Error opening drillhole selector: {str(e)}")
             import traceback
             traceback.print_exc()
-            
+
             from gui.dialog_helper import DialogHelper
             DialogHelper.show_message(
                 self.root,
@@ -3777,11 +3863,11 @@ class MainGUI:
         if start_review and hasattr(self.app, "qaqc_manager"):
             self.app.qaqc_manager.start_review_process()
 
-    
+
     def _sync_to_cloud(self):
         """Sync local files to cloud storage with UID verification."""
         self.logger.info("=== SYNC TO CLOUD STARTED ===")
-        
+
         try:
             # Check if cloud storage is configured FIRST (this is fast)
             if not self.file_manager.shared_paths:
@@ -3797,29 +3883,29 @@ class MainGUI:
 
             # Show progress dialog IMMEDIATELY - before any blocking operations
             self.update_status("Preparing cloud sync...", "info")
-            
+
             checking_dialog = ProgressDialog(
                 self.root,
                 self.t("Sync to Cloud"),
                 self.t("Preparing..."),
                 modal=False  # Don't use modal to avoid grab_set() issues
             )
-            
+
             # Force the dialog to appear NOW
             checking_dialog.update_progress(self.t("Initializing..."), 2)
             self.root.update_idletasks()
             self.root.update()
-            
+
             self.logger.debug("Progress dialog shown")
-            
+
             # Container for background thread results
             result_container = {
-                "summary": None, 
-                "error": None, 
+                "summary": None,
+                "error": None,
                 "completed": False,
                 "dedup_results": None
             }
-            
+
             def progress_callback(msg, pct):
                 """Thread-safe progress callback."""
                 def update_ui():
@@ -3829,7 +3915,7 @@ class MainGUI:
                     except Exception:
                         pass
                 self.root.after_idle(update_ui)
-            
+
             def background_prepare():
                 """Background task: run deduplication and gather summary."""
                 self.logger.info("Background: Starting preparation...")
@@ -3846,26 +3932,26 @@ class MainGUI:
                         self.logger.warning(f"Background: Deduplication failed - {e}")
 
                     progress_callback(self.t("Preparation complete"), 20)
-                    
+
                     # Step 2: Create sync manager and get summary (20% - 100%)
                     progress_callback(self.t("Scanning files..."), 25)
-                    
+
                     from utils.cloud_sync_manager import CloudSyncManager
                     sync_manager = CloudSyncManager(self.file_manager, self.logger)
-                    
+
                     # Get summary with progress updates
                     def summary_progress(msg, pct):
                         # Scale from 25% to 95%
                         scaled_pct = 25 + int(pct * 0.70)
                         progress_callback(msg, scaled_pct)
-                    
+
                     summary = sync_manager.get_sync_summary(progress_callback=summary_progress)
                     result_container["summary"] = summary
                     result_container["sync_manager"] = sync_manager
-                    
+
                     self.logger.info(f"Background: Summary complete - {summary}")
                     progress_callback(self.t("Scan complete"), 100)
-                    
+
                 except Exception as e:
                     self.logger.error(f"Background: Error - {e}")
                     import traceback
@@ -3874,12 +3960,12 @@ class MainGUI:
                 finally:
                     result_container["completed"] = True
                     self.logger.info("Background: Finished")
-            
+
             # Start background thread
             self.logger.debug("Starting background preparation thread...")
             prep_thread = threading.Thread(target=background_prepare, daemon=True)
             prep_thread.start()
-            
+
             # Poll for completion using after()
             def check_preparation_complete():
                 if result_container["completed"]:
@@ -3888,16 +3974,16 @@ class MainGUI:
                         checking_dialog.close()
                     except Exception:
                         pass
-                    
+
                     # Process results on main thread
                     self._process_sync_preparation(result_container)
                 else:
                     # Check again in 100ms
                     self.root.after(100, check_preparation_complete)
-            
+
             # Start polling
             self.root.after(100, check_preparation_complete)
-            
+
         except Exception as e:
             self.logger.error(f"Error in cloud sync: {str(e)}")
             import traceback
@@ -3912,7 +3998,7 @@ class MainGUI:
     def _process_sync_preparation(self, result_container):
         """Process the sync preparation results and show confirmation dialog."""
         self.logger.debug("Processing sync preparation results...")
-        
+
         try:
             # Handle dedup results
             dedup_results = result_container.get("dedup_results")
@@ -3927,7 +4013,7 @@ class MainGUI:
                         f"⚠ Found {dedup_results['uid_conflicts']} UID conflicts requiring manual review",
                         "warning",
                     )
-            
+
             # Handle errors
             if result_container.get("error"):
                 DialogHelper.show_message(
@@ -3937,10 +4023,10 @@ class MainGUI:
                     message_type="error",
                 )
                 return
-            
+
             summary = result_container.get("summary")
             sync_manager = result_container.get("sync_manager")
-            
+
             if not summary:
                 DialogHelper.show_message(
                     self.root,
@@ -3949,7 +4035,7 @@ class MainGUI:
                     message_type="error",
                 )
                 return
-            
+
             # Check if cloud is configured
             if not summary.get("cloud_configured", False):
                 DialogHelper.show_message(
@@ -4049,7 +4135,7 @@ class MainGUI:
 
             # Run the actual sync
             self._run_cloud_sync(sync_manager)
-            
+
         except Exception as e:
             self.logger.error(f"Error processing sync preparation: {e}")
             import traceback
@@ -4064,14 +4150,14 @@ class MainGUI:
     def _run_cloud_sync(self, sync_manager):
         """Run the actual cloud sync operation in background."""
         self.logger.info("Starting cloud sync operation...")
-        
+
         progress_dialog = ProgressDialog(
             self.root,
             self.t("Syncing to Cloud"),
             self.t("Starting sync..."),
             modal=False
         )
-        
+
         result_container = {"result": None, "completed": False}
 
         def sync_progress_callback(msg, pct):

@@ -456,6 +456,7 @@ class JSONRegisterManager:
     # Shared register files (no user suffix - everyone uses same data)
     IMAGE_PROPERTIES_JSON = "compartment_image_properties.json"
     MISSING_TRAY_STATUS_JSON = "missing_tray_status.json"
+    TELEVIEWER_ANNOTATIONS_JSON = "televiewer_annotations.json"
 
     EXCEL_FILE = "Chip_Tray_Register.xlsx"
     DATA_SUBFOLDER = "Register Data (Do not edit)"
@@ -754,6 +755,8 @@ class JSONRegisterManager:
         # Shared (non-user-suffixed) paths
         self.missing_tray_status_path = self.data_path / self.MISSING_TRAY_STATUS_JSON
         self.missing_tray_status_lock = self.missing_tray_status_path.with_suffix(".json.lock")
+        self.televiewer_annotations_path = self.data_path / self.TELEVIEWER_ANNOTATIONS_JSON
+        self.televiewer_annotations_lock = self.televiewer_annotations_path.with_suffix(".json.lock")
 
         # Use RLock instead of Lock to prevent deadlocks from nested calls
         self._thread_lock = threading.RLock()
@@ -5811,7 +5814,7 @@ class JSONRegisterManager:
     def read_missing_tray_status(self) -> Dict[str, Dict]:
         """
         Read the shared missing tray status file.
-        
+
         Returns:
             Dict keyed by tray key (e.g. "BA0001_60-80") with status entries.
             Returns empty dict if file doesn't exist or is unreadable.
@@ -5839,10 +5842,10 @@ class JSONRegisterManager:
     def write_missing_tray_status(self, data: Dict[str, Dict]) -> bool:
         """
         Write the shared missing tray status file with backup.
-        
+
         Args:
             data: Dict keyed by tray key with status entries.
-            
+
         Returns:
             True if written successfully.
         """
@@ -5870,6 +5873,96 @@ class JSONRegisterManager:
             return False
         finally:
             self._release_file_lock(self.missing_tray_status_lock)
+
+    # ===== Televiewer Annotations =====
+
+    def read_televiewer_annotations(self, hole_id: Optional[str] = None) -> Dict[str, Dict]:
+        """
+        Read shared televiewer interpretation annotations.
+
+        Args:
+            hole_id: Optional hole ID to return a single annotation entry.
+
+        Returns:
+            Dict keyed by uppercase hole ID. Each entry contains metadata and
+            a ``payload`` dict with viewer-specific observations/planes.
+        """
+        if not self._acquire_file_lock(self.televiewer_annotations_lock):
+            self.logger.warning("Could not acquire lock for televiewer annotations")
+            return {}
+        try:
+            if not self.televiewer_annotations_path.exists():
+                data = {}
+            elif self.televiewer_annotations_path.stat().st_size == 0:
+                data = {}
+            else:
+                with open(self.televiewer_annotations_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                data = loaded if isinstance(loaded, dict) else {}
+            if hole_id:
+                key = str(hole_id).strip().upper()
+                return {key: data.get(key, {})}
+            return data
+        except Exception as e:
+            self.logger.error(f"Error reading televiewer annotations: {e}")
+            return {}
+        finally:
+            self._release_file_lock(self.televiewer_annotations_lock)
+
+    def write_televiewer_annotations(self, data: Dict[str, Dict]) -> bool:
+        """Write the shared televiewer annotation register with backup."""
+        if not isinstance(data, dict):
+            self.logger.error("Televiewer annotations must be a dict keyed by hole ID")
+            return False
+        if not self._acquire_file_lock(self.televiewer_annotations_lock):
+            self.logger.error("Could not acquire lock for televiewer annotation write")
+            return False
+        try:
+            self.data_path.mkdir(parents=True, exist_ok=True)
+            if self.televiewer_annotations_path.exists():
+                backup = self.televiewer_annotations_path.with_suffix(".json.backup")
+                try:
+                    shutil.copy2(self.televiewer_annotations_path, backup)
+                except Exception as e:
+                    self.logger.warning(f"Could not create televiewer annotation backup: {e}")
+            with open(self.televiewer_annotations_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+                f.write("\n")
+            self.logger.info(f"Saved televiewer annotations for {len(data)} hole(s)")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error writing televiewer annotations: {e}")
+            return False
+        finally:
+            self._release_file_lock(self.televiewer_annotations_lock)
+
+    def update_televiewer_annotations(
+        self,
+        hole_id: str,
+        payload: Dict[str, Any],
+        project_code: str = "",
+        user: str = "",
+    ) -> bool:
+        """Update the shared televiewer annotation entry for one hole."""
+        key = str(hole_id).strip().upper()
+        if not key:
+            self.logger.error("Cannot update televiewer annotations without a hole ID")
+            return False
+        if not isinstance(payload, dict):
+            self.logger.error("Televiewer annotation payload must be a dict")
+            return False
+
+        data = self.read_televiewer_annotations()
+        existing = data.get(key, {}) if isinstance(data.get(key), dict) else {}
+        data[key] = {
+            "hole_id": key,
+            "project_code": project_code or existing.get("project_code", ""),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "updated_by": user or os.getenv("USERNAME", "Unknown"),
+            "schema": "televiewer_annotations.v1",
+            "payload": payload,
+        }
+        return self.write_televiewer_annotations(data)
 
     def get_hex_colors_for_interval(
         self, hole_id: str, depth_from: float, depth_to: float
@@ -5911,11 +6004,11 @@ class JSONRegisterManager:
                     # Collect wet hex if available
                     if prop.get("Wet_Hex"):
                         result["wet_hex"] = prop.get("Wet_Hex", "")
-                    
+
                     # Collect dry hex if available
                     if prop.get("Dry_Hex"):
                         result["dry_hex"] = prop.get("Dry_Hex", "")
-                    
+
                     # Use Combined_Hex if available (preferred method)
                     if prop.get("Combined_Hex"):
                         result["combined_hex"] = prop.get("Combined_Hex", "")
