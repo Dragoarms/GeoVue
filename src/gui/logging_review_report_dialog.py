@@ -340,8 +340,13 @@ class LoggingReviewReportDialog:
             )
             return
         page_options = {key: var.get() for key, var in self.page_vars.items()}
+        output_dir = self.output_path_var.get().strip()
+        date_from = self.date_from_var.get().strip() or None
+        date_to = self.date_to_var.get().strip() or None
+        top_n = int(self.top_n_var.get())
+        image_mode = self.image_mode_var.get()
 
-        def run_prep_then_generate() -> None:
+        def run_report_worker() -> None:
             try:
                 def progress_cb(msg: str, pct: float) -> None:
                     self._prep_queue.put(("progress", msg, pct))
@@ -349,7 +354,23 @@ class LoggingReviewReportDialog:
                 prepped = prepare_logging_review_data(
                     self.data_coordinator, progress_callback=progress_cb
                 )
-                self._prep_queue.put(("prep_done", prepped))
+
+                image_mode = self.image_mode_var.get()
+                self._prep_queue.put(("progress", self.t("Generating HTML report..."), 0.95))
+                output_files, skipped_loggers = generate_logger_reports(
+                    data_coordinator=self.data_coordinator,
+                    output_dir=output_dir,
+                    date_from=date_from,
+                    date_to=date_to,
+                    logger_values=logger_values,
+                    top_n=top_n,
+                    page_options=page_options,
+                    include_images=image_mode != "none",
+                    image_mode=image_mode,
+                    output_format="HTML",
+                    prepped_data=prepped,
+                )
+                self._prep_queue.put(("generated", output_files, skipped_loggers))
             except Exception as e:
                 self._prep_queue.put(("error", str(e)))
 
@@ -357,7 +378,7 @@ class LoggingReviewReportDialog:
         self.progress_label.config(text=self.t("Preparing data..."))
         self.progress_bar.start(10)
         self._prep_cache = None
-        threading.Thread(target=run_prep_then_generate, daemon=True).start()
+        threading.Thread(target=run_report_worker, daemon=True).start()
         self._poll_then_generate(logger_values, page_options)
 
     def _poll_then_generate(
@@ -370,11 +391,11 @@ class LoggingReviewReportDialog:
                 if item[0] == "progress":
                     _, msg, _pct = item
                     self.progress_label.config(text=msg)
-                elif item[0] == "prep_done":
-                    self._prep_cache = item[1]
+                elif item[0] == "generated":
                     self.progress_bar.stop()
                     self.progress_frame.pack_forget()
-                    self._do_generate(logger_values, page_options)
+                    _, output_files, skipped_loggers = item
+                    self._show_generate_result(output_files, skipped_loggers)
                     return
                 elif item[0] == "error":
                     self.progress_bar.stop()
@@ -382,13 +403,46 @@ class LoggingReviewReportDialog:
                     DialogHelper.show_message(
                         self.dialog,
                         self.t("Report Error"),
-                        self.t("Failed to prepare data.") + "\n" + str(item[1]),
+                        self.t("Failed to generate report.") + "\n" + str(item[1]),
                         message_type="error",
                     )
                     return
         except queue.Empty:
             pass
         self.dialog.after(200, lambda: self._poll_then_generate(logger_values, page_options))
+
+    def _show_generate_result(
+        self, output_files: List[str], skipped_loggers: List[str]
+    ) -> None:
+        if not output_files and skipped_loggers:
+            DialogHelper.show_message(
+                self.dialog,
+                self.t("No Reports Generated"),
+                self.t("None of the selected loggers have data in the selected date range.")
+                + "\n\n"
+                + self.t("Skipped:")
+                + " "
+                + ", ".join(str(s) for s in skipped_loggers),
+                message_type="warning",
+            )
+        elif skipped_loggers:
+            DialogHelper.show_message(
+                self.dialog,
+                self.t("Report Generated"),
+                self.t("Reports generated for {} logger(s).").format(len(output_files))
+                + "\n\n"
+                + self.t("The following had no data in the selected date range and were skipped:")
+                + "\n"
+                + ", ".join(str(s) for s in skipped_loggers),
+                message_type="info",
+            )
+        else:
+            DialogHelper.show_message(
+                self.dialog,
+                self.t("Report Generated"),
+                self.t("Reports generated successfully."),
+                message_type="info",
+            )
 
     def _do_generate(
         self, logger_values: List[str], page_options: Dict[str, bool]
@@ -409,35 +463,7 @@ class LoggingReviewReportDialog:
                 output_format="HTML",
                 prepped_data=self._prep_cache,
             )
-            if not output_files and skipped_loggers:
-                DialogHelper.show_message(
-                    self.dialog,
-                    self.t("No Reports Generated"),
-                    self.t("None of the selected loggers have data in the selected date range.")
-                    + "\n\n"
-                    + self.t("Skipped:")
-                    + " "
-                    + ", ".join(str(s) for s in skipped_loggers),
-                    message_type="warning",
-                )
-            elif skipped_loggers:
-                DialogHelper.show_message(
-                    self.dialog,
-                    self.t("Report Generated"),
-                    self.t("Reports generated for {} logger(s).").format(len(output_files))
-                    + "\n\n"
-                    + self.t("The following had no data in the selected date range and were skipped:")
-                    + "\n"
-                    + ", ".join(str(s) for s in skipped_loggers),
-                    message_type="info",
-                )
-            else:
-                DialogHelper.show_message(
-                    self.dialog,
-                    self.t("Report Generated"),
-                    self.t("Reports generated successfully."),
-                    message_type="info",
-                )
+            self._show_generate_result(output_files, skipped_loggers)
         except Exception as e:
             logger.exception("Report generation failed")
             DialogHelper.show_message(

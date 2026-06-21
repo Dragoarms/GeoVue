@@ -818,12 +818,17 @@ def _compute_assay_received_outstanding(
     assay_received = len(assay_df)
     if logging_df.empty or not log_from_col or not log_to_col:
         return assay_received, 0
-    assay_ranges = []
+
+    assay_ranges_by_hole: Dict[str, List[Tuple[Optional[float], float]]] = {}
     for _, row in assay_df.iterrows():
         f = _safe_float(row.get(depth_from_col)) if depth_from_col else None
         t = _safe_float(row.get(depth_to_col))
         if t is not None:
-            assay_ranges.append((str(row.get(hole_col, "")).upper().strip(), f, t))
+            hole = str(row.get(hole_col, "")).upper().strip()
+            assay_ranges_by_hole.setdefault(hole, []).append((f, t))
+    for ranges in assay_ranges_by_hole.values():
+        ranges.sort(key=lambda item: (float("-inf") if item[0] is None else item[0], item[1]))
+
     outstanding = 0
     for _, row in logging_df.iterrows():
         hole = str(row.get(hole_col, "")).upper().strip()
@@ -832,8 +837,10 @@ def _compute_assay_received_outstanding(
         if lt is None:
             continue
         has_overlap = False
-        for ah, af, at in assay_ranges:
-            if ah == hole and _intervals_overlap(lf, lt, af, at):
+        for af, at in assay_ranges_by_hole.get(hole, []):
+            if lf is not None and af is not None and af >= lt:
+                break
+            if _intervals_overlap(lf, lt, af, at):
                 has_overlap = True
                 break
         if not has_overlap:
@@ -1409,12 +1416,13 @@ def _build_intervals_with_images(
     image_output_dir: Optional[str] = None,
     image_relative_dir: Optional[str] = None,
     image_asset_cache: ImageAssetCache = None,
+    image_limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     resolved_image_mode = _normalize_image_mode(include_images, image_mode)
     result = []
-    for item in intervals:
+    for idx, item in enumerate(intervals):
         image_data = None
-        if resolved_image_mode != "none":
+        if resolved_image_mode != "none" and (image_limit is None or idx < image_limit):
             image_data = _lookup_interval_image(
                 data_coordinator,
                 item.get("hole_id"),
@@ -1438,14 +1446,18 @@ def _build_grouping_groups_with_images(
     image_output_dir: Optional[str] = None,
     image_relative_dir: Optional[str] = None,
     image_asset_cache: ImageAssetCache = None,
+    image_limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     resolved_image_mode = _normalize_image_mode(include_images, image_mode)
     result = []
+    images_requested = 0
     for grp in groups:
         intervals_with_img = []
         for it in grp.get("intervals", []):
             image_data = None
-            if resolved_image_mode != "none":
+            if resolved_image_mode != "none" and (
+                image_limit is None or images_requested < image_limit
+            ):
                 image_data = _lookup_interval_image(
                     data_coordinator,
                     it.get("hole_id"),
@@ -1456,6 +1468,7 @@ def _build_grouping_groups_with_images(
                     image_relative_dir=image_relative_dir,
                     image_asset_cache=image_asset_cache,
                 )
+                images_requested += 1
             intervals_with_img.append({**it, "image": image_data})
         result.append({
             "group_key": grp.get("group_key"),
@@ -1478,12 +1491,13 @@ def _build_outlier_intervals_with_images(
     image_output_dir: Optional[str] = None,
     image_relative_dir: Optional[str] = None,
     image_asset_cache: ImageAssetCache = None,
+    image_limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     resolved_image_mode = _normalize_image_mode(include_images, image_mode)
     result = []
-    for item in intervals:
+    for idx, item in enumerate(intervals):
         image_data = None
-        if resolved_image_mode != "none":
+        if resolved_image_mode != "none" and (image_limit is None or idx < image_limit):
             image_data = _lookup_interval_image(
                 data_coordinator,
                 item.get("hole_id"),

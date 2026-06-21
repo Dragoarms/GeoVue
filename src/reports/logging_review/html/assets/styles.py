@@ -883,6 +883,16 @@ CSS_STYLES: str = """        :root {
             font-size: 13px;
             padding: 12px;
         }
+        .evidence-truncation-note {
+            margin: 10px 0;
+            padding: 10px 12px;
+            border: 1px solid #d9c38c;
+            border-radius: 8px;
+            background: #fff8e6;
+            color: #6c4d12;
+            font-size: 13px;
+            font-weight: 600;
+        }
         .tab-panel {
             display: none;
         }

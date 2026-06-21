@@ -61,6 +61,11 @@ class FilterWindowConfig:
     selection_outline_color: str = "#ffff00"
     selection_outline_width: int = 2
 
+    # Visual embedding projection
+    enable_embedding_projection: bool = False
+    embedding_db_path: str = ""
+    embedding_projection_method: str = "auto"  # auto, umap, or pca
+
 
 class AdvancedFilterWindow:
     """
@@ -169,6 +174,7 @@ class AdvancedFilterWindow:
         self.selection_info_label = None
         self.point_size_var = None
         self.point_alpha_var = None
+        self.embedding_projection_status = ""
         
         # Filter state
         self.filter_logic_var = None
@@ -625,6 +631,64 @@ class AdvancedFilterWindow:
         self.plot_mode_var = tk.StringVar(value="filtered")
         self.plot_mode = "filtered"
 
+    def _available_plot_types(self) -> List[str]:
+        """Return plot types available for this window instance."""
+        plot_types = ["scatter", "ternary"]
+        if self.config.enable_embedding_projection and self.config.embedding_db_path:
+            plot_types.append("embedding projection")
+        return plot_types
+
+    def _ensure_embedding_projection(self) -> bool:
+        """Load visual embedding projection columns into current/filtered data.
+
+        Projection data is loaded lazily because UMAP/PCA coordinates are only
+        needed when the user chooses the embedding plot type. The returned
+        columns are ordinary numeric axes, so the existing lasso selection path
+        continues to work unchanged.
+        """
+        if self.current_data is None or self.current_data.empty:
+            return False
+        if {"umap_x", "umap_y"}.issubset(self.current_data.columns):
+            return True
+        if not self.config.embedding_db_path:
+            self.embedding_projection_status = "No embedding database configured"
+            return False
+
+        if self.status_label:
+            self.status_label.config(text="Loading visual embedding projection...")
+            try:
+                self.status_label.update_idletasks()
+            except Exception:
+                pass
+
+        try:
+            from ml_pipeline.embedding_projection import load_embedding_projection, merge_projection_columns
+
+            projection = load_embedding_projection(
+                self.config.embedding_db_path,
+                method=self.config.embedding_projection_method,
+                use_cache=True,
+            )
+            merged = merge_projection_columns(self.current_data, projection.dataframe)
+            matched = int(merged["umap_x"].notna().sum()) if "umap_x" in merged.columns else 0
+            self.current_data = merged
+            self.filtered_data = merge_projection_columns(self.filtered_data, projection.dataframe)
+            self.embedding_projection_status = (
+                f"{projection.method.upper()} projection: {matched:,}/{len(self.current_data):,} rows matched"
+            )
+            self.logger.info(
+                "Loaded embedding projection for advanced filter: method=%s matched=%s cache=%s from_cache=%s",
+                projection.method,
+                matched,
+                projection.cache_path,
+                projection.loaded_from_cache,
+            )
+            return matched > 0
+        except Exception as exc:
+            self.embedding_projection_status = f"Embedding projection unavailable: {exc}"
+            self.logger.error("Could not load embedding projection", exc_info=True)
+            return False
+
     def _create_scatter_panel(self, parent):
         """Create scatter plot panel"""
         # Axis controls
@@ -688,7 +752,7 @@ class AdvancedFilterWindow:
         self.plot_type_var = tk.StringVar(value="scatter")
         plot_type_menu = self.gui_manager.create_searchable_optionmenu(
             parent=control_frame,
-            items=["scatter", "ternary"],
+            items=self._available_plot_types(),
             variable=self.plot_type_var,
             width=30,
             placeholder="Select plot type...",
@@ -1204,51 +1268,70 @@ class AdvancedFilterWindow:
         return []
 
     def _update_scatter(self, *args):
-        """Update scatter plot with current settings"""
+        """Update scatter/ternary/projection plot with current settings."""
         self.logger.debug("=== _update_scatter called ===")
-        
+
+        plot_type = self.plot_type_var.get() if hasattr(self, 'plot_type_var') else "scatter"
         x_col = self.x_var.get() if self.x_var else None
         y_col = self.y_var.get() if self.y_var else None
         color_col = self.color_var.get() if self.color_var else None
-        
+
+        self.logger.debug(f"Plot type selected: {plot_type}")
         self.logger.debug(f"Axis selection: X={x_col}, Y={y_col}, Color={color_col}")
-        
-        if not x_col or not y_col:
+
+        if plot_type == "embedding projection":
+            if not self._ensure_embedding_projection():
+                if self.status_label:
+                    self.status_label.config(text=self.embedding_projection_status or "Embedding projection unavailable")
+                return
+            x_col = "umap_x"
+            y_col = "umap_y"
+            if self.x_var:
+                self.x_var.set(x_col)
+            if self.y_var:
+                self.y_var.set(y_col)
+        elif not x_col or not y_col:
             self.logger.warning("Missing axis selection - cannot create plot")
             return
-        
-        # Choose dataset based on plot mode
+
+        # Choose dataset based on plot mode after the projection columns have
+        # been merged, so filtered/full views stay consistent.
         if self.plot_mode == "filtered":
             df = self.filtered_data
             self.logger.debug(f"Using filtered data: {len(df) if df is not None else 0} rows")
         else:
             df = self.current_data
             self.logger.debug(f"Using full data: {len(df) if df is not None else 0} rows")
-        
+
         if df is None or df.empty:
             self.logger.warning("No data available for plotting")
             if self.status_label:
                 self.status_label.config(text="No data to plot")
             return
-        
-        # Check columns exist
+
+        # Check columns exist. Projection mode injects umap_x/umap_y above, so
+        # this catches a real merge/cache problem rather than a stale axis menu.
         if x_col not in df.columns or y_col not in df.columns:
             self.logger.warning(f"Columns not found in data: x={x_col} (exists={x_col in df.columns}), y={y_col} (exists={y_col in df.columns})")
             self.logger.debug(f"Available columns: {list(df.columns)[:20]}...")
+            if self.status_label:
+                self.status_label.config(text=f"Columns unavailable for plot: {x_col}, {y_col}")
             return
-        
-        # Filter for non-null values in x and y
-        # CRITICAL: Always include hole_id and depth_to for selection matching!
+
+        # Filter for non-null values in x and y.
+        # CRITICAL: Always include hole_id and depth_to for selection matching.
         key_columns = []
         for col in df.columns:
             if col.lower() in ('hole_id', 'holeid'):
                 key_columns.append(col)
             elif col.lower() in ('depth_to', 'to', 'sampto', 'geolto'):
                 key_columns.append(col)
-        
+
         self.logger.debug(f"Key columns for selection matching: {key_columns}")
-        
-        # Build column list: key columns + x + y + optional color
+
+        # Build column list: key columns + axes + optional color. The selected
+        # rows are passed straight back to LoggingReview, so retaining interval
+        # keys is what lets a lasso on UMAP reload the image grid.
         columns_to_keep = list(set(key_columns + [x_col, y_col]))
         if color_col and color_col in df.columns and color_col not in columns_to_keep:
             columns_to_keep.append(color_col)
@@ -1257,28 +1340,29 @@ class AdvancedFilterWindow:
             self.logger.debug(f"Color column '{color_col}' already in columns_to_keep")
         else:
             self.logger.debug(f"Color column '{color_col}' not found or not specified - no coloring")
-            color_col = None  # Don't use color if not available
-        
-        # Only keep columns that exist
+            color_col = None
+
         columns_to_keep = [c for c in columns_to_keep if c in df.columns]
         self.logger.debug(f"Columns to keep for plot: {columns_to_keep}")
-        
+
         plot_df = df[columns_to_keep].dropna(subset=[x_col, y_col])
-        
+
         if key_columns:
             self.logger.debug(f"Scatter plot includes key columns: {key_columns}")
         else:
             self.logger.warning("No hole_id/depth_to columns found - selection matching will fail!")
-        
+
         if plot_df.empty:
             self.logger.warning(f"No valid (non-null) data for {x_col} vs {y_col}")
             if self.status_label:
-                self.status_label.config(text=f"No valid data for {x_col} vs {y_col}")
+                if plot_type == "embedding projection":
+                    self.status_label.config(text="No loaded images have embedding projection coordinates")
+                else:
+                    self.status_label.config(text=f"No valid data for {x_col} vs {y_col}")
             return
-        
+
         self.logger.debug(f"Plot DataFrame: {len(plot_df)} rows after dropping nulls")
-        
-        # Build color mapping
+
         self.logger.debug(f"Building color map for column: {color_col}")
         color_map = self._build_color_map(plot_df, color_col)
         if color_map:
@@ -1288,52 +1372,46 @@ class AdvancedFilterWindow:
                 self.logger.debug(f"Color map built as ColorMap object: {type(color_map).__name__}")
         else:
             self.logger.debug("No color map built - will use default coloring")
-        
-        # Get point size
+
         point_size = self.point_size_var.get() if self.point_size_var else self.config.default_point_size
         self.logger.debug(f"Point size: {point_size}")
-        
-        # Destroy old scatter widget
+
         if self.scatter_widget:
             self.logger.debug("Destroying existing scatter widget")
             self.scatter_widget.destroy()
-        
-        # Determine plot type
-        plot_type = self.plot_type_var.get() if hasattr(self, 'plot_type_var') else "scatter"
-        self.logger.debug(f"Plot type selected: {plot_type}")
-        
+
         if plot_type == "ternary":
             # Get Z-axis column for ternary
             z_col = self.z_var.get() if hasattr(self, 'z_var') else None
             self.logger.debug(f"Ternary mode: z_col={z_col}")
-            
+
             if not z_col or z_col not in df.columns:
                 self.logger.warning(f"Ternary plot requires valid Z-axis column (got: {z_col})")
                 if self.status_label:
                     self.status_label.config(text=f"Select a valid Z-Axis column for ternary plot")
                 return
-            
+
             # Ensure z_col is in plot_df
             if z_col not in plot_df.columns:
                 # Re-build plot_df with z_col included
                 columns_with_z = list(set(columns_to_keep + [z_col]))
                 plot_df = df[columns_with_z].dropna(subset=[x_col, y_col, z_col])
                 self.logger.debug(f"Rebuilt plot_df with z_col: {len(plot_df)} rows")
-            
+
             if plot_df.empty:
                 self.logger.warning("No valid data after dropping nulls for ternary")
                 if self.status_label:
                     self.status_label.config(text=f"No valid data for ternary: {x_col}, {y_col}, {z_col}")
                 return
-            
+
             # Import and create TernarySelectionWidget
             try:
                 from gui.widgets.ternary_selection_widget import TernarySelectionWidget
-                
+
                 self.logger.info(f"Creating TernarySelectionWidget: {len(plot_df)} points")
                 self.logger.debug(f"  Axes: bottom={x_col}, right={y_col}, left={z_col}")
                 self.logger.debug(f"  Color by: {color_col}")
-                
+
                 self.scatter_widget = TernarySelectionWidget(
                     parent=self.scatter_container,
                     gui_manager=self.gui_manager,
@@ -1352,16 +1430,16 @@ class AdvancedFilterWindow:
                     selection_linewidth=self.config.selection_outline_width,
                 )
                 self.scatter_widget.pack(fill=tk.BOTH, expand=True)
-                
+
                 status_msg = f"Ternary: {len(plot_df)} points - {x_col} / {y_col} / {z_col}"
                 if color_col:
                     status_msg += f", colored by {color_col}"
-                
+
                 self.logger.info(status_msg)
                 if self.status_label:
                     self.status_label.config(text=status_msg)
                 return
-                
+
             except ImportError as e:
                 self.logger.error(f"Could not import TernarySelectionWidget: {e}")
                 self.logger.warning("Falling back to scatter plot")
@@ -1371,10 +1449,10 @@ class AdvancedFilterWindow:
                 if self.status_label:
                     self.status_label.config(text=f"Ternary plot error: {e}")
                 return
-        
-        # Create scatter widget (default or fallback from ternary)
+
+        # Create scatter widget (default, projection, or fallback from ternary)
         self.logger.info(f"Creating ScatterSelectionWidget: {len(plot_df)} points, x={x_col}, y={y_col}, color_by={color_col}")
-        
+
         self.scatter_widget = ScatterSelectionWidget(
             parent=self.scatter_container,
             gui_manager=self.gui_manager,
@@ -1392,11 +1470,14 @@ class AdvancedFilterWindow:
             selection_linewidth=self.config.selection_outline_width,
         )
         self.scatter_widget.pack(fill=tk.BOTH, expand=True)
-        
-        status_msg = f"Plotting {len(plot_df)} points: {x_col} vs {y_col}"
+
+        if plot_type == "embedding projection":
+            status_msg = f"Embedding projection: {len(plot_df)} points ({self.embedding_projection_status})"
+        else:
+            status_msg = f"Plotting {len(plot_df)} points: {x_col} vs {y_col}"
         if color_col:
             status_msg += f", colored by {color_col}"
-        
+
         self.logger.info(status_msg)
         if self.status_label:
             self.status_label.config(text=status_msg)
@@ -1411,12 +1492,14 @@ class AdvancedFilterWindow:
             self.z_label.grid(row=2, column=2, padx=5, pady=5, sticky="w")
             self.z_menu.grid(row=2, column=3, padx=5, pady=5, sticky="ew")
             self.logger.info("Ternary mode selected - Z-axis selector shown")
-            # Note: Actual ternary plotting not yet implemented
         else:
-            # Hide Z-axis selector for scatter
+            # Hide Z-axis selector for scatter/projection
             self.z_label.grid_forget()
             self.z_menu.grid_forget()
-            self.logger.debug("Scatter mode selected - Z-axis selector hidden")
+            if plot_type == "embedding projection":
+                self.logger.info("Embedding projection mode selected")
+            else:
+                self.logger.debug("Scatter mode selected - Z-axis selector hidden")
         
         # Update the plot
         self._update_scatter()

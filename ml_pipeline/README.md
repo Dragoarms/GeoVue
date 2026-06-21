@@ -144,6 +144,23 @@ for path, (label, conf) in zip(image_paths, results):
     print(f"{path.name}: {label} ({conf:.1%})")
 ```
 
+
+## Image Similarity Index
+
+The image-similarity index is separate from classifier training. It stores local MobileNet embeddings in SQLite so Logging Review can rank visually similar chip compartments without re-embedding the whole photo set each time.
+
+```bash
+python -m ml_pipeline.build_similarity_index build \
+    --image-root "C:/path/to/Extracted Compartment Images" \
+    --db "ml_output/image_similarity/geovue_embeddings.sqlite" \
+    --batch-size 64 \
+    --device auto
+```
+
+The Logging Review dialog also uses `ml_pipeline.similarity_search` to combine visual embedding scores with optional assay chemistry and collar/survey spatial proximity. Generated embedding databases belong under `ml_output/` or another shared/local dataset folder and should not be committed to git.
+
+See `docs/similarity_search_system.md` for the visual, chemical, spatial, hybrid, and continuity search assumptions.
+
 ## Tips
 
 1. **Data Quality**: Ensure your approved compartments are correctly labeled (Dry/Wet/Empty in filename)

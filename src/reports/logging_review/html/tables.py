@@ -12,6 +12,25 @@ import numpy as np
 
 from .utils import _safe_str
 
+EVIDENCE_TABLE_ROW_LIMIT = 500
+
+
+def _limited_evidence_rows(
+    intervals: List[Dict[str, Any]],
+    limit: int = EVIDENCE_TABLE_ROW_LIMIT,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """Return rows for HTML display plus a note when the complete issue list is capped."""
+    if len(intervals) <= limit:
+        return intervals, ""
+    extra = len(intervals) - limit
+    note = (
+        '<div class="evidence-truncation-note">'
+        f"Showing first {limit:,} of {len(intervals):,} issues. "
+        f"+{extra:,} more in the CSV export."
+        "</div>"
+    )
+    return intervals[:limit], note
+
 
 def _render_intervals_table(intervals: List[Dict[str, Any]], logger_id: str, tab_id: str) -> str:
     if not intervals:
@@ -20,8 +39,9 @@ def _render_intervals_table(intervals: List[Dict[str, Any]], logger_id: str, tab
             "data-i18n-en=\"No intervals flagged for review.\">"
             "Aucun intervalle signale pour revue.</div>"
         )
+    display_intervals, limit_note = _limited_evidence_rows(intervals)
     rows = []
-    for idx, item in enumerate(intervals):
+    for idx, item in enumerate(display_intervals):
         checkbox_id = f"{logger_id}::{tab_id}::{idx}"
         image_html = (
             f"<img src=\"{item['image']}\" alt=\"Interval image\" class=\"rotated-image\" />"
@@ -43,7 +63,8 @@ def _render_intervals_table(intervals: List[Dict[str, Any]], logger_id: str, tab
             "</tr>"
         )
     return (
-        "<table class=\"interval-table\">"
+        limit_note
+        + "<table class=\"interval-table\">"
         "<thead><tr>"
         "<th></th>"
         "<th data-i18n-fr=\"Trou\" data-i18n-en=\"Hole\">Trou</th>"
@@ -92,8 +113,9 @@ def _render_mineralisation_evidence_table(intervals: List[Dict[str, Any]], logge
         else:
             return "validation-pending"
 
+    display_intervals, limit_note = _limited_evidence_rows(intervals)
     rows = []
-    for idx, item in enumerate(intervals):
+    for idx, item in enumerate(display_intervals):
         checkbox_id = f"{logger_id}::mineral_evidence::{idx}"
 
         # Format depths as integers if whole numbers
@@ -143,7 +165,8 @@ def _render_mineralisation_evidence_table(intervals: List[Dict[str, Any]], logge
             "</tr>"
         )
     return (
-        "<table class=\"interval-table evidence-table sortable-table\" id=\"mineral-evidence-table\">"
+        limit_note
+        + "<table class=\"interval-table evidence-table sortable-table\" id=\"mineral-evidence-table\">"
         "<thead><tr>"
         "<th></th>"
         "<th class=\"sortable\" data-i18n-fr=\"Trou\" data-i18n-en=\"Hole\">Hole</th>"
@@ -173,8 +196,9 @@ def _render_zonation_evidence_table(
             "<div class=\"empty\" data-i18n-fr=\"Aucune discordance de zonation.\" "
             "data-i18n-en=\"No zonation mismatches.\">No zonation mismatches.</div>"
         )
+    display_intervals, limit_note = _limited_evidence_rows(intervals)
     rows = []
-    for idx, item in enumerate(intervals):
+    for idx, item in enumerate(display_intervals):
         checkbox_id = f"{logger_id}::zonation_evidence::{idx}"
         depth = (
             f"{item.get('depth_from', '')} - {item.get('depth_to', '')}"
@@ -213,7 +237,8 @@ def _render_zonation_evidence_table(
             "</tr>"
         )
     return (
-        "<table class=\"interval-table evidence-table sortable-table\" id=\"zonation-evidence-table\">"
+        limit_note
+        + "<table class=\"interval-table evidence-table sortable-table\" id=\"zonation-evidence-table\">"
         "<thead><tr>"
         "<th></th>"
         "<th class=\"sortable\" data-i18n-fr=\"Trou\" data-i18n-en=\"Hole\">Hole</th>"
@@ -295,8 +320,9 @@ def _render_logging_detail_evidence_table(
     thead_chem = "".join(
         f'<th class="sortable">{html.escape(label)}</th>' for label, _s, _k in chem_cols
     )
+    display_intervals, limit_note = _limited_evidence_rows(intervals)
     rows = []
-    for idx, item in enumerate(intervals):
+    for idx, item in enumerate(display_intervals):
         checkbox_id = f"{logger_id}::logging_detail::{table_id}::{idx}"
         if item.get("image"):
             image_html = (
@@ -345,7 +371,8 @@ def _render_logging_detail_evidence_table(
             "</tr>"
         )
     return (
-        "<table class=\"interval-table evidence-table sortable-table compact-table\" "
+        limit_note
+        + "<table class=\"interval-table evidence-table sortable-table compact-table\" "
         f"id=\"logging-detail-table-{html.escape(table_id)}\">"
         "<thead><tr>"
         "<th></th>"
@@ -429,8 +456,9 @@ def _render_outlier_table(intervals: List[Dict[str, Any]], logger_id: str) -> st
             "data-i18n-en=\"No intervals flagged.\">Aucun intervalle signale.</div>"
         )
     max_flags_visible = 5
+    display_intervals, limit_note = _limited_evidence_rows(intervals)
     rows = []
-    for idx, item in enumerate(intervals):
+    for idx, item in enumerate(display_intervals):
         checkbox_id = f"{logger_id}::outliers::{idx}"
         image_html = (
             f"<img src=\"{item['image']}\" alt=\"\" class=\"rotated-image expandable-img img-small\" onclick=\"handleImageExpand(this)\" />"
@@ -493,7 +521,8 @@ def _render_outlier_table(intervals: List[Dict[str, Any]], logger_id: str) -> st
             "</tr>"
         )
     return (
-        "<table class=\"interval-table evidence-table sortable-table outlier-table\" id=\"outlier-evidence-table\">"
+        limit_note
+        + "<table class=\"interval-table evidence-table sortable-table outlier-table\" id=\"outlier-evidence-table\">"
         "<thead><tr>"
         "<th></th>"
         "<th class=\"sortable\" data-i18n-fr=\"Trou\" data-i18n-en=\"Hole\">Hole</th>"
@@ -559,11 +588,14 @@ def _render_grouping_groups(groups: List[Dict[str, Any]], logger_id: str) -> str
             </div>''')
 
         # Evidence-table style: Hole, Depth, Strat, Geochem, Significance, Image
+        group_intervals, limit_note = _limited_evidence_rows(grp.get("intervals", []))
+        if limit_note:
+            out.append(limit_note)
         out.append('<table class="interval-table evidence-table sortable-table compact-table grouping-table"><thead><tr>'
                    '<th data-i18n-en="Hole">Trou</th><th data-i18n-en="Depth">Prof.</th><th data-i18n-en="Strat">Strat</th>'
                    '<th data-i18n-en="Geochem">Geochimie</th><th data-i18n-en="Significance">Significance</th><th data-i18n-en="Image">Image</th>'
                    '</tr></thead><tbody>')
-        for it in grp.get("intervals", []):
+        for it in group_intervals:
             depth = f"{it.get('depth_from', '')}-{it.get('depth_to', '')}" if it.get("depth_from") is not None else str(it.get("depth_to", ""))
             interval_strat = html.escape(_safe_str(it.get('strat', '')))
             row_sig = grp.get("significance", "Low")

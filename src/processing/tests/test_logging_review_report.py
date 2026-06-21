@@ -1,5 +1,6 @@
 import sys
 import os
+import tempfile
 import unittest
 import warnings
 import pandas as pd
@@ -740,6 +741,126 @@ class TestLoggingReviewHtmlReport(unittest.TestCase):
         self.assertEqual(r1, "data:image/png;base64,abc")
         self.assertEqual(r2, "data:image/png;base64,abc")
         self.assertEqual(len(get_image_path_calls), 1, "get_image_path should be called once when cache is used")
+
+    def test_evidence_table_limits_rendered_rows_with_csv_note(self):
+        from reports.logging_review.html.tables import _render_logging_detail_evidence_table
+
+        intervals = [
+            {
+                "hole_id": f"H{i:04d}",
+                "depth_from": float(i),
+                "depth_to": float(i + 1),
+                "issue": "Issue",
+                "significance": "High",
+                "geochem": {},
+            }
+            for i in range(505)
+        ]
+        html_output = _render_logging_detail_evidence_table(intervals, "LOGGER", "fines")
+
+        self.assertIn("Showing first 500 of 505 issues", html_output)
+        self.assertIn("+5 more in the CSV export", html_output)
+        self.assertIn("H0499", html_output)
+        self.assertNotIn("H0500", html_output)
+
+    def test_all_issues_tab_limits_display_but_preserves_total_counts(self):
+        from reports.logging_review.html.tabs.all_issues import render_all_issues_section
+
+        intervals = {
+            "logging_detail": {
+                "fines": [
+                    {
+                        "hole_id": f"H{i:04d}",
+                        "depth_from": float(i),
+                        "depth_to": float(i + 1),
+                        "issue": "Issue",
+                        "significance": "High",
+                    }
+                    for i in range(505)
+                ]
+            },
+            "grouping_flat": [],
+            "grouping": [],
+            "outliers": [],
+        }
+        report_data = {
+            "mineralisation": {"mismatch_intervals": []},
+            "profile_zonation": {"mismatch_rows": []},
+            "logging_detail_issue_types": [{"key": "fines", "label_en": "Fines"}],
+        }
+        html_output = render_all_issues_section(report_data, intervals, "LOGGER")
+
+        self.assertIn("Showing first 500 of 505 issues", html_output)
+        self.assertIn("<div class=\"kpi-value\">505</div>", html_output)
+        self.assertIn("H0499", html_output)
+        self.assertNotIn("H0500", html_output)
+
+    def test_issue_evidence_csv_rows_exclude_images(self):
+        from reports.logging_review.html.report_builder import (
+            _build_issue_evidence_rows,
+            _export_issue_evidence_csv,
+        )
+
+        report_data = {
+            "mineralisation": {
+                "mismatch_intervals": [
+                    {
+                        "hole_id": "H1",
+                        "depth_from": 0.0,
+                        "depth_to": 1.0,
+                        "logged_as": "Un",
+                        "assay_suggests": "Mineralised",
+                        "significance": "High",
+                        "image": "assets/H1.jpg",
+                    }
+                ]
+            },
+            "profile_zonation": {"mismatch_rows": []},
+        }
+        intervals = {
+            "logging_detail": {"fines": []},
+            "grouping_flat": [],
+            "grouping": [],
+            "outliers": [],
+        }
+        rows = _build_issue_evidence_rows("LOGGER", report_data, intervals)
+
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("image", rows[0])
+        self.assertEqual(rows[0]["logger"], "LOGGER")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            csv_path = _export_issue_evidence_csv(tmpdir, "LOGGER", rows)
+            exported = pd.read_csv(csv_path)
+        self.assertEqual(len(exported), 1)
+        self.assertNotIn("image", exported.columns)
+
+    def test_assay_outstanding_uses_hole_scoped_overlap(self):
+        logging_df = pd.DataFrame(
+            [
+                {"holeid": "H1", "geolfrom": 0.0, "geolto": 1.0},
+                {"holeid": "H1", "geolfrom": 1.0, "geolto": 2.0},
+                {"holeid": "H2", "geolfrom": 0.0, "geolto": 1.0},
+            ]
+        )
+        assay_df = pd.DataFrame(
+            [
+                {"holeid": "H1", "sampfrom": 0.5, "sampto": 1.5},
+                {"holeid": "H3", "sampfrom": 0.0, "sampto": 1.0},
+            ]
+        )
+
+        received, outstanding = html_report._compute_assay_received_outstanding(
+            logging_df,
+            assay_df,
+            hole_col="holeid",
+            depth_from_col="sampfrom",
+            depth_to_col="sampto",
+            log_from_col="geolfrom",
+            log_to_col="geolto",
+        )
+
+        self.assertEqual(received, 2)
+        self.assertEqual(outstanding, 1)
 
     def test_fines_and_magnetite_flags_work_with_series_from_itertuples(self):
         """Regression: interval building uses itertuples then pd.Series(dict(...)); flag functions receive a Series."""

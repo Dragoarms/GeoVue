@@ -2424,11 +2424,36 @@ class LithologyGridCanvas:
     def _on_mouse_down(self, event):
         """Handle mouse down - start selection (PEP-8)"""
         self.current_event = event  # remember modifiers for additive selection
-        self.drag_start = (self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+
+        # Similarity search can arm a "next clicked image is the query" mode.
+        # Handle that before normal toggle/range selection so the chosen query
+        # is unambiguous even when the grid currently has zero or many images
+        # selected.
+        cell = self._get_cell_at(canvas_x, canvas_y)
+        if (
+            cell
+            and self.dialog_ref
+            and hasattr(self.dialog_ref, "_has_pending_similarity_query")
+            and self.dialog_ref._has_pending_similarity_query()
+        ):
+            row, col = cell
+            idx = self.cells[cell]["idx"]
+            if 0 <= idx < len(self.displayed_images):
+                self._select_single_index(row, col, idx)
+                handled = self.dialog_ref._consume_pending_similarity_query_image(
+                    self.displayed_images[idx]
+                )
+                if handled:
+                    self.drag_start = None
+                    self.dragging = False
+                    return
+
+        self.drag_start = (canvas_x, canvas_y)
         self.dragging = False
 
         # Check if clicking on a cell
-        cell = self._get_cell_at(self.drag_start[0], self.drag_start[1])
         if cell:
             row, col = cell
             idx = self.cells[cell]["idx"]
@@ -2462,6 +2487,21 @@ class LithologyGridCanvas:
             # Only update border if cell is loaded
             if (row, col) in self.cell_ids:
                 self._update_cell_border(row, col, idx)
+
+    def _select_single_index(self, row: int, col: int, idx: int) -> None:
+        """Select one grid cell and refresh previous/current selection borders."""
+        previous = set(self.selected_indices)
+        self.selected_indices = {idx}
+        self.last_selected_indices = {idx}
+
+        for old_idx in previous:
+            old_row = old_idx // self.cols_per_row
+            old_col = old_idx % self.cols_per_row
+            if (old_row, old_col) in self.cell_ids:
+                self._update_cell_border(old_row, old_col, old_idx)
+
+        if (row, col) in self.cell_ids:
+            self._update_cell_border(row, col, idx)
 
     def _on_mouse_drag(self, event):
         """Handle drag selection (PEP-8)"""
@@ -3769,6 +3809,12 @@ class LoggingReviewDialog:
 
         self.pre_scatter_displayed_images = None  # Store state before scatter selection
         self._scatter_selection_info = None  # For active filters display
+        self._similarity_filter = None  # Optional visual/chemical/spatial similarity result layer
+        self._similarity_rank_by_key = {}
+        self._similarity_score_by_key = {}
+        self._similarity_explanation_by_key = {}
+        self._similarity_query_path = ""
+        self._pending_similarity_options = None
 
         # Compartment pattern (configurable)
         pattern_str = self.config.get(
@@ -5570,6 +5616,9 @@ class LoggingReviewDialog:
                 lasso_alpha=0.3,
                 selection_outline_color="#ffff00",
                 selection_outline_width=2,
+                enable_embedding_projection=True,
+                embedding_db_path=str(self._get_similarity_db_path()),
+                embedding_projection_method="auto",
             )
             
             # Create scatter filter window with pre-built DataFrame
@@ -6111,7 +6160,8 @@ class LoggingReviewDialog:
             )
             self.no_filters_label.pack(pady=20)
             if hasattr(self, 'clear_dataset_filters_btn'):
-                self.clear_dataset_filters_btn.config(state=tk.DISABLED)
+                state = tk.NORMAL if getattr(self, "filter_rows", []) else tk.DISABLED
+                self.clear_dataset_filters_btn.config(state=state)
         else:
             # Show each filter
             for i, desc in enumerate(all_filters):
@@ -6134,7 +6184,8 @@ class LoggingReviewDialog:
                     and_label.pack(anchor="w", padx=20, pady=1)
             
             if hasattr(self, 'clear_dataset_filters_btn'):
-                self.clear_dataset_filters_btn.config(state=tk.NORMAL)
+                state = tk.NORMAL if getattr(self, "filter_rows", []) else tk.DISABLED
+                self.clear_dataset_filters_btn.config(state=state)
         
         self.logger.info(f"Updated active filters display: {len(all_filters)} filters (mode={current_mode})")
     
@@ -6146,6 +6197,14 @@ class LoggingReviewDialog:
         # Clear scatter selection state
         self.pre_scatter_displayed_images = None
         self._scatter_selection_info = None
+        self._similarity_filter = None
+        self._similarity_rank_by_key = {}
+        self._similarity_score_by_key = {}
+        self._similarity_explanation_by_key = {}
+        self._similarity_query_path = ""
+        self._cancel_pending_similarity_query()
+        if hasattr(self, "clear_similarity_btn"):
+            self.clear_similarity_btn.config(state=tk.DISABLED)
         
         # Clear scatter plot selection if window exists
         if hasattr(self, 'grid_canvas') and self.grid_canvas:
@@ -6457,18 +6516,9 @@ class LoggingReviewDialog:
         if hasattr(self, 'clear_dataset_filters_btn'):
             self.clear_dataset_filters_btn.config(state=tk.DISABLED)
         
-        # Reset to unfiltered data
-        self.displayed_images = self.all_images.copy()
-        
-        # Clear active filters display
-        self.update_active_filters_display([])
-        
-        # Update grid
-        if self.grid_canvas:
-            self.grid_canvas.load_images(self.displayed_images)
-        
-        self._update_statistics()
-        self._update_status("All dataset filters cleared - showing full dataset")
+        self.last_filter_hash = None
+        self._apply_filters(force=True)
+        self._update_status("All dataset filters cleared")
         
         self.logger.info("Cleared all dataset filters")
     
@@ -7247,6 +7297,27 @@ class LoggingReviewDialog:
         )
         self.filter_dataset_btn.pack(fill=tk.X, pady=(0, 10))
 
+        similarity_section = ttk.LabelFrame(filter_frame, text="Similarity Search", padding=5)
+        similarity_section.pack(fill=tk.X, pady=(0, 10))
+
+        ModernButton(
+            similarity_section,
+            text="Search Similar...",
+            command=self._open_similarity_search_dialog,
+            color=self.gui_manager.theme_colors["accent_blue"],
+            theme_colors=self.gui_manager.theme_colors,
+        ).pack(fill=tk.X, pady=(0, 3))
+
+        self.clear_similarity_btn = ModernButton(
+            similarity_section,
+            text="Clear Similarity",
+            command=self._clear_similarity_filter,
+            color=self.gui_manager.theme_colors.get("accent_orange", "#ff9800"),
+            theme_colors=self.gui_manager.theme_colors,
+        )
+        self.clear_similarity_btn.pack(fill=tk.X)
+        self.clear_similarity_btn.config(state=tk.DISABLED)
+
         # === Dynamic Filter Rows Section ===
         dynamic_filter_section = ttk.LabelFrame(filter_frame, text="Dataset Filters", padding=5)
         dynamic_filter_section.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
@@ -7673,6 +7744,652 @@ class LoggingReviewDialog:
             side=tk.RIGHT, padx=5
         )
 
+    def _get_similarity_db_path(self) -> Path:
+        """Return the configured or default local image-similarity SQLite DB."""
+        configured = ""
+        try:
+            configured = self.config_manager.get("image_similarity_db", "")
+        except Exception:
+            configured = ""
+
+        if configured:
+            db_path = Path(configured)
+            if not db_path.is_absolute():
+                db_path = Path(__file__).resolve().parents[2] / db_path
+            return db_path
+
+        return Path(__file__).resolve().parents[2] / "ml_output" / "image_similarity" / "geovue_embeddings.sqlite"
+
+    @staticmethod
+    def _similarity_path_key(path_value: object) -> str:
+        return str(path_value or "").replace("\\", "/").lower()
+
+    def _image_similarity_key(self, img: CompartmentImage) -> str:
+        return self._similarity_path_key(getattr(img, "image_path", ""))
+
+    def _selected_similarity_query_image(self) -> Optional[CompartmentImage]:
+        """Return the single selected grid image, when exactly one is selected."""
+        if not self.grid_canvas:
+            return None
+        selected = list(getattr(self.grid_canvas, "selected_indices", []) or [])
+        if len(selected) != 1:
+            return None
+        idx = selected[0]
+        displayed = getattr(self.grid_canvas, "displayed_images", [])
+        if idx < 0 or idx >= len(displayed):
+            return None
+        return displayed[idx]
+
+    def _selected_similarity_query_path(self) -> Optional[Path]:
+        """Use a single selected grid image as the visual query, when available."""
+        selected = self._selected_similarity_query_image()
+        image_path = getattr(selected, "image_path", "") if selected else ""
+        return Path(image_path) if image_path else None
+
+    def _prompt_similarity_query_path(self) -> Optional[Path]:
+        selected = self._selected_similarity_query_path()
+        if selected and selected.exists():
+            return selected
+
+        initial_dir = None
+        if selected:
+            initial_dir = selected.parent
+        else:
+            try:
+                approved_path = self.file_manager.get_shared_path("approved_compartments")
+                if approved_path:
+                    initial_dir = approved_path
+            except Exception:
+                initial_dir = None
+
+        selected_file = filedialog.askopenfilename(
+            parent=self.dialog,
+            title="Select query image for visual similarity",
+            initialdir=str(initial_dir) if initial_dir else None,
+            filetypes=[
+                ("Image files", "*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp"),
+                ("All files", "*.*"),
+            ],
+        )
+        return Path(selected_file) if selected_file else None
+
+    def _has_pending_similarity_query(self) -> bool:
+        """Return whether the next grid click should become the query image."""
+        return self._pending_similarity_options is not None
+
+    def _set_similarity_pick_cursor(self, active: bool) -> None:
+        """Use a distinct cursor while the grid is waiting for a query click."""
+        try:
+            if self.grid_canvas and getattr(self.grid_canvas, "canvas", None):
+                self.grid_canvas.canvas.config(cursor="crosshair" if active else "")
+        except Exception:
+            pass
+
+    def _arm_similarity_query_pick(self, options: Dict[str, Any]) -> None:
+        """Store options and use the next clicked grid image as the query.
+
+        This supports the normal reviewer flow: click Search Similar, choose the
+        mode/settings, press OK, then click the compartment that should seed the
+        search. It also handles multi-selection cleanly because the click itself
+        becomes the source of truth.
+        """
+        if not self.grid_canvas or not getattr(self.grid_canvas, "displayed_images", None):
+            DialogHelper.show_message(
+                self.dialog,
+                "Similarity Search",
+                "Load images into the review grid before choosing a similarity query image.",
+                message_type="warning",
+            )
+            return
+
+        self._pending_similarity_options = dict(options or {})
+        self._set_similarity_pick_cursor(True)
+        mode = str(self._pending_similarity_options.get("mode") or "visual").lower()
+        self.logger.info("Similarity query pick armed: mode=%s", mode)
+        self._update_status(
+            f"Similarity {mode} search armed - click one grid image to use as the query."
+        )
+
+    def _cancel_pending_similarity_query(self) -> None:
+        """Cancel any armed next-click similarity query state."""
+        if self._pending_similarity_options is not None:
+            self.logger.info("Cancelled pending similarity query pick")
+        self._pending_similarity_options = None
+        self._set_similarity_pick_cursor(False)
+
+    def _consume_pending_similarity_query_image(self, img: Optional[CompartmentImage]) -> bool:
+        """Start the armed similarity search from the clicked grid image."""
+        if self._pending_similarity_options is None:
+            return False
+        if img is None:
+            return False
+
+        image_path = getattr(img, "image_path", "")
+        if not image_path:
+            self._update_status("Clicked grid item has no image path - click another image for similarity search.")
+            return True
+
+        options = dict(self._pending_similarity_options)
+        self._pending_similarity_options = None
+        self._set_similarity_pick_cursor(False)
+
+        query_path = Path(image_path)
+        self.logger.info(
+            "Similarity query image picked: mode=%s image=%s",
+            options.get("mode", "visual"),
+            query_path,
+        )
+        self._start_similarity_search(query_path, img, options)
+        return True
+
+    def _open_similarity_search_dialog(self):
+        """Open compact options for visual/chemical/spatial similarity search."""
+        selected_img = self._selected_similarity_query_image()
+        try:
+            from gui.similarity_search_options_dialog import SimilaritySearchOptionsDialog
+        except Exception as exc:
+            self.logger.error(f"Could not open similarity options dialog: {exc}", exc_info=True)
+            DialogHelper.show_message(
+                self.dialog,
+                "Similarity Search",
+                f"Could not open similarity options dialog:\n{exc}",
+                message_type="error",
+            )
+            return
+
+        options = SimilaritySearchOptionsDialog(
+            self.dialog,
+            has_selected_image=selected_img is not None,
+        ).show()
+        if not options:
+            return
+
+        if selected_img is None:
+            self._arm_similarity_query_pick(options)
+            return
+
+        query_path = Path(selected_img.image_path)
+        self._start_similarity_search(query_path, selected_img, options)
+
+    def _find_similar_images(self):
+        """Backward-compatible quick visual search entry point."""
+        selected_img = self._selected_similarity_query_image()
+        if selected_img is None:
+            self._arm_similarity_query_pick({"mode": "visual"})
+            return
+        self._start_similarity_search(Path(selected_img.image_path), selected_img, {"mode": "visual"})
+
+    def _similarity_candidate_images(self) -> List[CompartmentImage]:
+        """Return the full loaded image set for similarity ranking.
+
+        The ranking pass searches every loaded image. Existing Logging Review
+        filters are applied afterwards by _apply_filters(), so the result grid
+        still respects the user's active filter state.
+        """
+        return list(self.all_images)
+
+    def _start_similarity_search(
+        self,
+        query_path: Path,
+        selected_img: Optional[CompartmentImage],
+        options: Optional[Dict[str, Any]] = None,
+    ):
+        """Validate inputs and start the similarity search on a worker thread."""
+        options = dict(options or {})
+        mode = str(options.get("mode") or "visual").lower()
+        if not query_path.exists():
+            DialogHelper.show_message(
+                self.dialog,
+                "Similarity Search",
+                f"Image not found:\n{query_path}",
+                message_type="error",
+            )
+            return
+
+        db_path = self._get_similarity_db_path()
+        needs_visual = mode in {"visual", "hybrid", "continuity"}
+        if needs_visual and not db_path.exists() and mode == "visual":
+            DialogHelper.show_message(
+                self.dialog,
+                "Visual Similarity Index Missing",
+                "The visual image similarity database was not found.\n\n"
+                f"Expected:\n{db_path}\n\n"
+                "Build it with ml_pipeline.build_similarity_index first.",
+                message_type="warning",
+            )
+            return
+
+        candidate_images = self._similarity_candidate_images()
+        candidate_count = len(candidate_images)
+        self.logger.info(
+            "Similarity search queued: mode=%s query=%s loaded_candidates=%s visual_db=%s",
+            mode,
+            query_path,
+            candidate_count,
+            db_path,
+        )
+        self._update_status(f"Running {mode} similarity search over {candidate_count:,} loaded images...")
+        progress = ProgressDialogManager.show_progress(
+            self.dialog,
+            "Similarity Search",
+            f"Ranking {candidate_count:,} loaded images for {query_path.name}.",
+        )
+        try:
+            progress.update_progress("Preparing similarity search...", 5)
+        except Exception:
+            pass
+
+        def search_task():
+            try:
+                result = self._run_similarity_search(query_path, db_path, selected_img, options, candidate_images, progress)
+            except Exception as exc:
+                self.dialog.after(0, lambda e=exc: self._handle_similarity_search_error(e))
+                return
+            self.dialog.after(0, lambda r=result: self._apply_similarity_search_result(r))
+
+        threading.Thread(target=search_task, daemon=True).start()
+
+    def _build_similarity_xyz_cache(
+        self,
+        images: List[CompartmentImage],
+        *,
+        use_xyz: bool,
+    ) -> Dict[Tuple[str, float], Optional[Tuple[float, float, float]]]:
+        """Build per-interval XYZ positions from collar/survey traces when available.
+
+        Collar and survey data are loaded once per search. Calling
+        DataCoordinator.get_trace_for_hole() for every hole would repeatedly
+        standardize the same Snowflake DataFrames, which is too slow for a
+        180k-image review set.
+        """
+        if not use_xyz or not self.data_coordinator or not getattr(self.data_coordinator, "is_initialized", False):
+            return {}
+
+        try:
+            from processing.DataManager.survey_trace import build_trace, xyz_at_depth as trace_xyz_at_depth
+        except Exception as exc:
+            self.logger.debug(f"XYZ continuity unavailable: {exc}")
+            return {}
+
+        def finite_float(value):
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return None
+            return numeric if np.isfinite(numeric) else None
+
+        grouped: Dict[str, List[CompartmentImage]] = {}
+        for img in images:
+            hole = str(getattr(img, "hole_id", "") or "").strip().upper()
+            if hole:
+                grouped.setdefault(hole, []).append(img)
+        if not grouped:
+            return {}
+
+        try:
+            collar_df = self.data_coordinator.get_collar_data()
+            survey_df = self.data_coordinator.get_survey_data()
+        except Exception as exc:
+            self.logger.debug(f"Could not load collar/survey data for similarity XYZ: {exc}")
+            return {}
+
+        collar_by_hole: Dict[str, Tuple[float, float, float]] = {}
+        if collar_df is not None and not collar_df.empty and {"holeid", "x", "y"}.issubset(collar_df.columns):
+            for _, row in collar_df.iterrows():
+                hole = str(row.get("holeid", "") or "").strip().upper()
+                x = finite_float(row.get("x"))
+                y = finite_float(row.get("y"))
+                z = finite_float(row.get("z"))
+                if hole and x is not None and y is not None and z is not None and hole not in collar_by_hole:
+                    collar_by_hole[hole] = (x, y, z)
+
+        survey_by_hole: Dict[str, List[Tuple[float, float, float]]] = {}
+        if survey_df is not None and not survey_df.empty and {"holeid", "depth", "azimuth", "dip"}.issubset(survey_df.columns):
+            for _, row in survey_df.iterrows():
+                hole = str(row.get("holeid", "") or "").strip().upper()
+                depth = finite_float(row.get("depth"))
+                azimuth = finite_float(row.get("azimuth"))
+                dip = finite_float(row.get("dip"))
+                if hole and depth is not None and azimuth is not None and dip is not None:
+                    survey_by_hole.setdefault(hole, []).append((depth, azimuth, dip))
+
+        xyz_by_interval: Dict[Tuple[str, float], Optional[Tuple[float, float, float]]] = {}
+        for hole, hole_images in grouped.items():
+            collar = collar_by_hole.get(hole)
+            if collar is None:
+                continue
+            max_depth = max((float(getattr(img, "depth_to", 0) or 0) for img in hole_images), default=0.0)
+            try:
+                trace = build_trace(
+                    collar[0],
+                    collar[1],
+                    collar[2],
+                    survey_by_hole.get(hole, []),
+                    vertical_if_missing=True,
+                    max_depth=max_depth,
+                )
+            except Exception as exc:
+                self.logger.debug(f"Could not build trace for {hole}: {exc}")
+                continue
+            if not trace:
+                continue
+
+            for img in hole_images:
+                try:
+                    depth_from = float(getattr(img, "depth_from", 0.0) or 0.0)
+                    depth_to = float(getattr(img, "depth_to", depth_from) or depth_from)
+                except (TypeError, ValueError):
+                    continue
+                midpoint = round((depth_from + depth_to) / 2.0, 4)
+                xyz_by_interval[(hole, midpoint)] = trace_xyz_at_depth(trace, midpoint)
+        return xyz_by_interval
+
+    def _build_similarity_candidates(
+        self,
+        images: Optional[List[CompartmentImage]] = None,
+        *,
+        include_chemistry: bool,
+        use_xyz: bool,
+    ) -> List[Any]:
+        """Convert review images into backend similarity candidates.
+
+        Chemistry hydration is intentionally opt-in. Visual and spatial searches
+        can run over very large image sets, so they should not pay for per-image
+        assay lookups unless the selected mode actually uses chemistry.
+        """
+        from ml_pipeline.similarity_search import SimilarityCandidate
+
+        source_images = list(images if images is not None else self.all_images)
+        xyz_by_interval = self._build_similarity_xyz_cache(source_images, use_xyz=use_xyz)
+        candidates = []
+        for img in source_images:
+            if include_chemistry and not getattr(img, "csv_data", None):
+                try:
+                    csv_data, in_csv = self._get_csv_data_cached(img.hole_id, img.depth_to)
+                    if csv_data:
+                        img.csv_data = csv_data
+                        img.in_csv = in_csv
+                except Exception as exc:
+                    self.logger.debug(f"Could not hydrate chemistry for {img.hole_id} {img.depth_to}: {exc}")
+
+            try:
+                depth_from = float(img.depth_from)
+                depth_to = float(img.depth_to)
+                midpoint = round((depth_from + depth_to) / 2.0, 4)
+            except (TypeError, ValueError):
+                depth_from = None
+                depth_to = None
+                midpoint = None
+
+            hole = str(getattr(img, "hole_id", "") or "").strip().upper()
+            xyz = xyz_by_interval.get((hole, midpoint)) if midpoint is not None else None
+            chemistry = dict(getattr(img, "csv_data", {}) or {}) if include_chemistry else {}
+            candidates.append(
+                SimilarityCandidate(
+                    image_path=str(getattr(img, "image_path", "") or ""),
+                    hole_id=hole,
+                    depth_from=depth_from,
+                    depth_to=depth_to,
+                    chemistry=chemistry,
+                    xyz=xyz,
+                    label=self._get_classification_string(getattr(img, "classification", "")),
+                )
+            )
+        return candidates
+
+    def _run_similarity_search(
+        self,
+        query_path: Path,
+        db_path: Path,
+        selected_img: Optional[CompartmentImage] = None,
+        options: Optional[Dict[str, Any]] = None,
+        candidate_images: Optional[List[CompartmentImage]] = None,
+        progress: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Run visual/chemical/spatial ranking off the Tk thread."""
+        from ml_pipeline.similarity_search import (
+            HybridSimilarityRanker,
+            SimilarityCandidate,
+            SimilaritySearchConfig,
+            path_key as similarity_path_key,
+        )
+
+        options = dict(options or {})
+        mode = str(options.get("mode") or "visual").lower()
+        needs_visual = mode in {"visual", "hybrid", "continuity"}
+        visual_scores_by_key: Dict[str, float] = {}
+        visual_hit_count = 0
+        model_name = ""
+        used_stored_query = False
+        source_images = list(candidate_images if candidate_images is not None else self.all_images)
+        started_at = time.perf_counter()
+
+        def progress_update(message: str, percentage: float) -> None:
+            if progress is None:
+                return
+            try:
+                progress.update_progress(message, percentage)
+            except Exception:
+                pass
+
+        progress_update("Searching visual embedding index..." if needs_visual else "Preparing candidate intervals...", 15)
+
+        if needs_visual and db_path.exists():
+            from ml_pipeline.build_similarity_index import MODEL_NAME, MobileNetEmbedder
+            from ml_pipeline.embedding_store import SQLiteEmbeddingStore
+
+            with SQLiteEmbeddingStore(db_path) as store:
+                model_name = store.get_metadata("embedding_model", MODEL_NAME)
+                if not isinstance(model_name, str) or not model_name:
+                    model_name = MODEL_NAME
+
+                total_embeddings = store.count(model_name)
+                if total_embeddings <= 0 and mode == "visual":
+                    raise RuntimeError(f"No embeddings found for model '{model_name}'.")
+
+                query_vector = store.get_embedding(query_path, model_name=model_name)
+                used_stored_query = query_vector is not None
+                if query_vector is None:
+                    embedder = MobileNetEmbedder(pretrained=True, device="auto")
+                    query_vector = embedder.embed_one(query_path)
+                    model_name = embedder.model_name
+                    total_embeddings = store.count(model_name)
+
+                visual_hits = store.search(
+                    query_vector,
+                    top_k=total_embeddings,
+                    model_name=model_name,
+                    exclude_paths=[query_path],
+                )
+            visual_hit_count = len(visual_hits)
+            self.logger.info("Similarity visual scan complete: %s hits in %.2fs", visual_hit_count, time.perf_counter() - started_at)
+            progress_update("Preparing filtered candidates...", 45)
+            for hit in visual_hits:
+                # Cosine can theoretically be [-1, 1]; combined ranking expects 0..1.
+                visual_scores_by_key[similarity_path_key(hit.path)] = max(0.0, min(1.0, (float(hit.score) + 1.0) / 2.0))
+        elif mode == "visual":
+            raise FileNotFoundError(f"Visual similarity database not found: {db_path}")
+
+        chemistry_columns = tuple(options.get("chemistry_columns") or ())
+        config = SimilaritySearchConfig(
+            mode=mode,
+            chemistry_columns=chemistry_columns or SimilaritySearchConfig().chemistry_columns,
+            use_xyz=bool(options.get("use_xyz", True)),
+            spatial_range_m=float(options.get("spatial_range_m") or 50.0),
+            depth_range_m=float(options.get("depth_range_m") or 10.0),
+            continuity_window_m=float(options.get("continuity_window_m") or 3.0),
+            top_k=options.get("top_k"),
+        )
+
+        include_chemistry = mode in {"chemical", "hybrid", "continuity"}
+        include_xyz = config.use_xyz and mode in {"spatial", "hybrid", "continuity"}
+        progress_update("Building candidate data...", 55)
+        candidate_start = time.perf_counter()
+        candidates = self._build_similarity_candidates(
+            source_images,
+            include_chemistry=include_chemistry,
+            use_xyz=include_xyz,
+        )
+        self.logger.info(
+            "Similarity candidates ready: %s images, chemistry=%s, xyz=%s in %.2fs",
+            len(candidates),
+            include_chemistry,
+            include_xyz,
+            time.perf_counter() - candidate_start,
+        )
+        progress_update("Ranking candidates...", 75)
+        query_key = similarity_path_key(query_path)
+        query_candidate = next((candidate for candidate in candidates if candidate.key == query_key), None)
+        if query_candidate is None:
+            if mode != "visual":
+                raise RuntimeError("Chemical, spatial, hybrid, and continuity searches require a selected grid image.")
+            query_candidate = SimilarityCandidate(
+                image_path=str(query_path),
+                hole_id="",
+                depth_from=None,
+                depth_to=None,
+                chemistry={},
+                xyz=None,
+            )
+
+        ranked = HybridSimilarityRanker(
+            candidates,
+            visual_scores_by_key=visual_scores_by_key,
+            config=config,
+        ).rank(query_candidate)
+        self.logger.info(
+            "Similarity search complete: mode=%s ranked=%s total_time=%.2fs",
+            mode,
+            len(ranked),
+            time.perf_counter() - started_at,
+        )
+        progress_update("Loading ranked grid...", 95)
+
+        return {
+            "query_path": str(query_path),
+            "mode": mode,
+            "model_name": model_name,
+            "used_stored_query": used_stored_query,
+            "indexed_hits": visual_hit_count,
+            "review_match_count": len(ranked),
+            "results": ranked,
+        }
+
+    def _apply_similarity_search_result(self, result: Dict[str, Any]) -> None:
+        try:
+            ProgressDialogManager.close_current()
+        except Exception:
+            pass
+
+        results = result.get("results") or []
+        if not results:
+            DialogHelper.show_message(
+                self.dialog,
+                "Similarity Search",
+                "No matching images were returned for the selected similarity mode.",
+                message_type="info",
+            )
+            return
+
+        rank_by_key = {}
+        score_by_key = {}
+        explanation_by_key = {}
+        for rank, hit in enumerate(results):
+            image_path = getattr(getattr(hit, "candidate", None), "image_path", "")
+            key = self._similarity_path_key(image_path)
+            if key and key not in rank_by_key:
+                rank_by_key[key] = rank
+                score_by_key[key] = float(getattr(hit, "combined_score", 0.0))
+                explanation_by_key[key] = str(getattr(hit, "explanation", ""))
+
+        review_keys = {self._image_similarity_key(img) for img in self.all_images}
+        review_match_count = len(review_keys.intersection(rank_by_key.keys()))
+
+        self._similarity_filter = {
+            "query_path": result.get("query_path", ""),
+            "mode": result.get("mode", "similarity"),
+            "model_name": result.get("model_name", ""),
+            "used_stored_query": bool(result.get("used_stored_query")),
+            "indexed_hits": int(result.get("indexed_hits") or 0),
+            "review_match_count": review_match_count,
+        }
+        self._similarity_rank_by_key = rank_by_key
+        self._similarity_score_by_key = score_by_key
+        self._similarity_explanation_by_key = explanation_by_key
+        self._similarity_query_path = str(result.get("query_path", ""))
+
+        if hasattr(self, "clear_similarity_btn"):
+            self.clear_similarity_btn.config(state=tk.NORMAL)
+
+        self.last_filter_hash = None
+        self._apply_filters(force=True)
+        mode_label = str(result.get("mode") or "similarity").title()
+        self._update_status(
+            f"{mode_label} similarity loaded: {review_match_count:,} review images matched."
+        )
+
+    def _handle_similarity_search_error(self, exc: Exception) -> None:
+        try:
+            ProgressDialogManager.close_current()
+        except Exception:
+            pass
+        self.logger.error(f"Similarity search failed: {exc}", exc_info=True)
+        DialogHelper.show_message(
+            self.dialog,
+            "Similarity Search Failed",
+            str(exc),
+            message_type="error",
+        )
+        self._update_status("Similarity search failed")
+
+    def _clear_similarity_filter(self):
+        """Remove the active similarity layer and keep normal filters intact."""
+        self._cancel_pending_similarity_query()
+        self._similarity_filter = None
+        self._similarity_rank_by_key = {}
+        self._similarity_score_by_key = {}
+        self._similarity_explanation_by_key = {}
+        self._similarity_query_path = ""
+        if hasattr(self, "clear_similarity_btn"):
+            self.clear_similarity_btn.config(state=tk.DISABLED)
+        self.last_filter_hash = None
+        self._apply_filters(force=True)
+        self._update_status("Similarity filter cleared")
+
+    def _get_similarity_filter_hash(self) -> str:
+        if not self._similarity_filter:
+            return "none"
+        return f"{self._similarity_filter.get('query_path', '')}:{self._similarity_filter.get('mode', '')}:{len(self._similarity_rank_by_key)}"
+
+    def _apply_similarity_filter_to_images(self, images: List[CompartmentImage]) -> List[CompartmentImage]:
+        if not self._similarity_filter or not self._similarity_rank_by_key:
+            return images
+
+        matched = [
+            img for img in images
+            if self._image_similarity_key(img) in self._similarity_rank_by_key
+        ]
+        matched.sort(
+            key=lambda img: self._similarity_rank_by_key.get(
+                self._image_similarity_key(img),
+                float("inf"),
+            )
+        )
+        return matched
+
+    def _similarity_filter_description(self, displayed_count: int) -> str:
+        if not self._similarity_filter:
+            return ""
+        query_name = Path(self._similarity_filter.get("query_path", "")).name or "selected image"
+        review_matches = int(self._similarity_filter.get("review_match_count") or 0)
+        indexed_hits = int(self._similarity_filter.get("indexed_hits") or 0)
+        mode_label = str(self._similarity_filter.get("mode", "Similarity")).title()
+        suffix = f" ({indexed_hits:,} visual neighbours)" if indexed_hits else ""
+        return (
+            f"{mode_label} similar to {query_name}: "
+            f"{displayed_count:,} shown from {review_matches:,} review matches{suffix}"
+        )
+
     def _bump_classification_epoch(self):
         """Increment classification epoch to invalidate filter cache (PEP-8)"""
         if not hasattr(self, "_classification_epoch"):
@@ -7680,45 +8397,61 @@ class LoggingReviewDialog:
         self._classification_epoch += 1
 
     def _apply_filters(self, force: bool = False):
-        """Apply filters using the FilterPipeline."""
+        """Apply filters using the FilterPipeline, plus optional similarity ranking."""
         # Build criteria from current UI state
         criteria = create_filter_criteria_from_dialog(self)
-        
+
         # DEBUG: Log filter row configs
         self.logger.info(f"[DEBUG] Dynamic filters: {criteria.dynamic_filters}")
-        
+
         # Check if filters changed
-        current_hash = criteria.get_hash()
+        similarity_hash = self._get_similarity_filter_hash()
+        current_hash = f"{criteria.get_hash()}|similarity:{similarity_hash}"
         if not force and current_hash == self.last_filter_hash and self.displayed_images:
             self.logger.debug("Filters unchanged, skipping re-filter")
             return
-        
+
         self.last_filter_hash = current_hash
-        
+
         # Execute pipeline
         result = self.filter_pipeline.execute(self.all_images, criteria)
-        
+        filtered_images = result.images
+        filter_descriptions = list(result.filter_descriptions)
+
+        similarity_before = len(filtered_images)
+        if self._similarity_filter:
+            filtered_images = self._apply_similarity_filter_to_images(filtered_images)
+            filter_descriptions.append(self._similarity_filter_description(len(filtered_images)))
+
         # Update displayed images
-        self.displayed_images = result.images
-        
+        self.displayed_images = filtered_images
+
         # Unload images no longer displayed
         displayed_set = set(id(img) for img in self.displayed_images)
         for img in self.all_images:
             if id(img) not in displayed_set:
                 img.unload_image()
-        
+
         # Update UI
-        self.update_active_filters_display(result.filter_descriptions)
+        self.update_active_filters_display(filter_descriptions)
         self.grid_canvas.load_images(self.displayed_images)
         self._update_statistics()
-        
+
         # Status message
-        status = f"Displaying {result.total_after} images"
+        status = f"Displaying {len(self.displayed_images)} images"
         if result.csv_matches > 0:
             status += f" ({result.csv_matches} with CSV data)"
+        if self._similarity_filter:
+            status += f" | similarity: {similarity_before} -> {len(self.displayed_images)}"
         self._update_status(status)
-        
-        self.logger.info(f"Filter applied: {result.total_before} → {result.total_after} in {result.execution_time_ms:.0f}ms")
+
+        self.logger.info(
+            "Filter applied: %s -> %s in %.0fms%s",
+            result.total_before,
+            len(self.displayed_images),
+            result.execution_time_ms,
+            " with similarity layer" if self._similarity_filter else "",
+        )
 
     def _set_mode(self, mode: str):
         """Set classification mode"""

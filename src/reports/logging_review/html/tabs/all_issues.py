@@ -4,6 +4,20 @@ from typing import Any, Dict, List
 
 from ..utils import _safe_str
 
+ALL_ISSUES_ROW_LIMIT = 500
+
+
+def _truncation_note(total: int, limit: int = ALL_ISSUES_ROW_LIMIT) -> str:
+    if total <= limit:
+        return ""
+    extra = total - limit
+    return (
+        '<div class="evidence-truncation-note">'
+        f"Showing first {limit:,} of {total:,} issues. "
+        f"+{extra:,} more in the CSV export."
+        "</div>"
+    )
+
 
 def render_all_issues_section(
     report: Dict[str, Any],
@@ -107,17 +121,21 @@ def render_all_issues_section(
         r.get("depth_from") or 0,
     ))
 
+    total = len(all_rows)
+    display_rows = all_rows[:ALL_ISSUES_ROW_LIMIT]
+    limit_note = _truncation_note(total)
+
     # Group by hole_id for display
     holes_seen = {}
-    for row in all_rows:
+    for row in display_rows:
         hid = row.get("hole_id", "Unknown")
         if hid not in holes_seen:
             holes_seen[hid] = []
         holes_seen[hid].append(row)
 
     # Summary counts
-    total = len(all_rows)
     high_count = sum(1 for r in all_rows if r.get("significance") == "High")
+    total_holes_affected = len({r.get("hole_id", "Unknown") for r in all_rows})
     section_counts = {}
     for r in all_rows:
         s = r.get("section", "Other")
@@ -198,7 +216,7 @@ def render_all_issues_section(
                 </div>
                 <div class="kpi-card">
                     <div class="kpi-label" data-i18n-fr="Forages affectes" data-i18n-en="Holes affected">Holes affected</div>
-                    <div class="kpi-value">{len(holes_seen)}</div>
+                    <div class="kpi-value">{total_holes_affected}</div>
                 </div>
             </div>
             <div class="panel-card">
@@ -207,6 +225,7 @@ def render_all_issues_section(
             </div>
             <div class="intervals-section">
                 <h3 data-i18n-fr="Intervalles a corriger (groupes par forage)" data-i18n-en="Intervals to fix (grouped by hole)">Intervals to fix (grouped by hole)</h3>
+                {limit_note}
                 {table_html}
             </div>
             <div class="notes-box">

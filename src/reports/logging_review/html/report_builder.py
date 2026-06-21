@@ -1,5 +1,6 @@
 """Build logging review report data and delegate to HTML renderer."""
 import logging
+import json
 import os
 import posixpath
 import re
@@ -20,10 +21,104 @@ from reports.logging_review.data.outliers import OUTLIER_DISPLAY_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
+EVIDENCE_HTML_ROW_LIMIT = 500
+THUMBNAIL_IMAGE_LIMIT_PER_REPORT = 150
+EMBEDDED_IMAGE_LIMIT_PER_REPORT = 40
+
 
 def _safe_report_asset_slug(value: Any) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("._-")
     return slug[:80] or "logger"
+
+
+def _csv_value(value: Any) -> Any:
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return value
+
+
+def _issue_row(
+    logger_value: str,
+    section: str,
+    issue_type: str,
+    item: Dict[str, Any],
+    issue: Optional[str] = None,
+) -> Dict[str, Any]:
+    return {
+        "logger": logger_value,
+        "section": section,
+        "issue_type": issue_type,
+        "hole_id": item.get("hole_id"),
+        "depth_from": item.get("depth_from"),
+        "depth_to": item.get("depth_to"),
+        "significance": item.get("significance"),
+        "issue": issue if issue is not None else item.get("issue"),
+        "strat": item.get("strat") or item.get("classified_as") or item.get("logged_as") or item.get("recorded_as"),
+        "logged_as": item.get("logged_as"),
+        "assay_suggests": item.get("assay_suggests"),
+        "recorded_as": item.get("recorded_as"),
+        "most_likely": item.get("most_likely"),
+        "validation": item.get("validation"),
+        "geochem": _csv_value(item.get("geochem")),
+        "assay": _csv_value(item.get("assay")),
+        "reason": item.get("reason") or item.get("outlier_reason"),
+    }
+
+
+def _build_issue_evidence_rows(
+    logger_value: str,
+    report_data: ReportData,
+    intervals_for_review: IntervalsForReview,
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+
+    for item in report_data.get("mineralisation", {}).get("mismatch_intervals", []):
+        issue = (
+            f"Mismatch: logged as {item.get('logged_as', '?')}, "
+            f"assay suggests {item.get('assay_suggests', '?')}"
+        )
+        rows.append(_issue_row(logger_value, "Mineralisation", "mineralisation", item, issue))
+
+    for item in report_data.get("profile_zonation", {}).get("mismatch_rows", []):
+        issue = (
+            f"Zonation: logged {item.get('logged_zonation', '?')}, "
+            f"should be {item.get('should_be', '?')}"
+        )
+        rows.append(_issue_row(logger_value, "Zonation", "profile_zonation", item, issue))
+
+    for issue_type, issue_list in (intervals_for_review.get("logging_detail") or {}).items():
+        for item in issue_list:
+            rows.append(_issue_row(logger_value, "Logging Detail", issue_type, item))
+
+    for item in intervals_for_review.get("grouping_flat", []):
+        rows.append(_issue_row(logger_value, "Grouping", "grouping", item))
+
+    for item in intervals_for_review.get("outliers", []):
+        issue = (
+            f"Recorded: {item.get('recorded_as', '?')}, "
+            f"likely: {item.get('most_likely', '?')}"
+        )
+        rows.append(_issue_row(logger_value, "Outlier", "outlier", item, issue))
+
+    return rows
+
+
+def _export_issue_evidence_csv(
+    output_dir: Optional[str],
+    logger_value: str,
+    rows: List[Dict[str, Any]],
+) -> Optional[str]:
+    if not output_dir:
+        return None
+    datasets_dir = os.path.join(output_dir, "_datasets")
+    os.makedirs(datasets_dir, exist_ok=True)
+    output_path = os.path.join(
+        datasets_dir,
+        f"04_issue_evidence_{_safe_report_asset_slug(logger_value)}.csv",
+    )
+    pd.DataFrame(rows).to_csv(output_path, index=False)
+    logger.info("Exported issue evidence CSV: %s (%d rows)", output_path, len(rows))
+    return output_path
 
 
 def _metric_total_depth(
@@ -177,11 +272,26 @@ def build_html_report(
     resolved_image_mode = _normalize_image_mode(include_images, image_mode)
     image_output_dir = None
     image_relative_dir = None
+    if resolved_image_mode == "embedded":
+        evidence_image_limit = EMBEDDED_IMAGE_LIMIT_PER_REPORT
+    elif resolved_image_mode == "thumbnail":
+        evidence_image_limit = THUMBNAIL_IMAGE_LIMIT_PER_REPORT
+    else:
+        evidence_image_limit = 0
     if resolved_image_mode == "thumbnail" and effective_output_dir:
         logger_slug = _safe_report_asset_slug(logger_value)
         image_relative_dir = posixpath.join("assets", logger_slug, "images")
         image_output_dir = os.path.join(effective_output_dir, "assets", logger_slug, "images")
         logger.info("Interval thumbnails will be saved to: %s", image_output_dir)
+    logger.info(
+        "Building logging review HTML for %s: assay=%d, logging=%d, image_mode=%s, image_limit=%d, html_row_limit=%d",
+        logger_value,
+        len(assay_logger_df),
+        len(logging_logger_df),
+        resolved_image_mode,
+        evidence_image_limit,
+        EVIDENCE_HTML_ROW_LIMIT,
+    )
 
     image_cache = {} if (data_coordinator and resolved_image_mode != "none") else None
     image_asset_cache = {} if (data_coordinator and resolved_image_mode == "thumbnail") else None
@@ -191,6 +301,7 @@ def build_html_report(
         "image_output_dir": image_output_dir,
         "image_relative_dir": image_relative_dir,
         "image_asset_cache": image_asset_cache,
+        "image_limit": evidence_image_limit,
     }
     image_builder_kwargs = {
         "image_cache": image_cache,
@@ -325,7 +436,9 @@ def build_html_report(
                 })
 
     if data_coordinator and resolved_image_mode != "none":
-        for item in mineral_mismatch_intervals:
+        for idx, item in enumerate(mineral_mismatch_intervals):
+            if idx >= evidence_image_limit:
+                break
             item["image"] = _lookup_interval_image(
                 data_coordinator,
                 item.get("hole_id"),
@@ -348,7 +461,9 @@ def build_html_report(
         assay_df_for_zonation, zonation_cols, hole_col, depth_from_col, depth_to_col
     )
     if data_coordinator and resolved_image_mode != "none":
-        for item in zonation_mismatch_rows:
+        for idx, item in enumerate(zonation_mismatch_rows):
+            if idx >= evidence_image_limit:
+                break
             item["image"] = _lookup_interval_image(
                 data_coordinator,
                 item.get("hole_id"),
@@ -722,6 +837,27 @@ def build_html_report(
         min_strat_count=10, max_points=max_pts_pca
     )
 
+    logging_detail_issue_count = (
+        len(fines_intervals)
+        + len(clay_intervals)
+        + len(magnetite_intervals)
+        + len(goethite_intervals)
+        + len(carbonate_intervals)
+        + len(sulphide_intervals)
+        + len(manganese_intervals)
+        + len(mafics_intervals)
+        + len(magnesium_intervals)
+    )
+    logger.info(
+        "Issue counts for %s: mineralisation=%d, zonation=%d, logging_detail=%d, grouping=%d, outliers=%d",
+        logger_value,
+        len(mineral_mismatch_intervals),
+        len(zonation_mismatch_rows),
+        logging_detail_issue_count,
+        len(grouping_intervals),
+        len(outlier_rows),
+    )
+
     report_data: ReportData = {
         "meta": {
             "logger": logger_value,
@@ -842,6 +978,7 @@ def build_html_report(
         ],
     }
 
+    logger.info("Attaching capped evidence images for %s", logger_value)
     fines_with_images = _build_intervals_with_images(
         data_coordinator, fines_intervals, include_images, **image_builder_kwargs
     )
@@ -934,13 +1071,19 @@ def build_html_report(
         ),
     }
 
+    issue_rows = _build_issue_evidence_rows(logger_value, report_data, intervals_for_review)
+    _export_issue_evidence_csv(effective_output_dir, logger_value, issue_rows)
+
     if output_path:
+        logger.info("Rendering HTML report: %s", output_path)
         with open(output_path, "w", encoding="utf-8") as f:
             render_html(
                 report_data, intervals_for_review, logo_path, page_options,
                 charts_dir=charts_dir, stream=f
             )
+        logger.info("Rendered HTML report: %s", output_path)
         return output_path
+    logger.info("Rendering HTML report for %s in memory", logger_value)
     return render_html(
         report_data, intervals_for_review, logo_path, page_options, charts_dir=charts_dir
     )
